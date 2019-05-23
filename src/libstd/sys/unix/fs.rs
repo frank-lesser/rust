@@ -2,7 +2,7 @@ use crate::os::unix::prelude::*;
 
 use crate::ffi::{CString, CStr, OsString, OsStr};
 use crate::fmt;
-use crate::io::{self, Error, ErrorKind, SeekFrom, IoVec, IoVecMut};
+use crate::io::{self, Error, ErrorKind, SeekFrom, IoSlice, IoSliceMut};
 use crate::mem;
 use crate::path::{Path, PathBuf};
 use crate::ptr;
@@ -147,8 +147,7 @@ impl FileAttr {
         }))
     }
 
-    #[cfg(any(target_os = "bitrig",
-              target_os = "freebsd",
+    #[cfg(any(target_os = "freebsd",
               target_os = "openbsd",
               target_os = "macos",
               target_os = "ios"))]
@@ -159,8 +158,7 @@ impl FileAttr {
         }))
     }
 
-    #[cfg(not(any(target_os = "bitrig",
-                  target_os = "freebsd",
+    #[cfg(not(any(target_os = "freebsd",
                   target_os = "openbsd",
                   target_os = "macos",
                   target_os = "ios")))]
@@ -355,7 +353,6 @@ impl DirEntry {
 
     #[cfg(any(target_os = "freebsd",
               target_os = "openbsd",
-              target_os = "bitrig",
               target_os = "netbsd",
               target_os = "dragonfly"))]
     pub fn ino(&self) -> u64 {
@@ -367,8 +364,7 @@ impl DirEntry {
               target_os = "netbsd",
               target_os = "openbsd",
               target_os = "freebsd",
-              target_os = "dragonfly",
-              target_os = "bitrig"))]
+              target_os = "dragonfly"))]
     fn name_bytes(&self) -> &[u8] {
         use crate::slice;
         unsafe {
@@ -567,7 +563,7 @@ impl File {
         self.0.read(buf)
     }
 
-    pub fn read_vectored(&self, bufs: &mut [IoVecMut<'_>]) -> io::Result<usize> {
+    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         self.0.read_vectored(bufs)
     }
 
@@ -579,7 +575,7 @@ impl File {
         self.0.write(buf)
     }
 
-    pub fn write_vectored(&self, bufs: &[IoVec<'_>]) -> io::Result<usize> {
+    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         self.0.write_vectored(bufs)
     }
 
@@ -823,24 +819,28 @@ pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_vec(buf)))
 }
 
-fn open_and_set_permissions(
-    from: &Path,
-    to: &Path,
-) -> io::Result<(crate::fs::File, crate::fs::File, u64, crate::fs::Metadata)> {
-    use crate::fs::{File, OpenOptions};
-    use crate::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+fn open_from(from: &Path) -> io::Result<(crate::fs::File, crate::fs::Metadata)> {
+    use crate::fs::File;
 
     let reader = File::open(from)?;
-    let (perm, len) = {
-        let metadata = reader.metadata()?;
-        if !metadata.is_file() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "the source path is not an existing regular file",
-            ));
-        }
-        (metadata.permissions(), metadata.len())
-    };
+    let metadata = reader.metadata()?;
+    if !metadata.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "the source path is not an existing regular file",
+        ));
+    }
+    Ok((reader, metadata))
+}
+
+fn open_to_and_set_permissions(
+    to: &Path,
+    reader_metadata: crate::fs::Metadata,
+) -> io::Result<(crate::fs::File, crate::fs::Metadata)> {
+    use crate::fs::OpenOptions;
+    use crate::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let perm = reader_metadata.permissions();
     let writer = OpenOptions::new()
         // create the file with the correct mode right away
         .mode(perm.mode())
@@ -855,7 +855,7 @@ fn open_and_set_permissions(
         // pipes/FIFOs or device nodes.
         writer.set_permissions(perm)?;
     }
-    Ok((reader, writer, len, writer_metadata))
+    Ok((writer, writer_metadata))
 }
 
 #[cfg(not(any(target_os = "linux",
@@ -863,7 +863,8 @@ fn open_and_set_permissions(
               target_os = "macos",
               target_os = "ios")))]
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
-    let (mut reader, mut writer, _, _) = open_and_set_permissions(from, to)?;
+    let (mut reader, reader_metadata) = open_from(from)?;
+    let (mut writer, _) = open_to_and_set_permissions(to, reader_metadata)?;
 
     io::copy(&mut reader, &mut writer)
 }
@@ -896,7 +897,9 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
         )
     }
 
-    let (mut reader, mut writer, len, _) = open_and_set_permissions(from, to)?;
+    let (mut reader, reader_metadata) = open_from(from)?;
+    let len = reader_metadata.len();
+    let (mut writer, _) = open_to_and_set_permissions(to, reader_metadata)?;
 
     let has_copy_file_range = HAS_COPY_FILE_RANGE.load(Ordering::Relaxed);
     let mut written = 0u64;
@@ -955,6 +958,8 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
+    use crate::sync::atomic::{AtomicBool, Ordering};
+
     const COPYFILE_ACL: u32 = 1 << 0;
     const COPYFILE_STAT: u32 = 1 << 1;
     const COPYFILE_XATTR: u32 = 1 << 2;
@@ -1000,7 +1005,48 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
         }
     }
 
-    let (reader, writer, _, writer_metadata) = open_and_set_permissions(from, to)?;
+    // MacOS prior to 10.12 don't support `fclonefileat`
+    // We store the availability in a global to avoid unnecessary syscalls
+    static HAS_FCLONEFILEAT: AtomicBool = AtomicBool::new(true);
+    syscall! {
+        fn fclonefileat(
+            srcfd: libc::c_int,
+            dst_dirfd: libc::c_int,
+            dst: *const libc::c_char,
+            flags: libc::c_int
+        ) -> libc::c_int
+    }
+
+    let (reader, reader_metadata) = open_from(from)?;
+
+    // Opportunistically attempt to create a copy-on-write clone of `from`
+    // using `fclonefileat`.
+    if HAS_FCLONEFILEAT.load(Ordering::Relaxed) {
+        let to = cstr(to)?;
+        let clonefile_result = cvt(unsafe {
+            fclonefileat(
+                reader.as_raw_fd(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                0,
+            )
+        });
+        match clonefile_result {
+            Ok(_) => return Ok(reader_metadata.len()),
+            Err(err) => match err.raw_os_error() {
+                // `fclonefileat` will fail on non-APFS volumes, if the
+                // destination already exists, or if the source and destination
+                // are on different devices. In all these cases `fcopyfile`
+                // should succeed.
+                Some(libc::ENOTSUP) | Some(libc::EEXIST) | Some(libc::EXDEV) => (),
+                Some(libc::ENOSYS) => HAS_FCLONEFILEAT.store(false, Ordering::Relaxed),
+                _ => return Err(err),
+            }
+        }
+    }
+
+    // Fall back to using `fcopyfile` if `fclonefileat` does not succeed.
+    let (writer, writer_metadata) = open_to_and_set_permissions(to, reader_metadata)?;
 
     // We ensure that `FreeOnDrop` never contains a null pointer so it is
     // always safe to call `copyfile_state_free`

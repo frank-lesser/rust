@@ -5,6 +5,7 @@ use rustc::mir;
 use rustc::middle::lang_items::ExchangeMallocFnLangItem;
 use rustc_apfloat::{ieee, Float, Status, Round};
 use std::{u128, i128};
+use syntax::symbol::sym;
 
 use crate::base;
 use crate::MemFlags;
@@ -181,9 +182,8 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     mir::CastKind::Pointer(PointerCast::ReifyFnPointer) => {
                         match operand.layout.ty.sty {
                             ty::FnDef(def_id, substs) => {
-                                if bx.cx().tcx().has_attr(def_id, "rustc_args_required_const") {
-                                    bug!("reifying a fn ptr that requires \
-                                          const arguments");
+                                if bx.cx().tcx().has_attr(def_id, sym::rustc_args_required_const) {
+                                    bug!("reifying a fn ptr that requires const arguments");
                                 }
                                 OperandValue::Immediate(
                                     callee::resolve_and_get_fn(bx.cx(), def_id, substs))
@@ -271,13 +271,12 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         let ll_t_in = bx.cx().immediate_backend_type(operand.layout);
                         match operand.layout.variants {
                             layout::Variants::Single { index } => {
-                                if let Some(def) = operand.layout.ty.ty_adt_def() {
-                                    let discr_val = def
-                                        .discriminant_for_variant(bx.cx().tcx(), index)
-                                        .val;
-                                    let discr = bx.cx().const_uint_big(ll_t_out, discr_val);
+                                if let Some(discr) =
+                                    operand.layout.ty.discriminant_for_variant(bx.tcx(), index)
+                                {
+                                    let discr_val = bx.cx().const_uint_big(ll_t_out, discr.val);
                                     return (bx, OperandRef {
-                                        val: OperandValue::Immediate(discr),
+                                        val: OperandValue::Immediate(discr_val),
                                         layout: cast,
                                     });
                                 }
@@ -371,7 +370,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 (bx, OperandRef {
                     val,
                     layout: self.cx.layout_of(self.cx.tcx().mk_ref(
-                        self.cx.tcx().types.re_erased,
+                        self.cx.tcx().lifetimes.re_erased,
                         ty::TypeAndMut { ty, mutbl: bk.to_mutbl_lossy() }
                     )),
                 })

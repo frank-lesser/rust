@@ -14,7 +14,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use build_helper::output;
+use build_helper::{output, t};
 use cmake;
 use cc;
 
@@ -317,6 +317,10 @@ fn check_llvm_version(builder: &Builder<'_>, llvm_config: &Path) {
 fn configure_cmake(builder: &Builder<'_>,
                    target: Interned<String>,
                    cfg: &mut cmake::Config) {
+    // Do not print installation messages for up-to-date files.
+    // LLVM and LLD builds can produce a lot of those and hit CI limits on log size.
+    cfg.define("CMAKE_INSTALL_MESSAGE", "LAZY");
+
     if builder.config.ninja {
         cfg.generator("Ninja");
     }
@@ -436,7 +440,7 @@ fn configure_cmake(builder: &Builder<'_>,
     }
 
     if env::var_os("SCCACHE_ERROR_LOG").is_some() {
-        cfg.env("RUST_LOG", "sccache=warn");
+        cfg.env("RUSTC_LOG", "sccache=warn");
     }
 }
 

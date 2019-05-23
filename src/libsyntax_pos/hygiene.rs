@@ -7,8 +7,8 @@
 
 use crate::GLOBALS;
 use crate::Span;
-use crate::edition::{Edition, DEFAULT_EDITION};
-use crate::symbol::{keywords, Symbol};
+use crate::edition::Edition;
+use crate::symbol::{kw, Symbol};
 
 use serialize::{Encodable, Decodable, Encoder, Decoder};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
@@ -174,7 +174,6 @@ crate struct HygieneData {
     marks: Vec<MarkData>,
     syntax_contexts: Vec<SyntaxContextData>,
     markings: FxHashMap<(SyntaxContext, Mark, Transparency), SyntaxContext>,
-    default_edition: Edition,
 }
 
 impl HygieneData {
@@ -193,24 +192,15 @@ impl HygieneData {
                 prev_ctxt: SyntaxContext(0),
                 opaque: SyntaxContext(0),
                 opaque_and_semitransparent: SyntaxContext(0),
-                dollar_crate_name: keywords::DollarCrate.name(),
+                dollar_crate_name: kw::DollarCrate,
             }],
             markings: FxHashMap::default(),
-            default_edition: DEFAULT_EDITION,
         }
     }
 
     fn with<T, F: FnOnce(&mut HygieneData) -> T>(f: F) -> T {
         GLOBALS.with(|globals| f(&mut *globals.hygiene_data.borrow_mut()))
     }
-}
-
-pub fn default_edition() -> Edition {
-    HygieneData::with(|data| data.default_edition)
-}
-
-pub fn set_default_edition(edition: Edition) {
-    HygieneData::with(|data| data.default_edition = edition);
 }
 
 pub fn clear_markings() {
@@ -255,7 +245,7 @@ impl SyntaxContext {
                 prev_ctxt: SyntaxContext::empty(),
                 opaque: SyntaxContext::empty(),
                 opaque_and_semitransparent: SyntaxContext::empty(),
-                dollar_crate_name: keywords::DollarCrate.name(),
+                dollar_crate_name: kw::DollarCrate,
             });
             SyntaxContext(data.syntax_contexts.len() as u32 - 1)
         })
@@ -322,7 +312,7 @@ impl SyntaxContext {
                         prev_ctxt,
                         opaque: new_opaque,
                         opaque_and_semitransparent: new_opaque,
-                        dollar_crate_name: keywords::DollarCrate.name(),
+                        dollar_crate_name: kw::DollarCrate,
                     });
                     new_opaque
                 });
@@ -340,7 +330,7 @@ impl SyntaxContext {
                         prev_ctxt,
                         opaque,
                         opaque_and_semitransparent: new_opaque_and_semitransparent,
-                        dollar_crate_name: keywords::DollarCrate.name(),
+                        dollar_crate_name: kw::DollarCrate,
                     });
                     new_opaque_and_semitransparent
                 });
@@ -356,7 +346,7 @@ impl SyntaxContext {
                     prev_ctxt,
                     opaque,
                     opaque_and_semitransparent,
-                    dollar_crate_name: keywords::DollarCrate.name(),
+                    dollar_crate_name: kw::DollarCrate,
                 });
                 new_opaque_and_semitransparent_and_transparent
             })
@@ -522,7 +512,7 @@ impl SyntaxContext {
                 &mut data.syntax_contexts[self.0 as usize].dollar_crate_name, dollar_crate_name
             );
             assert!(dollar_crate_name == prev_dollar_crate_name ||
-                    prev_dollar_crate_name == keywords::DollarCrate.name(),
+                    prev_dollar_crate_name == kw::DollarCrate,
                     "$crate name is reset for a syntax context");
         })
     }
@@ -591,6 +581,10 @@ impl ExpnFormat {
 /// The kind of compiler desugaring.
 #[derive(Clone, Copy, Hash, Debug, PartialEq, Eq, RustcEncodable, RustcDecodable)]
 pub enum CompilerDesugaringKind {
+    /// We desugar `if c { i } else { e }` to `match $ExprKind::Use(c) { true => i, _ => e }`.
+    /// However, we do not want to blame `c` for unreachability but rather say that `i`
+    /// is unreachable. This desugaring kind allows us to avoid blaming `c`.
+    IfTemporary,
     QuestionMark,
     TryBlock,
     /// Desugaring of an `impl Trait` in return type position
@@ -598,13 +592,16 @@ pub enum CompilerDesugaringKind {
     /// `impl Trait` with `Foo`.
     ExistentialReturnType,
     Async,
+    Await,
     ForLoop,
 }
 
 impl CompilerDesugaringKind {
     pub fn name(self) -> Symbol {
         Symbol::intern(match self {
+            CompilerDesugaringKind::IfTemporary => "if",
             CompilerDesugaringKind::Async => "async",
+            CompilerDesugaringKind::Await => "await",
             CompilerDesugaringKind::QuestionMark => "?",
             CompilerDesugaringKind::TryBlock => "try block",
             CompilerDesugaringKind::ExistentialReturnType => "existential type",

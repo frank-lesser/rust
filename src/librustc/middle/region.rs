@@ -119,18 +119,18 @@ impl fmt::Debug for Scope {
 pub enum ScopeData {
     Node,
 
-    // Scope of the call-site for a function or closure
-    // (outlives the arguments as well as the body).
+    /// Scope of the call-site for a function or closure
+    /// (outlives the arguments as well as the body).
     CallSite,
 
-    // Scope of arguments passed to a function or closure
-    // (they outlive its body).
+    /// Scope of arguments passed to a function or closure
+    /// (they outlive its body).
     Arguments,
 
-    // Scope of destructors for temporaries of node-id.
+    /// Scope of destructors for temporaries of node-id.
     Destruction,
 
-    // Scope following a `let id = expr;` binding in a block.
+    /// Scope following a `let id = expr;` binding in a block.
     Remainder(FirstStatementIndex)
 }
 
@@ -152,13 +152,13 @@ newtype_index! {
     ///
     /// * The subscope with `first_statement_index == 1` is scope of `c`,
     ///   and thus does not include EXPR_2, but covers the `...`.
-    pub struct FirstStatementIndex { .. }
+    pub struct FirstStatementIndex {
+        derive [HashStable]
+    }
 }
 
-impl_stable_hash_for!(struct crate::middle::region::FirstStatementIndex { private });
-
 // compilation error if size of `ScopeData` is not the same as a `u32`
-static_assert!(ASSERT_SCOPE_DATA: mem::size_of::<ScopeData>() == 4);
+static_assert_size!(ScopeData, 4);
 
 impl Scope {
     /// Returns a item-local ID associated with this scope.
@@ -814,6 +814,16 @@ fn resolve_block<'a, 'tcx>(visitor: &mut RegionResolutionVisitor<'a, 'tcx>, blk:
 }
 
 fn resolve_arm<'a, 'tcx>(visitor: &mut RegionResolutionVisitor<'a, 'tcx>, arm: &'tcx hir::Arm) {
+    let prev_cx = visitor.cx;
+
+    visitor.enter_scope(
+        Scope {
+            id: arm.hir_id.local_id,
+            data: ScopeData::Node,
+        }
+    );
+    visitor.cx.var_parent = visitor.cx.parent;
+
     visitor.terminating_scopes.insert(arm.body.hir_id.local_id);
 
     if let Some(hir::Guard::If(ref expr)) = arm.guard {
@@ -821,6 +831,8 @@ fn resolve_arm<'a, 'tcx>(visitor: &mut RegionResolutionVisitor<'a, 'tcx>, arm: &
     }
 
     intravisit::walk_arm(visitor, arm);
+
+    visitor.cx = prev_cx;
 }
 
 fn resolve_pat<'a, 'tcx>(visitor: &mut RegionResolutionVisitor<'a, 'tcx>, pat: &'tcx hir::Pat) {
@@ -884,17 +896,6 @@ fn resolve_expr<'a, 'tcx>(visitor: &mut RegionResolutionVisitor<'a, 'tcx>, expr:
                     terminating(r.hir_id.local_id);
             }
 
-            hir::ExprKind::If(ref expr, ref then, Some(ref otherwise)) => {
-                terminating(expr.hir_id.local_id);
-                terminating(then.hir_id.local_id);
-                terminating(otherwise.hir_id.local_id);
-            }
-
-            hir::ExprKind::If(ref expr, ref then, None) => {
-                terminating(expr.hir_id.local_id);
-                terminating(then.hir_id.local_id);
-            }
-
             hir::ExprKind::Loop(ref body, _, _) => {
                 terminating(body.hir_id.local_id);
             }
@@ -904,12 +905,8 @@ fn resolve_expr<'a, 'tcx>(visitor: &mut RegionResolutionVisitor<'a, 'tcx>, expr:
                 terminating(body.hir_id.local_id);
             }
 
-            hir::ExprKind::Match(..) => {
-                visitor.cx.var_parent = visitor.cx.parent;
-            }
-
-            hir::ExprKind::Use(ref expr) => {
-                // `Use(expr)` does not denote a conditional scope.
+            hir::ExprKind::DropTemps(ref expr) => {
+                // `DropTemps(expr)` does not denote a conditional scope.
                 // Rather, we want to achieve the same behavior as `{ let _t = expr; _t }`.
                 terminating(expr.hir_id.local_id);
             }

@@ -13,7 +13,7 @@
 //! DumpVisitor walks the AST and processes it, and JsonDumper is used for
 //! recording the output.
 
-use rustc::hir::def::Def as HirDef;
+use rustc::hir::def::{Res, DefKind as HirDefKind};
 use rustc::hir::def_id::DefId;
 use rustc::session::config::Input;
 use rustc::span_bug;
@@ -233,8 +233,8 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
     }
 
     fn lookup_def_id(&self, ref_id: NodeId) -> Option<DefId> {
-        match self.save_ctxt.get_path_def(ref_id) {
-            HirDef::PrimTy(..) | HirDef::SelfTy(..) | HirDef::Err => None,
+        match self.save_ctxt.get_path_res(ref_id) {
+            Res::PrimTy(..) | Res::SelfTy(..) | Res::Err => None,
             def => Some(def.def_id()),
         }
     }
@@ -463,10 +463,12 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
         }
 
         // walk type and init value
-        self.visit_ty(typ);
-        if let Some(expr) = expr {
-            self.visit_expr(expr);
-        }
+        self.nest_tables(id, |v| {
+            v.visit_ty(typ);
+            if let Some(expr) = expr {
+                v.visit_expr(expr);
+            }
+        });
     }
 
     // FIXME tuple structs should generate tuple-specific data.
@@ -884,7 +886,7 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
                         return;
                     }
                 };
-                let variant = adt.variant_of_def(self.save_ctxt.get_path_def(p.id));
+                let variant = adt.variant_of_res(self.save_ctxt.get_path_res(p.id));
 
                 for &Spanned { node: ref field, .. } in fields {
                     if let Some(index) = self.tcx.find_field_index(field.ident, variant) {
@@ -914,8 +916,8 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
 
         // process collected paths
         for (id, ident, immut) in collector.collected_idents {
-            match self.save_ctxt.get_path_def(id) {
-                HirDef::Local(hir_id) => {
+            match self.save_ctxt.get_path_res(id) {
+                Res::Local(hir_id) => {
                     let mut value = if immut == ast::Mutability::Immutable {
                         self.span.snippet(ident.span)
                     } else {
@@ -957,14 +959,14 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
                         );
                     }
                 }
-                HirDef::Ctor(_, _, _) |
-                HirDef::Const(..) |
-                HirDef::AssociatedConst(..) |
-                HirDef::Struct(..) |
-                HirDef::Variant(..) |
-                HirDef::TyAlias(..) |
-                HirDef::AssociatedTy(..) |
-                HirDef::SelfTy(..) => {
+                Res::Def(HirDefKind::Ctor(..), _) |
+                Res::Def(HirDefKind::Const, _) |
+                Res::Def(HirDefKind::AssociatedConst, _) |
+                Res::Def(HirDefKind::Struct, _) |
+                Res::Def(HirDefKind::Variant, _) |
+                Res::Def(HirDefKind::TyAlias, _) |
+                Res::Def(HirDefKind::AssociatedTy, _) |
+                Res::SelfTy(..) => {
                     self.dump_path_ref(id, &ast::Path::from_ident(ident));
                 }
                 def => error!(
@@ -1175,13 +1177,13 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
                 );
             }
             ast::ImplItemKind::Type(ref ty) => {
-                // FIXME uses of the assoc type should ideally point to this
+                // FIXME: uses of the assoc type should ideally point to this
                 // 'def' and the name here should be a ref to the def in the
                 // trait.
                 self.visit_ty(ty)
             }
             ast::ImplItemKind::Existential(ref bounds) => {
-                // FIXME uses of the assoc type should ideally point to this
+                // FIXME: uses of the assoc type should ideally point to this
                 // 'def' and the name here should be a ref to the def in the
                 // trait.
                 for bound in bounds.iter() {
@@ -1214,7 +1216,7 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
         let hir_id = self.tcx.hir().node_to_hir_id(id);
         let access = access_from!(self.save_ctxt, root_item, hir_id);
 
-        // The parent def id of a given use tree is always the enclosing item.
+        // The parent `DefId` of a given use tree is always the enclosing item.
         let parent = self.save_ctxt.tcx.hir().opt_local_def_id(id)
             .and_then(|id| self.save_ctxt.tcx.parent(id))
             .map(id_from_def_id);
@@ -1538,8 +1540,8 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> Visitor<'l> for DumpVisitor<'l, 'tc
                     }
                 };
                 let node_id = self.save_ctxt.tcx.hir().hir_to_node_id(hir_expr.hir_id);
-                let def = self.save_ctxt.get_path_def(node_id);
-                self.process_struct_lit(ex, path, fields, adt.variant_of_def(def), base)
+                let res = self.save_ctxt.get_path_res(node_id);
+                self.process_struct_lit(ex, path, fields, adt.variant_of_res(res), base)
             }
             ast::ExprKind::MethodCall(ref seg, ref args) => self.process_method_call(ex, seg, args),
             ast::ExprKind::Field(ref sub_ex, _) => {

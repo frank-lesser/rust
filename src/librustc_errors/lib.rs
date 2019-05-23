@@ -26,6 +26,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::{error, fmt};
 use std::panic;
+use std::path::Path;
 
 use termcolor::{ColorSpec, Color};
 
@@ -294,8 +295,8 @@ impl error::Error for ExplicitBug {
 pub use diagnostic::{Diagnostic, SubDiagnostic, DiagnosticStyledString, DiagnosticId};
 pub use diagnostic_builder::DiagnosticBuilder;
 
-/// A handler deals with errors; certain errors
-/// (fatal, bug, unimpl) may cause immediate exit,
+/// A handler deals with errors and other compiler output.
+/// Certain errors (fatal, bug, unimpl) may cause immediate exit,
 /// others log errors for later reporting.
 pub struct Handler {
     pub flags: HandlerFlags,
@@ -736,7 +737,7 @@ impl Handler {
     }
 
     pub fn force_print_db(&self, mut db: DiagnosticBuilder<'_>) {
-        self.emitter.borrow_mut().emit(&db);
+        self.emitter.borrow_mut().emit_diagnostic(&db);
         db.cancel();
     }
 
@@ -761,14 +762,17 @@ impl Handler {
         // Only emit the diagnostic if we haven't already emitted an equivalent
         // one:
         if self.emitted_diagnostics.borrow_mut().insert(diagnostic_hash) {
-            self.emitter.borrow_mut().emit(db);
+            self.emitter.borrow_mut().emit_diagnostic(db);
             if db.is_error() {
                 self.bump_err_count();
             }
         }
     }
-}
 
+    pub fn emit_artifact_notification(&self, path: &Path, artifact_type: &str) {
+        self.emitter.borrow_mut().emit_artifact_notification(path, artifact_type);
+    }
+}
 
 #[derive(Copy, PartialEq, Clone, Hash, Debug, RustcEncodable, RustcDecodable)]
 pub enum Level {

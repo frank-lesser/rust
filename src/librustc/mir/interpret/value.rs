@@ -2,6 +2,7 @@ use std::fmt;
 use rustc_macros::HashStable;
 
 use crate::ty::{Ty, InferConst, ParamConst, layout::{HasDataLayout, Size}, subst::SubstsRef};
+use crate::ty::PlaceholderConst;
 use crate::hir::def_id::DefId;
 
 use super::{EvalResult, Pointer, PointerArithmetic, Allocation, AllocId, sign_extend, truncate};
@@ -25,6 +26,9 @@ pub enum ConstValue<'tcx> {
 
     /// Infer the value of the const.
     Infer(InferConst<'tcx>),
+
+    /// A placeholder const - universally quantified higher-ranked const.
+    Placeholder(PlaceholderConst),
 
     /// Used only for types with `layout::abi::Scalar` ABI and ZSTs.
     ///
@@ -50,7 +54,7 @@ pub enum ConstValue<'tcx> {
 }
 
 #[cfg(target_arch = "x86_64")]
-static_assert!(CONST_SIZE: ::std::mem::size_of::<ConstValue<'static>>() == 40);
+static_assert_size!(ConstValue<'_>, 40);
 
 impl<'tcx> ConstValue<'tcx> {
     #[inline]
@@ -58,6 +62,7 @@ impl<'tcx> ConstValue<'tcx> {
         match *self {
             ConstValue::Param(_) |
             ConstValue::Infer(_) |
+            ConstValue::Placeholder(_) |
             ConstValue::ByRef(..) |
             ConstValue::Unevaluated(..) |
             ConstValue::Slice(..) => None,
@@ -106,7 +111,7 @@ pub enum Scalar<Tag=(), Id=AllocId> {
 }
 
 #[cfg(target_arch = "x86_64")]
-static_assert!(SCALAR_SIZE: ::std::mem::size_of::<Scalar>() == 24);
+static_assert_size!(Scalar, 24);
 
 impl<Tag> fmt::Display for Scalar<Tag> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

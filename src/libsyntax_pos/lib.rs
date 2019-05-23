@@ -26,6 +26,7 @@ use serialize::{Encodable, Decodable, Encoder, Decoder};
 extern crate serialize as rustc_serialize; // used by deriving
 
 pub mod edition;
+use edition::Edition;
 pub mod hygiene;
 pub use hygiene::{Mark, SyntaxContext, ExpnInfo, ExpnFormat, CompilerDesugaringKind};
 
@@ -33,7 +34,7 @@ mod span_encoding;
 pub use span_encoding::{Span, DUMMY_SP};
 
 pub mod symbol;
-pub use symbol::symbols;
+pub use symbol::{Symbol, sym};
 
 mod analyze_source_file;
 
@@ -52,14 +53,16 @@ pub struct Globals {
     symbol_interner: Lock<symbol::Interner>,
     span_interner: Lock<span_encoding::SpanInterner>,
     hygiene_data: Lock<hygiene::HygieneData>,
+    edition: Edition,
 }
 
 impl Globals {
-    pub fn new() -> Globals {
+    pub fn new(edition: Edition) -> Globals {
         Globals {
             symbol_interner: Lock::new(symbol::Interner::fresh()),
             span_interner: Lock::new(span_encoding::SpanInterner::default()),
             hygiene_data: Lock::new(hygiene::HygieneData::new()),
+            edition,
         }
     }
 }
@@ -356,8 +359,9 @@ impl Span {
 
     /// Edition of the crate from which this span came.
     pub fn edition(self) -> edition::Edition {
-        self.ctxt().outer().expn_info().map_or_else(|| hygiene::default_edition(),
-                                                    |einfo| einfo.edition)
+        self.ctxt().outer().expn_info().map_or_else(|| {
+            Edition::from_session()
+        }, |einfo| einfo.edition)
     }
 
     #[inline]
@@ -388,12 +392,12 @@ impl Span {
     /// Checks if a span is "internal" to a macro in which `#[unstable]`
     /// items can be used (that is, a macro marked with
     /// `#[allow_internal_unstable]`).
-    pub fn allows_unstable(&self, feature: &str) -> bool {
+    pub fn allows_unstable(&self, feature: Symbol) -> bool {
         match self.ctxt().outer().expn_info() {
             Some(info) => info
                 .allow_internal_unstable
                 .map_or(false, |features| features.iter().any(|&f|
-                    f == feature || f == "allow_internal_unstable_backcompat_hack"
+                    f == feature || f == sym::allow_internal_unstable_backcompat_hack
                 )),
             None => false,
         }

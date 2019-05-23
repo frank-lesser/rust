@@ -29,6 +29,7 @@ use syntax::feature_gate::{self, AttributeType};
 use syntax::json::JsonEmitter;
 use syntax::source_map;
 use syntax::parse::{self, ParseSess};
+use syntax::symbol::Symbol;
 use syntax_pos::{MultiSpan, Span};
 use crate::util::profiling::SelfProfiler;
 
@@ -86,7 +87,7 @@ pub struct Session {
     /// in order to avoid redundantly verbose output (Issue #24690, #44953).
     pub one_time_diagnostics: Lock<FxHashSet<(DiagnosticMessageId, Option<Span>, String)>>,
     pub plugin_llvm_passes: OneThread<RefCell<Vec<String>>>,
-    pub plugin_attributes: Lock<Vec<(String, AttributeType)>>,
+    pub plugin_attributes: Lock<Vec<(Symbol, AttributeType)>>,
     pub crate_types: Once<Vec<config::CrateType>>,
     pub dependency_formats: Once<dependency_format::Dependencies>,
     /// The crate_disambiguator is constructed out of all the `-C metadata`
@@ -407,9 +408,6 @@ impl Session {
     }
     pub fn next_node_id(&self) -> NodeId {
         self.reserve_node_ids(1)
-    }
-    pub(crate) fn current_node_id_count(&self) -> usize {
-        self.next_node_id.get().as_u32() as usize
     }
     pub fn diagnostic<'a>(&'a self) -> &'a errors::Handler {
         &self.parse_sess.span_diagnostic
@@ -1078,8 +1076,7 @@ fn default_emitter(
 
 pub enum DiagnosticOutput {
     Default,
-    Raw(Box<dyn Write + Send>),
-    Emitter(Box<dyn Emitter + Send + sync::Send>)
+    Raw(Box<dyn Write + Send>)
 }
 
 pub fn build_session_with_source_map(
@@ -1115,7 +1112,6 @@ pub fn build_session_with_source_map(
         DiagnosticOutput::Raw(write) => {
             default_emitter(&sopts, registry, &source_map, Some(write))
         }
-        DiagnosticOutput::Emitter(emitter) => emitter,
     };
 
     let diagnostic_handler = errors::Handler::with_emitter_and_flags(

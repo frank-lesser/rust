@@ -757,12 +757,12 @@ impl<'a, 'tcx> LateContext<'a, 'tcx> {
     /// Check if a `DefId`'s path matches the given absolute type path usage.
     ///
     /// # Examples
-    /// ```rust,ignore (no `cx` or `def_id` available)
+    ///
+    /// ```rust,ignore (no context or def id available)
     /// if cx.match_def_path(def_id, &["core", "option", "Option"]) {
     ///     // The given `def_id` is that of an `Option` type
     /// }
     /// ```
-    // Uplifted from rust-lang/rust-clippy
     pub fn match_def_path(&self, def_id: DefId, path: &[&str]) -> bool {
         let names = self.get_def_path(def_id);
 
@@ -772,13 +772,13 @@ impl<'a, 'tcx> LateContext<'a, 'tcx> {
     /// Gets the absolute path of `def_id` as a vector of `&str`.
     ///
     /// # Examples
-    /// ```rust,ignore (no `cx` or `def_id` available)
+    ///
+    /// ```rust,ignore (no context or def id available)
     /// let def_path = cx.get_def_path(def_id);
     /// if let &["core", "option", "Option"] = &def_path[..] {
     ///     // The given `def_id` is that of an `Option` type
     /// }
     /// ```
-    // Uplifted from rust-lang/rust-clippy
     pub fn get_def_path(&self, def_id: DefId) -> Vec<LocalInternedString> {
         pub struct AbsolutePathPrinter<'a, 'tcx> {
             pub tcx: TyCtxt<'a, 'tcx, 'tcx>,
@@ -828,8 +828,8 @@ impl<'a, 'tcx> LateContext<'a, 'tcx> {
 
                 // This shouldn't ever be needed, but just in case:
                 Ok(vec![match trait_ref {
-                    Some(trait_ref) => Symbol::intern(&format!("{:?}", trait_ref)).as_str(),
-                    None => Symbol::intern(&format!("<{}>", self_ty)).as_str(),
+                    Some(trait_ref) => LocalInternedString::intern(&format!("{:?}", trait_ref)),
+                    None => LocalInternedString::intern(&format!("<{}>", self_ty)),
                 }])
             }
 
@@ -845,9 +845,10 @@ impl<'a, 'tcx> LateContext<'a, 'tcx> {
                 // This shouldn't ever be needed, but just in case:
                 path.push(match trait_ref {
                     Some(trait_ref) => {
-                        Symbol::intern(&format!("<impl {} for {}>", trait_ref, self_ty)).as_str()
+                        LocalInternedString::intern(&format!("<impl {} for {}>", trait_ref,
+                                                    self_ty))
                     },
-                    None => Symbol::intern(&format!("<impl {}>", self_ty)).as_str(),
+                    None => LocalInternedString::intern(&format!("<impl {}>", self_ty)),
                 });
 
                 Ok(path)
@@ -1334,14 +1335,19 @@ impl<'a, T: EarlyLintPass> ast_visit::Visitor<'a> for EarlyContextAndPass<'a, T>
         if let ast::IsAsync::Async { ref arguments, .. } = header.asyncness.node {
             for a in arguments {
                 // Visit the argument..
-                self.visit_pat(&a.arg.pat);
-                if let ast::ArgSource::AsyncFn(pat) = &a.arg.source {
-                    self.visit_pat(pat);
+                if let Some(arg) = &a.arg {
+                    self.visit_pat(&arg.pat);
+                    if let ast::ArgSource::AsyncFn(pat) = &arg.source {
+                        self.visit_pat(pat);
+                    }
+                    self.visit_ty(&arg.ty);
                 }
-                self.visit_ty(&a.arg.ty);
 
                 // ..and the statement.
-                self.visit_stmt(&a.stmt);
+                self.visit_stmt(&a.move_stmt);
+                if let Some(pat_stmt) = &a.pat_stmt {
+                    self.visit_stmt(&pat_stmt);
+                }
             }
         }
     }

@@ -68,6 +68,7 @@ use smallvec::{smallvec, SmallVec};
 use std::ops::Deref;
 use syntax::feature_gate;
 use syntax::ptr::P;
+use syntax::symbol::sym;
 use syntax_pos;
 
 struct Coerce<'a, 'gcx: 'a + 'tcx, 'tcx: 'a> {
@@ -620,7 +621,7 @@ impl<'f, 'gcx, 'tcx> Coerce<'f, 'gcx, 'tcx> {
 
         if has_unsized_tuple_coercion && !self.tcx.features().unsized_tuple_coercion {
             feature_gate::emit_feature_err(&self.tcx.sess.parse_sess,
-                                           "unsized_tuple_coercion",
+                                           sym::unsized_tuple_coercion,
                                            self.cause.span,
                                            feature_gate::GateIssue::Language,
                                            feature_gate::EXPLAIN_UNSIZED_TUPLE_COERCION);
@@ -721,9 +722,8 @@ impl<'f, 'gcx, 'tcx> Coerce<'f, 'gcx, 'tcx> {
 
         let b = self.shallow_resolve(b);
 
-        let hir_id_a = self.tcx.hir().as_local_hir_id(def_id_a).unwrap();
         match b.sty {
-            ty::FnPtr(fn_ty) if self.tcx.with_freevars(hir_id_a, |v| v.is_empty()) => {
+            ty::FnPtr(fn_ty) if self.tcx.upvars(def_id_a).map_or(true, |v| v.is_empty()) => {
                 // We coerce the closure, which has fn type
                 //     `extern "rust-call" fn((arg0,arg1,...)) -> _`
                 // to
@@ -1249,12 +1249,8 @@ impl<'gcx, 'tcx, 'exprs, E> CoerceMany<'gcx, 'tcx, 'exprs, E>
                     augment_error(&mut db);
                 }
 
-                if expression.filter(|e| fcx.is_assign_to_bool(e, expected)).is_some() {
-                    // Error reported in `check_assign` so avoid emitting error again.
-                    db.delay_as_bug();
-                } else {
-                    db.emit();
-                }
+                // Error possibly reported in `check_assign` so avoid emitting error again.
+                db.emit_unless(expression.filter(|e| fcx.is_assign_to_bool(e, expected)).is_some());
 
                 self.final_ty = Some(fcx.tcx.types.err);
             }

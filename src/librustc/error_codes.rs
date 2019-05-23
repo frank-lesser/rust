@@ -1,4 +1,3 @@
-// ignore-tidy-linelength
 #![allow(non_snake_case)]
 
 // Error messages for EXXXX errors.
@@ -362,10 +361,6 @@ Here are some simple examples of where you'll run into this error:
 struct Foo1 { x: &bool }
               // ^ expected lifetime parameter
 struct Foo2<'a> { x: &'a bool } // correct
-
-impl Foo2 {}
-  // ^^^^ expected lifetime parameter
-impl<'a> Foo2<'a> {} // correct
 
 struct Bar1 { x: Foo2 }
               // ^^^^ expected lifetime parameter
@@ -2209,4 +2204,7 @@ register_diagnostics! {
     E0710, // an unknown tool name found in scoped lint
     E0711, // a feature has been declared with conflicting stability attributes
 //  E0702, // replaced with a generic attribute input check
+    E0726, // non-explicit (not `'_`) elided lifetime in unsupported position
+    E0727, // `async` generators are not yet supported
+    E0728, // `await` must be in an `async` function or block
 }

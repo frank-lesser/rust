@@ -20,7 +20,7 @@ use std::mem;
 use std::u32;
 use rustc_target::spec::abi::Abi;
 use syntax::attr::{self, UnwindAttr};
-use syntax::symbol::keywords;
+use syntax::symbol::kw;
 use syntax_pos::Span;
 
 use super::lints;
@@ -343,6 +343,7 @@ struct Builder<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
 
     fn_span: Span,
     arg_count: usize,
+    is_generator: bool,
 
     /// The current set of scopes, updated as we traverse;
     /// see the `scope` module for more details.
@@ -659,7 +660,7 @@ fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
                 ty::UpvarCapture::ByRef(..) => true,
             };
             let mut debuginfo = UpvarDebuginfo {
-                debug_name: keywords::Invalid.name(),
+                debug_name: kw::Invalid,
                 by_ref,
             };
             let mut mutability = Mutability::Not;
@@ -689,7 +690,8 @@ fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
         return_ty,
         return_ty_span,
         upvar_debuginfo,
-        upvar_mutbls);
+        upvar_mutbls,
+        body.is_generator);
 
     let call_site_scope = region::Scope {
         id: body.value.hir_id.local_id,
@@ -702,13 +704,13 @@ fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
     let mut block = START_BLOCK;
     let source_info = builder.source_info(span);
     let call_site_s = (call_site_scope, source_info);
-    unpack!(block = builder.in_scope(call_site_s, LintLevel::Inherited, block, |builder| {
+    unpack!(block = builder.in_scope(call_site_s, LintLevel::Inherited, |builder| {
         if should_abort_on_panic(tcx, fn_def_id, abi) {
             builder.schedule_abort();
         }
 
         let arg_scope_s = (arg_scope, source_info);
-        unpack!(block = builder.in_scope(arg_scope_s, LintLevel::Inherited, block, |builder| {
+        unpack!(block = builder.in_scope(arg_scope_s, LintLevel::Inherited, |builder| {
             builder.args_and_body(block, &arguments, arg_scope, &body.value)
         }));
         // Attribute epilogue to function's closing brace
@@ -759,6 +761,7 @@ fn construct_const<'a, 'gcx, 'tcx>(
         const_ty_span,
         vec![],
         vec![],
+        false,
     );
 
     let mut block = START_BLOCK;
@@ -788,7 +791,7 @@ fn construct_error<'a, 'gcx, 'tcx>(hir: Cx<'a, 'gcx, 'tcx>,
     let owner_id = hir.tcx().hir().body_owner(body_id);
     let span = hir.tcx().hir().span(owner_id);
     let ty = hir.tcx().types.err;
-    let mut builder = Builder::new(hir, span, 0, Safety::Safe, ty, span, vec![], vec![]);
+    let mut builder = Builder::new(hir, span, 0, Safety::Safe, ty, span, vec![], vec![], false);
     let source_info = builder.source_info(span);
     builder.cfg.terminate(START_BLOCK, source_info, TerminatorKind::Unreachable);
     builder.finish(None)
@@ -802,7 +805,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
            return_ty: Ty<'tcx>,
            return_span: Span,
            __upvar_debuginfo_codegen_only_do_not_use: Vec<UpvarDebuginfo>,
-           upvar_mutbls: Vec<Mutability>)
+           upvar_mutbls: Vec<Mutability>,
+           is_generator: bool)
            -> Builder<'a, 'gcx, 'tcx> {
         let lint_level = LintLevel::Explicit(hir.root_lint_level);
         let mut builder = Builder {
@@ -810,6 +814,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             cfg: CFG { basic_blocks: IndexVec::new() },
             fn_span: span,
             arg_count,
+            is_generator,
             scopes: vec![],
             block_context: BlockContext::new(),
             source_scopes: IndexVec::new(),
@@ -945,10 +950,13 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                         self.var_indices.insert(var, LocalsForNode::One(local));
                     }
                     _ => {
-                        scope = self.declare_bindings(scope, ast_body.span,
-                                                      LintLevel::Inherited, &pattern,
-                                                      matches::ArmHasGuard(false),
-                                                      Some((Some(&place), span)));
+                        scope = self.declare_bindings(
+                            scope,
+                            ast_body.span,
+                            &pattern,
+                            matches::ArmHasGuard(false),
+                            Some((Some(&place), span)),
+                        );
                         unpack!(block = self.place_into_pattern(block, pattern, &place, false));
                     }
                 }

@@ -15,13 +15,13 @@ use rustc_data_structures::fx::FxHashMap;
 use syntax::ast::*;
 use syntax::attr;
 use syntax::source_map::Spanned;
-use syntax::symbol::keywords;
+use syntax::symbol::{kw, sym};
 use syntax::ptr::P;
 use syntax::visit::{self, Visitor};
 use syntax::{span_err, struct_span_err, walk_list};
 use syntax_ext::proc_macro_decls::is_proc_macro_attr;
-use syntax_pos::Span;
-use errors::Applicability;
+use syntax_pos::{Span, MultiSpan};
+use errors::{Applicability, FatalError};
 use log::debug;
 
 #[derive(Copy, Clone, Debug)]
@@ -54,21 +54,21 @@ struct AstValidator<'a> {
     has_proc_macro_decls: bool,
     has_global_allocator: bool,
 
-    // Used to ban nested `impl Trait`, e.g., `impl Into<impl Debug>`.
-    // Nested `impl Trait` _is_ allowed in associated type position,
-    // e.g `impl Iterator<Item=impl Debug>`
+    /// Used to ban nested `impl Trait`, e.g., `impl Into<impl Debug>`.
+    /// Nested `impl Trait` _is_ allowed in associated type position,
+    /// e.g `impl Iterator<Item=impl Debug>`
     outer_impl_trait: Option<OuterImplTrait>,
 
-    // Used to ban `impl Trait` in path projections like `<impl Iterator>::Item`
-    // or `Foo::Bar<impl Trait>`
+    /// Used to ban `impl Trait` in path projections like `<impl Iterator>::Item`
+    /// or `Foo::Bar<impl Trait>`
     is_impl_trait_banned: bool,
 
-    // rust-lang/rust#57979: the ban of nested `impl Trait` was buggy
-    // until PRs #57730 and #57981 landed: it would jump directly to
-    // walk_ty rather than visit_ty (or skip recurring entirely for
-    // impl trait in projections), and thus miss some cases. We track
-    // whether we should downgrade to a warning for short-term via
-    // these booleans.
+    /// rust-lang/rust#57979: the ban of nested `impl Trait` was buggy
+    /// until PRs #57730 and #57981 landed: it would jump directly to
+    /// walk_ty rather than visit_ty (or skip recurring entirely for
+    /// impl trait in projections), and thus miss some cases. We track
+    /// whether we should downgrade to a warning for short-term via
+    /// these booleans.
     warning_period_57979_didnt_record_next_impl_trait: bool,
     warning_period_57979_impl_trait_in_proj: bool,
 }
@@ -177,9 +177,9 @@ impl<'a> AstValidator<'a> {
     }
 
     fn check_lifetime(&self, ident: Ident) {
-        let valid_names = [keywords::UnderscoreLifetime.name(),
-                           keywords::StaticLifetime.name(),
-                           keywords::Invalid.name()];
+        let valid_names = [kw::UnderscoreLifetime,
+                           kw::StaticLifetime,
+                           kw::Invalid];
         if !valid_names.contains(&ident.name) && ident.without_first_quote().is_reserved() {
             self.err_handler().span_err(ident.span, "lifetimes cannot use keyword names");
         }
@@ -368,6 +368,8 @@ fn validate_generics_order<'a>(
     let mut max_param: Option<ParamKindOrd> = None;
     let mut out_of_order = FxHashMap::default();
     let mut param_idents = vec![];
+    let mut found_type = false;
+    let mut found_const = false;
 
     for (kind, bounds, span, ident) in generics {
         if let Some(ident) = ident {
@@ -381,6 +383,11 @@ fn validate_generics_order<'a>(
             }
             Some(_) | None => *max_param = Some(kind),
         };
+        match kind {
+            ParamKindOrd::Type => found_type = true,
+            ParamKindOrd::Const => found_const = true,
+            _ => {}
+        }
     }
 
     let mut ordered_params = "<".to_string();
@@ -408,8 +415,8 @@ fn validate_generics_order<'a>(
         GenericPosition::Arg => "argument",
     };
 
-    for (param_ord, (max_param, spans)) in out_of_order {
-        let mut err = handler.struct_span_err(spans,
+    for (param_ord, (max_param, spans)) in &out_of_order {
+        let mut err = handler.struct_span_err(spans.clone(),
             &format!(
                 "{} {pos}s must be declared prior to {} {pos}s",
                 param_ord,
@@ -429,6 +436,13 @@ fn validate_generics_order<'a>(
             );
         }
         err.emit();
+    }
+
+    // FIXME(const_generics): we shouldn't have to abort here at all, but we currently get ICEs
+    // if we don't. Const parameters and type parameters can currently conflict if they
+    // are out-of-order.
+    if !out_of_order.is_empty() && found_type && found_const {
+        FatalError.raise();
     }
 }
 
@@ -551,7 +565,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             self.has_proc_macro_decls = true;
         }
 
-        if attr::contains_name(&item.attrs, "global_allocator") {
+        if attr::contains_name(&item.attrs, sym::global_allocator) {
             self.has_global_allocator = true;
         }
 
@@ -662,8 +676,8 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             }
             ItemKind::Mod(_) => {
                 // Ensure that `path` attributes on modules are recorded as used (cf. issue #35584).
-                attr::first_attr_value_str_by_name(&item.attrs, "path");
-                if attr::contains_name(&item.attrs, "warn_directory_ownership") {
+                attr::first_attr_value_str_by_name(&item.attrs, sym::path);
+                if attr::contains_name(&item.attrs, sym::warn_directory_ownership) {
                     let lint = lint::builtin::LEGACY_DIRECTORY_OWNERSHIP;
                     let msg = "cannot declare a new module at this location";
                     self.session.buffer_lint(lint, item.id, item.span, msg);
@@ -677,6 +691,14 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                 if vdata.fields().is_empty() {
                     self.err_handler().span_err(item.span,
                                                 "unions cannot have zero fields");
+                }
+            }
+            ItemKind::Existential(ref bounds, _) => {
+                if !bounds.iter()
+                          .any(|b| if let GenericBound::Trait(..) = *b { true } else { false }) {
+                    let msp = MultiSpan::from_spans(bounds.iter()
+                        .map(|bound| bound.span()).collect());
+                    self.err_handler().span_err(msp, "at least one trait must be specified");
                 }
             }
             _ => {}

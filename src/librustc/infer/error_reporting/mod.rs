@@ -194,20 +194,20 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 let mut sp = cm.def_span(self.hir().span_by_hir_id(node));
                 if let Some(param) = self.hir()
                     .get_generics(scope)
-                    .and_then(|generics| generics.get_named(&br.name))
+                    .and_then(|generics| generics.get_named(br.name))
                 {
                     sp = param.span;
                 }
                 (format!("the lifetime {} as defined on", br.name), sp)
             }
             ty::ReFree(ty::FreeRegion {
-                bound_region: ty::BoundRegion::BrNamed(_, ref name),
+                bound_region: ty::BoundRegion::BrNamed(_, name),
                 ..
             }) => {
                 let mut sp = cm.def_span(self.hir().span_by_hir_id(node));
                 if let Some(param) = self.hir()
                     .get_generics(scope)
-                    .and_then(|generics| generics.get_named(&name))
+                    .and_then(|generics| generics.get_named(name))
                 {
                     sp = param.span;
                 }
@@ -644,7 +644,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                         for sp in prior_arms {
                             err.span_label(*sp, format!(
                                 "this is found to be of type `{}`",
-                                last_ty,
+                                self.resolve_type_vars_if_possible(&last_ty),
                             ));
                         }
                     } else if let Some(sp) = prior_arms.last() {
@@ -690,7 +690,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         name: String,
         sub: ty::subst::SubstsRef<'tcx>,
         pos: usize,
-        other_ty: &Ty<'tcx>,
+        other_ty: Ty<'tcx>,
     ) {
         // `value` and `other_value` hold two incomplete type representation for display.
         // `name` is the path of both types being compared. `sub`
@@ -768,10 +768,10 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         path: String,
         sub: ty::subst::SubstsRef<'tcx>,
         other_path: String,
-        other_ty: &Ty<'tcx>,
+        other_ty: Ty<'tcx>,
     ) -> Option<()> {
         for (i, ta) in sub.types().enumerate() {
-            if &ta == other_ty {
+            if ta == other_ty {
                 self.highlight_outer(&mut t1_out, &mut t2_out, path, sub, i, &other_ty);
                 return Some(());
             }
@@ -839,7 +839,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     /// Compares two given types, eliding parts that are the same between them and highlighting
     /// relevant differences, and return two representation of those types for highlighted printing.
     fn cmp(&self, t1: Ty<'tcx>, t2: Ty<'tcx>) -> (DiagnosticStyledString, DiagnosticStyledString) {
-        fn equals<'tcx>(a: &Ty<'tcx>, b: &Ty<'tcx>) -> bool {
+        fn equals<'tcx>(a: Ty<'tcx>, b: Ty<'tcx>) -> bool {
             match (&a.sty, &b.sty) {
                 (a, b) if *a == *b => true,
                 (&ty::Int(_), &ty::Infer(ty::InferTy::IntVar(_)))
@@ -1099,7 +1099,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             }
         };
 
-        let span = cause.span(&self.tcx);
+        let span = cause.span(self.tcx);
 
         diag.span_label(span, terr.to_string());
         if let Some((sp, msg)) = secondary_span {
@@ -1233,7 +1233,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             trace, terr
         );
 
-        let span = trace.cause.span(&self.tcx);
+        let span = trace.cause.span(self.tcx);
         let failure_code = trace.cause.as_failure_code(terr);
         let mut diag = match failure_code {
             FailureCode::Error0317(failure_str) => {
@@ -1260,6 +1260,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         match *values {
             infer::Types(ref exp_found) => self.expected_found_str_ty(exp_found),
             infer::Regions(ref exp_found) => self.expected_found_str(exp_found),
+            infer::Consts(ref exp_found) => self.expected_found_str(exp_found),
             infer::TraitRefs(ref exp_found) => self.expected_found_str(exp_found),
             infer::PolyTraitRefs(ref exp_found) => self.expected_found_str(exp_found),
         }

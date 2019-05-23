@@ -21,7 +21,7 @@ use rustc::lint::builtin::{
     UNUSED_IMPORTS,
 };
 use rustc::hir::def_id::{CrateNum, DefId};
-use rustc::hir::def::{self, PathResolution, Export};
+use rustc::hir::def::{self, DefKind, PartialRes, Export};
 use rustc::session::DiagnosticMessageId;
 use rustc::util::nodemap::FxHashSet;
 use rustc::{bug, span_bug};
@@ -29,7 +29,7 @@ use rustc::{bug, span_bug};
 use syntax::ast::{self, Ident, Name, NodeId, CRATE_NODE_ID};
 use syntax::ext::base::Determinacy::{self, Determined, Undetermined};
 use syntax::ext::hygiene::Mark;
-use syntax::symbol::keywords;
+use syntax::symbol::{kw, sym};
 use syntax::util::lev_distance::find_best_match_for_name;
 use syntax::{struct_span_err, unwrap_or};
 use syntax_pos::{MultiSpan, Span};
@@ -39,7 +39,7 @@ use log::*;
 use std::cell::{Cell, RefCell};
 use std::{mem, ptr};
 
-type Def = def::Def<NodeId>;
+type Res = def::Res<NodeId>;
 
 /// Contains data for specific types of import directives.
 #[derive(Clone, Debug)]
@@ -217,15 +217,15 @@ impl<'a> Resolver<'a> {
                     parent_scope.expect("no parent scope for a single-segment import");
 
                 if ns == TypeNS {
-                    if ident.name == keywords::Crate.name() ||
-                        ident.name == keywords::DollarCrate.name() {
+                    if ident.name == kw::Crate ||
+                        ident.name == kw::DollarCrate {
                         let module = self.resolve_crate_root(ident);
                         let binding = (module, ty::Visibility::Public,
                                         module.span, Mark::root())
                                         .to_name_binding(self.arenas);
                         return Ok(binding);
-                    } else if ident.name == keywords::Super.name() ||
-                                ident.name == keywords::SelfLower.name() {
+                    } else if ident.name == kw::Super ||
+                                ident.name == kw::SelfLower {
                         // FIXME: Implement these with renaming requirements so that e.g.
                         // `use super;` doesn't work, but `use super as name;` does.
                         // Fall through here to get an error from `early_resolve_...`.
@@ -247,7 +247,7 @@ impl<'a> Resolver<'a> {
 
         if let Some(binding) = resolution.binding {
             if !restricted_shadowing && binding.expansion != Mark::root() {
-                if let NameBindingKind::Def(_, true) = binding.kind {
+                if let NameBindingKind::Res(_, true) = binding.kind {
                     self.macro_expanded_macro_export_errors.insert((path_span, binding.span));
                 }
             }
@@ -287,7 +287,7 @@ impl<'a> Resolver<'a> {
                         // Forbid expanded shadowing to avoid time travel.
                         if restricted_shadowing &&
                         binding.expansion != Mark::root() &&
-                        binding.def() != shadowed_glob.def() {
+                        binding.res() != shadowed_glob.res() {
                             self.ambiguity_errors.push(AmbiguityError {
                                 kind: AmbiguityKind::GlobVsExpanded,
                                 ident,
@@ -496,7 +496,8 @@ impl<'a> Resolver<'a> {
         // Reserve some names that are not quite covered by the general check
         // performed on `Resolver::builtin_attrs`.
         if ns == MacroNS &&
-           (ident.name == "cfg" || ident.name == "cfg_attr" || ident.name == "derive") {
+           (ident.name == sym::cfg || ident.name == sym::cfg_attr ||
+            ident.name == sym::derive) {
             self.session.span_err(ident.span,
                                   &format!("name `{}` is reserved in macro namespace", ident));
         }
@@ -513,13 +514,13 @@ impl<'a> Resolver<'a> {
         self.set_binding_parent_module(binding, module);
         self.update_resolution(module, ident, ns, |this, resolution| {
             if let Some(old_binding) = resolution.binding {
-                if binding.def() == Def::Err {
-                    // Do not override real bindings with `Def::Err`s from error recovery.
+                if binding.res() == Res::Err {
+                    // Do not override real bindings with `Res::Err`s from error recovery.
                     return Ok(());
                 }
                 match (old_binding.is_glob_import(), binding.is_glob_import()) {
                     (true, true) => {
-                        if binding.def() != old_binding.def() {
+                        if binding.res() != old_binding.res() {
                             resolution.binding = Some(this.ambiguity(AmbiguityKind::GlobVsGlob,
                                                                      old_binding, binding));
                         } else if !old_binding.vis.is_at_least(binding.vis, &*this) {
@@ -533,7 +534,7 @@ impl<'a> Resolver<'a> {
                         } else {
                             (binding, old_binding)
                         };
-                        if glob_binding.def() != nonglob_binding.def() &&
+                        if glob_binding.res() != nonglob_binding.res() &&
                            ns == MacroNS && nonglob_binding.expansion != Mark::root() {
                             resolution.binding = Some(this.ambiguity(AmbiguityKind::GlobVsExpanded,
                                                                     nonglob_binding, glob_binding));
@@ -543,7 +544,7 @@ impl<'a> Resolver<'a> {
                         resolution.shadowed_glob = Some(glob_binding);
                     }
                     (false, false) => {
-                        if let (&NameBindingKind::Def(_, true), &NameBindingKind::Def(_, true)) =
+                        if let (&NameBindingKind::Res(_, true), &NameBindingKind::Res(_, true)) =
                                (&old_binding.kind, &binding.kind) {
 
                             this.session.buffer_lint_with_diagnostic(
@@ -619,7 +620,7 @@ impl<'a> Resolver<'a> {
         t
     }
 
-    // Define a "dummy" resolution containing a Def::Err as a placeholder for a
+    // Define a "dummy" resolution containing a Res::Err as a placeholder for a
     // failed resolution
     fn import_dummy_binding(&mut self, directive: &'a ImportDirective<'a>) {
         if let SingleImport { target, .. } = directive.subclass {
@@ -627,6 +628,8 @@ impl<'a> Resolver<'a> {
             let dummy_binding = self.import(dummy_binding, directive);
             self.per_ns(|this, ns| {
                 let _ = this.try_define(directive.parent_scope.module, target, ns, dummy_binding);
+                // Consider erroneous imports used to avoid duplicate diagnostics.
+                this.record_use(target, ns, dummy_binding, false);
             });
         }
     }
@@ -704,7 +707,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                 has_errors = true;
 
                 if let SingleImport { source, ref source_bindings, .. } = import.subclass {
-                    if source.name == "self" {
+                    if source.name == kw::SelfLower {
                         // Silence `unresolved import` error if E0429 is already emitted
                         if let Err(Determined) = source_bindings.value_ns.get() {
                             continue;
@@ -969,7 +972,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                 }
                 return None;
             }
-            PathResult::NonModule(path_res) if path_res.base_def() == Def::Err => {
+            PathResult::NonModule(path_res) if path_res.base_res() == Res::Err => {
                 if no_ambiguity {
                     assert!(directive.imported_module.get().is_none());
                 }
@@ -989,7 +992,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                     // HACK(eddyb) `lint_if_path_starts_with_module` needs at least
                     // 2 segments, so the `resolve_path` above won't trigger it.
                     let mut full_path = directive.module_path.clone();
-                    full_path.push(Segment::from_ident(keywords::Invalid.ident()));
+                    full_path.push(Segment::from_ident(Ident::invalid()));
                     self.lint_if_path_starts_with_module(
                         directive.crate_lint(),
                         &full_path,
@@ -1036,24 +1039,25 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
             match binding {
                 Ok(binding) => {
                     // Consistency checks, analogous to `finalize_current_module_macro_resolutions`.
-                    let initial_def = source_bindings[ns].get().map(|initial_binding| {
+                    let initial_res = source_bindings[ns].get().map(|initial_binding| {
                         all_ns_err = false;
                         if let Some(target_binding) = target_bindings[ns].get() {
-                            if target.name == "_" &&
+                            // Note that as_str() de-gensyms the Symbol
+                            if target.name.as_str() == "_" &&
                                initial_binding.is_extern_crate() && !initial_binding.is_import() {
                                 this.record_use(ident, ns, target_binding,
                                                 directive.module_path.is_empty());
                             }
                         }
-                        initial_binding.def()
+                        initial_binding.res()
                     });
-                    let def = binding.def();
-                    if let Ok(initial_def) = initial_def {
-                        if def != initial_def && this.ambiguity_errors.is_empty() {
+                    let res = binding.res();
+                    if let Ok(initial_res) = initial_res {
+                        if res != initial_res && this.ambiguity_errors.is_empty() {
                             span_bug!(directive.span, "inconsistent resolution for an import");
                         }
                     } else {
-                        if def != Def::Err &&
+                        if res != Res::Err &&
                            this.ambiguity_errors.is_empty() && this.privacy_errors.is_empty() {
                             let msg = "cannot determine resolution for the import";
                             let msg_note =
@@ -1099,7 +1103,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                                     match binding.kind {
                                         // Never suggest the name that has binding error
                                         // i.e., the name that cannot be previously resolved
-                                        NameBindingKind::Def(Def::Err, _) => return None,
+                                        NameBindingKind::Res(Res::Err, _) => return None,
                                         _ => Some(&i.name),
                                     }
                                 },
@@ -1221,18 +1225,17 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         // this may resolve to either a value or a type, but for documentation
         // purposes it's good enough to just favor one over the other.
         self.per_ns(|this, ns| if let Some(binding) = source_bindings[ns].get().ok() {
-            let mut def = binding.def();
-            if let Def::Macro(def_id, _) = def {
+            let mut res = binding.res();
+            if let Res::Def(DefKind::Macro(_), def_id) = res {
                 // `DefId`s from the "built-in macro crate" should not leak from resolve because
                 // later stages are not ready to deal with them and produce lots of ICEs. Replace
-                // them with `Def::Err` until some saner scheme is implemented for built-in macros.
+                // them with `Res::Err` until some saner scheme is implemented for built-in macros.
                 if def_id.krate == CrateNum::BuiltinMacros {
                     this.session.span_err(directive.span, "cannot import a built-in macro");
-                    def = Def::Err;
+                    res = Res::Err;
                 }
             }
-            let import = this.import_map.entry(directive.id).or_default();
-            import[ns] = Some(PathResolution::new(def));
+            this.import_res_map.entry(directive.id).or_default()[ns] = Some(res);
         });
 
         self.check_for_redundant_imports(
@@ -1262,7 +1265,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
 
         // Skip if we are inside a named module (in contrast to an anonymous
         // module defined by a block).
-        if let ModuleKind::Def(_, _) = directive.parent_scope.module.kind {
+        if let ModuleKind::Def(..) = directive.parent_scope.module.kind {
             return;
         }
 
@@ -1279,7 +1282,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         };
 
         self.per_ns(|this, ns| if let Some(binding) = source_bindings[ns].get().ok() {
-            if binding.def() == Def::Err {
+            if binding.res() == Res::Err {
                 return;
             }
 
@@ -1298,7 +1301,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
             ) {
                 Ok(other_binding) => {
                     is_redundant[ns] = Some(
-                        binding.def() == other_binding.def()
+                        binding.res() == other_binding.res()
                         && !other_binding.is_ambiguity()
                     );
                     redundant_span[ns] =
@@ -1369,7 +1372,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         }
 
         // Record the destination of this import
-        self.record_def(directive.id, PathResolution::new(module.def().unwrap()));
+        self.record_partial_res(directive.id, PartialRes::new(module.res().unwrap()));
     }
 
     // Miscellaneous post-processing, including recording re-exports,
@@ -1391,18 +1394,19 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
             // (e.g. implicitly injected `std`) cannot be properly encoded in metadata,
             // so they can cause name conflict errors downstream.
             let is_good_import = binding.is_import() && !binding.is_ambiguity() &&
-                                 !(ident.name.is_gensymed() && ident.name != "_");
+                                 // Note that as_str() de-gensyms the Symbol
+                                 !(ident.is_gensymed() && ident.name.as_str() != "_");
             if is_good_import || binding.is_macro_def() {
-                let def = binding.def();
-                if def != Def::Err {
-                    if let Some(def_id) = def.opt_def_id() {
+                let res = binding.res();
+                if res != Res::Err {
+                    if let Some(def_id) = res.opt_def_id() {
                         if !def_id.is_local() && def_id.krate != CrateNum::BuiltinMacros {
                             self.cstore.export_macros_untracked(def_id.krate);
                         }
                     }
                     reexports.push(Export {
                         ident: ident.modern(),
-                        def: def,
+                        res: res,
                         span: binding.span,
                         vis: binding.vis,
                     });
@@ -1480,8 +1484,8 @@ fn import_path_to_string(names: &[Ident],
                          subclass: &ImportDirectiveSubclass<'_>,
                          span: Span) -> String {
     let pos = names.iter()
-        .position(|p| span == p.span && p.name != keywords::PathRoot.name());
-    let global = !names.is_empty() && names[0].name == keywords::PathRoot.name();
+        .position(|p| span == p.span && p.name != kw::PathRoot);
+    let global = !names.is_empty() && names[0].name == kw::PathRoot;
     if let Some(pos) = pos {
         let names = if global { &names[1..pos + 1] } else { &names[..pos + 1] };
         names_to_string(names)

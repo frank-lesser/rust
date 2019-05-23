@@ -3,8 +3,9 @@
 
 use crate::errors::{Error, ErrorKind};
 use crate::runtest::ProcRes;
+use serde::Deserialize;
 use serde_json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 #[derive(Deserialize)]
@@ -15,6 +16,12 @@ struct Diagnostic {
     spans: Vec<DiagnosticSpan>,
     children: Vec<Diagnostic>,
     rendered: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ArtifactNotification {
+    #[allow(dead_code)]
+    artifact: PathBuf,
 }
 
 #[derive(Deserialize, Clone)]
@@ -67,16 +74,17 @@ pub fn extract_rendered(output: &str) -> String {
         .lines()
         .filter_map(|line| {
             if line.starts_with('{') {
-                match serde_json::from_str::<Diagnostic>(line) {
-                    Ok(diagnostic) => diagnostic.rendered,
-                    Err(error) => {
-                        print!(
-                            "failed to decode compiler output as json: \
-                             `{}`\nline: {}\noutput: {}",
-                            error, line, output
-                        );
-                        panic!()
-                    }
+                if let Ok(diagnostic) = serde_json::from_str::<Diagnostic>(line) {
+                    diagnostic.rendered
+                } else if let Ok(_) = serde_json::from_str::<ArtifactNotification>(line) {
+                    // Ignore the notification.
+                    None
+                } else {
+                    print!(
+                        "failed to decode compiler output as json: line: {}\noutput: {}",
+                        line, output
+                    );
+                    panic!()
                 }
             } else {
                 // preserve non-JSON lines, such as ICEs

@@ -101,7 +101,7 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_mir::monomorphize::item::{InstantiationMode, MonoItem, MonoItemExt};
 use rustc_mir::monomorphize::Instance;
 
-use syntax_pos::symbol::{Symbol, InternedString};
+use syntax_pos::symbol::InternedString;
 
 use log::debug;
 
@@ -238,13 +238,13 @@ fn compute_symbol_name(tcx: TyCtxt<'_, 'tcx, 'tcx>, instance: Instance<'tcx>) ->
     if def_id.is_local() {
         if tcx.plugin_registrar_fn(LOCAL_CRATE) == Some(def_id) {
             let disambiguator = tcx.sess.local_crate_disambiguator();
-            return Symbol::intern(&tcx.sess.generate_plugin_registrar_symbol(disambiguator))
-                .as_interned_str();
+            return
+                InternedString::intern(&tcx.sess.generate_plugin_registrar_symbol(disambiguator));
         }
         if tcx.proc_macro_decls_static(LOCAL_CRATE) == Some(def_id) {
             let disambiguator = tcx.sess.local_crate_disambiguator();
-            return Symbol::intern(&tcx.sess.generate_proc_macro_decls_symbol(disambiguator))
-                .as_interned_str();
+            return
+                InternedString::intern(&tcx.sess.generate_proc_macro_decls_symbol(disambiguator));
         }
     }
 
@@ -264,7 +264,7 @@ fn compute_symbol_name(tcx: TyCtxt<'_, 'tcx, 'tcx>, instance: Instance<'tcx>) ->
             return name.as_interned_str();
         }
         // Don't mangle foreign items.
-        return tcx.item_name(def_id);
+        return tcx.item_name(def_id).as_interned_str();
     }
 
     if let Some(name) = &attrs.export_name {
@@ -274,7 +274,7 @@ fn compute_symbol_name(tcx: TyCtxt<'_, 'tcx, 'tcx>, instance: Instance<'tcx>) ->
 
     if attrs.flags.contains(CodegenFnAttrFlags::NO_MANGLE) {
         // Don't mangle
-        return tcx.item_name(def_id);
+        return tcx.item_name(def_id).as_interned_str();
     }
 
     // We want to compute the "type" of this item. Unfortunately, some
@@ -322,7 +322,7 @@ fn compute_symbol_name(tcx: TyCtxt<'_, 'tcx, 'tcx>, instance: Instance<'tcx>) ->
         let _ = printer.write_str("{{vtable-shim}}");
     }
 
-    Symbol::intern(&printer.path.finish(hash)).as_interned_str()
+    InternedString::intern(&printer.path.finish(hash))
 }
 
 // Follow C++ namespace-mangling style, see

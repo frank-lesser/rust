@@ -6,7 +6,7 @@ use std::borrow::{Borrow, Cow};
 use std::hash::Hash;
 use std::collections::hash_map::Entry;
 
-use rustc::hir::def::Def;
+use rustc::hir::def::DefKind;
 use rustc::hir::def_id::DefId;
 use rustc::mir::interpret::{ConstEvalErr, ErrorHandled};
 use rustc::mir;
@@ -59,7 +59,7 @@ pub(crate) fn eval_promoted<'a, 'mir, 'tcx>(
 ) -> EvalResult<'tcx, MPlaceTy<'tcx>> {
     let span = tcx.def_span(cid.instance.def_id());
     let mut ecx = mk_eval_cx(tcx, span, param_env);
-    eval_body_using_ecx(&mut ecx, cid, Some(mir), param_env)
+    eval_body_using_ecx(&mut ecx, cid, mir, param_env)
 }
 
 fn mplace_to_const<'tcx>(
@@ -107,37 +107,15 @@ fn op_to_const<'tcx>(
     ty::Const { val, ty: op.layout.ty }
 }
 
-fn eval_body_and_ecx<'a, 'mir, 'tcx>(
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
-    cid: GlobalId<'tcx>,
-    mir: Option<&'mir mir::Mir<'tcx>>,
-    param_env: ty::ParamEnv<'tcx>,
-) -> (EvalResult<'tcx, MPlaceTy<'tcx>>, CompileTimeEvalContext<'a, 'mir, 'tcx>) {
-    // we start out with the best span we have
-    // and try improving it down the road when more information is available
-    let span = tcx.def_span(cid.instance.def_id());
-    let span = mir.map(|mir| mir.span).unwrap_or(span);
-    let mut ecx = InterpretCx::new(tcx.at(span), param_env, CompileTimeInterpreter::new());
-    let r = eval_body_using_ecx(&mut ecx, cid, mir, param_env);
-    (r, ecx)
-}
-
 // Returns a pointer to where the result lives
 fn eval_body_using_ecx<'mir, 'tcx>(
     ecx: &mut CompileTimeEvalContext<'_, 'mir, 'tcx>,
     cid: GlobalId<'tcx>,
-    mir: Option<&'mir mir::Mir<'tcx>>,
+    mir: &'mir mir::Mir<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
 ) -> EvalResult<'tcx, MPlaceTy<'tcx>> {
     debug!("eval_body_using_ecx: {:?}, {:?}", cid, param_env);
     let tcx = ecx.tcx.tcx;
-    let mut mir = match mir {
-        Some(mir) => mir,
-        None => ecx.load_mir(cid.instance.def)?,
-    };
-    if let Some(index) = cid.promoted {
-        mir = &mir.promoted[index];
-    }
     let layout = ecx.layout_of(mir.return_ty().subst(tcx, cid.instance.substs))?;
     assert!(!layout.is_unsized());
     let ret = ecx.allocate(layout, MemoryKind::Stack);
@@ -440,7 +418,7 @@ impl<'a, 'mir, 'tcx> interpret::Machine<'a, 'mir, 'tcx>
 
         let span = ecx.frame().span;
         ecx.machine.loop_detector.observe_and_analyze(
-            &ecx.tcx,
+            *ecx.tcx,
             span,
             &ecx.memory,
             &ecx.stack[..],
@@ -513,7 +491,7 @@ pub fn error_to_const_error<'a, 'mir, 'tcx>(
 }
 
 fn validate_and_turn_into_const<'a, 'tcx>(
-    tcx: ty::TyCtxt<'a, 'tcx, 'tcx>,
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
     constant: RawConst<'tcx>,
     key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>,
 ) -> ::rustc::mir::interpret::ConstEvalResult<'tcx> {
@@ -618,8 +596,19 @@ pub fn const_eval_raw_provider<'a, 'tcx>(
         return Err(ErrorHandled::Reported);
     }
 
-    let (res, ecx) = eval_body_and_ecx(tcx, cid, None, key.param_env);
-    res.and_then(|place| {
+    let span = tcx.def_span(cid.instance.def_id());
+    let mut ecx = InterpretCx::new(tcx.at(span), key.param_env, CompileTimeInterpreter::new());
+
+    let res = ecx.load_mir(cid.instance.def);
+    res.map(|mir| {
+        if let Some(index) = cid.promoted {
+            &mir.promoted[index]
+        } else {
+            mir
+        }
+    }).and_then(
+        |mir| eval_body_using_ecx(&mut ecx, cid, mir, key.param_env)
+    ).and_then(|place| {
         Ok(RawConst {
             alloc_id: place.to_ptr().expect("we allocated this ptr!").alloc_id,
             ty: place.layout.ty
@@ -645,14 +634,14 @@ pub fn const_eval_raw_provider<'a, 'tcx>(
             }
         } else if def_id.is_local() {
             // constant defined in this crate, we can figure out a lint level!
-            match tcx.describe_def(def_id) {
+            match tcx.def_kind(def_id) {
                 // constants never produce a hard error at the definition site. Anything else is
                 // a backwards compatibility hazard (and will break old versions of winapi for sure)
                 //
                 // note that validation may still cause a hard error on this very same constant,
                 // because any code that existed before validation could not have failed validation
                 // thus preventing such a hard error from being a backwards compatibility hazard
-                Some(Def::Const(_)) | Some(Def::AssociatedConst(_)) => {
+                Some(DefKind::Const) | Some(DefKind::AssociatedConst) => {
                     let hir_id = tcx.hir().as_local_hir_id(def_id).unwrap();
                     err.report_as_lint(
                         tcx.at(tcx.def_span(def_id)),

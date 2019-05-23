@@ -9,7 +9,6 @@ use crate::common::{Config, TestPaths};
 use crate::common::{Incremental, MirOpt, RunMake, Ui, JsDocTest, Assembly};
 use diff;
 use crate::errors::{self, Error, ErrorKind};
-use filetime::FileTime;
 use crate::header::TestProps;
 use crate::json;
 use regex::{Captures, Regex};
@@ -28,6 +27,9 @@ use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::str;
+
+use lazy_static::lazy_static;
+use log::*;
 
 use crate::extract_gdb_version;
 use crate::is_android_gdb_target;
@@ -1422,10 +1424,21 @@ impl<'test> TestCx<'test> {
     }
 
     fn compile_test(&self) -> ProcRes {
-        let mut rustc = self.make_compile_args(
-            &self.testpaths.file,
-            TargetLocation::ThisFile(self.make_exe_name()),
-        );
+        // Only use `make_exe_name` when the test ends up being executed.
+        let will_execute = match self.config.mode {
+            RunPass | Ui => self.should_run_successfully(),
+            Incremental => self.revision.unwrap().starts_with("r"),
+            RunFail | RunPassValgrind | MirOpt |
+            DebugInfoBoth | DebugInfoGdb | DebugInfoLldb => true,
+            _ => false,
+        };
+        let output_file = if will_execute {
+            TargetLocation::ThisFile(self.make_exe_name())
+        } else {
+            TargetLocation::ThisDirectory(self.output_base_dir())
+        };
+
+        let mut rustc = self.make_compile_args(&self.testpaths.file, output_file);
 
         rustc.arg("-L").arg(&self.aux_output_dir_name());
 
@@ -1636,7 +1649,9 @@ impl<'test> TestCx<'test> {
                 (true, None)
             } else if self.config.target.contains("cloudabi")
                 || self.config.target.contains("emscripten")
-                || (self.config.target.contains("musl") && !aux_props.force_host)
+                || (self.config.target.contains("musl")
+                    && !aux_props.force_host
+                    && !self.config.host.contains("musl"))
                 || self.config.target.contains("wasm32")
                 || self.config.target.contains("nvptx")
             {
@@ -1692,6 +1707,9 @@ impl<'test> TestCx<'test> {
             add_extern_priv(&private_lib, true);
         }
 
+        self.props.unset_rustc_env.clone()
+            .iter()
+            .fold(&mut rustc, |rustc, v| rustc.env_remove(v));
         rustc.envs(self.props.rustc_env.clone());
         self.compose_and_run(
             rustc,
@@ -1882,14 +1900,18 @@ impl<'test> TestCx<'test> {
                 rustc.arg("-o").arg(path);
             }
             TargetLocation::ThisDirectory(path) => {
-                rustc.arg("--out-dir").arg(path);
+                if is_rustdoc {
+                    // `rustdoc` uses `-o` for the output directory.
+                    rustc.arg("-o").arg(path);
+                } else {
+                    rustc.arg("--out-dir").arg(path);
+                }
             }
         }
 
         match self.config.compare_mode {
             Some(CompareMode::Nll) => {
-                // FIXME(#56993) use -Zborrowck=mir
-                rustc.args(&["-Zborrowck=migrate"]);
+                rustc.args(&["-Zborrowck=mir"]);
             }
             Some(CompareMode::Polonius) => {
                 rustc.args(&["-Zpolonius", "-Zborrowck=mir"]);
@@ -1908,6 +1930,11 @@ impl<'test> TestCx<'test> {
                     rustc.arg(format!("-Clinker={}", linker));
                 }
             }
+        }
+
+        // Use dynamic musl for tests because static doesn't allow creating dylibs
+        if self.config.host.contains("musl") {
+            rustc.arg("-Ctarget-feature=-crt-static");
         }
 
         rustc.args(&self.props.compile_flags);
@@ -2188,9 +2215,7 @@ impl<'test> TestCx<'test> {
 
     fn charset() -> &'static str {
         // FreeBSD 10.1 defaults to GDB 6.1.1 which doesn't support "auto" charset
-        if cfg!(target_os = "bitrig") {
-            "auto"
-        } else if cfg!(target_os = "freebsd") {
+        if cfg!(target_os = "freebsd") {
             "ISO-8859-1"
         } else {
             "UTF-8"
@@ -2641,8 +2666,7 @@ impl<'test> TestCx<'test> {
         create_dir_all(&tmpdir).unwrap();
 
         let host = &self.config.host;
-        let make = if host.contains("bitrig")
-            || host.contains("dragonfly")
+        let make = if host.contains("dragonfly")
             || host.contains("freebsd")
             || host.contains("netbsd")
             || host.contains("openbsd")
@@ -2691,9 +2715,23 @@ impl<'test> TestCx<'test> {
             cmd.env("CLANG", clang);
         }
 
+        if let Some(ref filecheck) = self.config.llvm_filecheck {
+            cmd.env("LLVM_FILECHECK", filecheck);
+        }
+
+        if let Some(ref llvm_bin_dir) = self.config.llvm_bin_dir {
+            cmd.env("LLVM_BIN_DIR", llvm_bin_dir);
+        }
+
         // We don't want RUSTFLAGS set from the outside to interfere with
         // compiler flags set in the test cases:
         cmd.env_remove("RUSTFLAGS");
+
+        // Use dynamic musl for tests because static doesn't allow creating dylibs
+        if self.config.host.contains("musl") {
+            cmd.env("RUSTFLAGS", "-Ctarget-feature=-crt-static")
+                .env("IS_MUSL_HOST", "1");
+        }
 
         if self.config.target.contains("msvc") && self.config.cc != "" {
             // We need to pass a path to `lib.exe`, so assume that `cc` is `cl.exe`
@@ -2989,7 +3027,7 @@ impl<'test> TestCx<'test> {
     }
 
     fn check_mir_test_timestamp(&self, test_name: &str, output_file: &Path) {
-        let t = |file| FileTime::from_last_modification_time(&fs::metadata(file).unwrap());
+        let t = |file| fs::metadata(file).unwrap().modified().unwrap();
         let source_file = &self.testpaths.file;
         let output_time = t(output_file);
         let source_time = t(source_file);
@@ -3130,42 +3168,40 @@ impl<'test> TestCx<'test> {
     }
 
     fn normalize_output(&self, output: &str, custom_rules: &[(String, String)]) -> String {
-        let parent_dir = self.testpaths.file.parent().unwrap();
         let cflags = self.props.compile_flags.join(" ");
         let json = cflags.contains("--error-format json")
             || cflags.contains("--error-format pretty-json")
             || cflags.contains("--error-format=json")
             || cflags.contains("--error-format=pretty-json");
-        let parent_dir_str = if json {
-            parent_dir.display().to_string().replace("\\", "\\\\")
-        } else {
-            parent_dir.display().to_string()
+
+        let mut normalized = output.to_string();
+
+        let mut normalize_path = |from: &Path, to: &str| {
+            let mut from = from.display().to_string();
+            if json {
+                from = from.replace("\\", "\\\\");
+            }
+            normalized = normalized.replace(&from, to);
         };
 
-        let mut normalized = output.replace(&parent_dir_str, "$DIR");
+        let parent_dir = self.testpaths.file.parent().unwrap();
+        normalize_path(parent_dir, "$DIR");
 
         // Paths into the libstd/libcore
         let src_dir = self.config.src_base.parent().unwrap().parent().unwrap();
-        let src_dir_str = if json {
-            src_dir.display().to_string().replace("\\", "\\\\")
-        } else {
-            src_dir.display().to_string()
-        };
-        normalized = normalized.replace(&src_dir_str, "$SRC_DIR");
+        normalize_path(src_dir, "$SRC_DIR");
 
         // Paths into the build directory
         let test_build_dir = &self.config.build_base;
         let parent_build_dir = test_build_dir.parent().unwrap().parent().unwrap().parent().unwrap();
 
         // eg. /home/user/rust/build/x86_64-unknown-linux-gnu/test/ui
-        normalized = normalized.replace(test_build_dir.to_str().unwrap(), "$TEST_BUILD_DIR");
+        normalize_path(test_build_dir, "$TEST_BUILD_DIR");
         // eg. /home/user/rust/build
-        normalized = normalized.replace(&parent_build_dir.to_str().unwrap(), "$BUILD_DIR");
+        normalize_path(parent_build_dir, "$BUILD_DIR");
 
         // Paths into lib directory.
-        let mut lib_dir = parent_build_dir.parent().unwrap().to_path_buf();
-        lib_dir.push("lib");
-        normalized = normalized.replace(&lib_dir.to_str().unwrap(), "$LIB_DIR");
+        normalize_path(&parent_build_dir.parent().unwrap().join("lib"), "$LIB_DIR");
 
         if json {
             // escaped newlines in json strings should be readable

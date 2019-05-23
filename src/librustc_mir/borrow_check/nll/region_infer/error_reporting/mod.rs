@@ -15,7 +15,7 @@ use rustc_data_structures::indexed_vec::IndexVec;
 use rustc_errors::{Diagnostic, DiagnosticBuilder};
 use std::collections::VecDeque;
 use syntax::errors::Applicability;
-use syntax::symbol::keywords;
+use syntax::symbol::kw;
 use syntax_pos::Span;
 
 mod region_name;
@@ -631,7 +631,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
                     "add_static_impl_trait_suggestion: has_static_predicate={:?}",
                     has_static_predicate
                 );
-                let static_str = keywords::StaticLifetime.name();
+                let static_str = kw::StaticLifetime;
                 // If there is a static predicate, then the only sensible suggestion is to replace
                 // fr with `'static`.
                 if has_static_predicate {
@@ -674,8 +674,11 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         borrow_region: RegionVid,
         outlived_region: RegionVid,
     ) -> (ConstraintCategory, bool, Span, Option<RegionName>) {
-        let (category, from_closure, span) =
-            self.best_blame_constraint(mir, borrow_region, |r| r == outlived_region);
+        let (category, from_closure, span) = self.best_blame_constraint(
+            mir,
+            borrow_region,
+            |r| self.provides_universal_region(r, borrow_region, outlived_region)
+        );
         let outlived_fr_name =
             self.give_region_a_name(infcx, mir, upvars, mir_def_id, outlived_region, &mut 1);
         (category, from_closure, span, outlived_fr_name)

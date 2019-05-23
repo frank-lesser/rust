@@ -1,4 +1,4 @@
-use rustc::hir::def::Def;
+use rustc::hir::def::{Res, DefKind};
 use rustc::hir::def_id::DefId;
 use rustc::lint;
 use rustc::ty;
@@ -12,7 +12,7 @@ use syntax::attr;
 use syntax::errors::Applicability;
 use syntax::feature_gate::{AttributeType, BuiltinAttribute, BUILTIN_ATTRIBUTE_MAP};
 use syntax::print::pprust;
-use syntax::symbol::keywords;
+use syntax::symbol::{kw, sym};
 use syntax::symbol::Symbol;
 use syntax::util::parser;
 use syntax_pos::Span;
@@ -87,14 +87,14 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedResults {
 
         let mut fn_warned = false;
         let mut op_warned = false;
-        let maybe_def = match expr.node {
+        let maybe_def_id = match expr.node {
             hir::ExprKind::Call(ref callee, _) => {
                 match callee.node {
                     hir::ExprKind::Path(ref qpath) => {
-                        let def = cx.tables.qpath_def(qpath, callee.hir_id);
-                        match def {
-                            Def::Fn(_) | Def::Method(_) => Some(def),
-                            // `Def::Local` if it was a closure, for which we
+                        match cx.tables.qpath_res(qpath, callee.hir_id) {
+                            Res::Def(DefKind::Fn, def_id)
+                            | Res::Def(DefKind::Method, def_id) => Some(def_id),
+                            // `Res::Local` if it was a closure, for which we
                             // do not currently support must-use linting
                             _ => None
                         }
@@ -103,12 +103,11 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedResults {
                 }
             },
             hir::ExprKind::MethodCall(..) => {
-                cx.tables.type_dependent_def(expr.hir_id)
+                cx.tables.type_dependent_def_id(expr.hir_id)
             },
             _ => None
         };
-        if let Some(def) = maybe_def {
-            let def_id = def.def_id();
+        if let Some(def_id) = maybe_def_id {
             fn_warned = check_must_use(cx, def_id, s.span, "return value of ", "");
         } else if type_permits_lack_of_use {
             // We don't warn about unused unit or uninhabited types.
@@ -171,7 +170,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedResults {
             descr_post_path: &str,
         ) -> bool {
             for attr in cx.tcx.get_attrs(def_id).iter() {
-                if attr.check_name("must_use") {
+                if attr.check_name(sym::must_use) {
                     let msg = format!("unused {}`{}`{} that must be used",
                         descr_pre_path, cx.tcx.def_path_str(def_id), descr_post_path);
                     let mut err = cx.struct_span_lint(UNUSED_MUST_USE, sp, &msg);
@@ -244,8 +243,8 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedAttributes {
         }
 
         let plugin_attributes = cx.sess().plugin_attributes.borrow_mut();
-        for &(ref name, ty) in plugin_attributes.iter() {
-            if ty == AttributeType::Whitelisted && attr.check_name(&**name) {
+        for &(name, ty) in plugin_attributes.iter() {
+            if ty == AttributeType::Whitelisted && attr.check_name(name) {
                 debug!("{:?} (plugin attr) is whitelisted with ty {:?}", name, ty);
                 break;
             }
@@ -263,7 +262,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedAttributes {
             // Has a plugin registered this attribute as one that must be used at
             // the crate level?
             let plugin_crate = plugin_attributes.iter()
-                .find(|&&(ref x, t)| name == x.as_str() && AttributeType::CrateLevel == t)
+                .find(|&&(x, t)| name == x && AttributeType::CrateLevel == t)
                 .is_some();
             if known_crate || plugin_crate {
                 let msg = match attr.style {
@@ -456,7 +455,7 @@ impl UnusedImportBraces {
             match items[0].0.kind {
                 ast::UseTreeKind::Simple(rename, ..) => {
                     let orig_ident = items[0].0.prefix.segments.last().unwrap().ident;
-                    if orig_ident.name == keywords::SelfLower.name() {
+                    if orig_ident.name == kw::SelfLower {
                         return;
                     }
                     node_ident = rename.unwrap_or(orig_ident);

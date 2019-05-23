@@ -4,6 +4,7 @@ use crate::borrow_check::nll::universal_regions::DefiningTy;
 use crate::borrow_check::nll::ToRegionVid;
 use crate::borrow_check::Upvar;
 use rustc::hir;
+use rustc::hir::def::{Res, DefKind};
 use rustc::hir::def_id::DefId;
 use rustc::infer::InferCtxt;
 use rustc::mir::Mir;
@@ -11,8 +12,7 @@ use rustc::ty::subst::{SubstsRef, UnpackedKind};
 use rustc::ty::{self, RegionKind, RegionVid, Ty, TyCtxt};
 use rustc::ty::print::RegionHighlightMode;
 use rustc_errors::DiagnosticBuilder;
-use syntax::ast::Name;
-use syntax::symbol::keywords;
+use syntax::symbol::kw;
 use syntax_pos::Span;
 use syntax_pos::symbol::InternedString;
 
@@ -33,6 +33,7 @@ crate enum RegionNameSource {
     MatchedAdtAndSegment(Span),
     AnonRegionFromUpvar(Span, String),
     AnonRegionFromOutput(Span, String, String),
+    AnonRegionFromYieldTy(Span, String),
 }
 
 impl RegionName {
@@ -47,7 +48,8 @@ impl RegionName {
             RegionNameSource::MatchedHirTy(..) |
             RegionNameSource::MatchedAdtAndSegment(..) |
             RegionNameSource::AnonRegionFromUpvar(..) |
-            RegionNameSource::AnonRegionFromOutput(..) => false,
+            RegionNameSource::AnonRegionFromOutput(..) |
+            RegionNameSource::AnonRegionFromYieldTy(..) => false,
         }
     }
 
@@ -57,8 +59,8 @@ impl RegionName {
     }
 
     #[allow(dead_code)]
-    crate fn name(&self) -> &InternedString {
-        &self.name
+    crate fn name(&self) -> InternedString {
+        self.name
     }
 
     crate fn highlight_region_name(
@@ -104,6 +106,12 @@ impl RegionName {
                     format!("return type{} is {}", mir_description, type_name),
                 );
             },
+            RegionNameSource::AnonRegionFromYieldTy(span, type_name) => {
+                diag.span_label(
+                    *span,
+                    format!("yield type is {}", type_name),
+                );
+            }
             RegionNameSource::Static => {},
         }
     }
@@ -169,6 +177,11 @@ impl<'tcx> RegionInferenceContext<'tcx> {
                 self.give_name_if_anonymous_region_appears_in_output(
                     infcx, mir, mir_def_id, fr, counter,
                 )
+            })
+            .or_else(|| {
+                self.give_name_if_anonymous_region_appears_in_yield_ty(
+                    infcx, mir, mir_def_id, fr, counter,
+                )
             });
 
         debug!("give_region_a_name: gave name {:?}", value);
@@ -192,7 +205,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         match error_region {
             ty::ReEarlyBound(ebr) => {
                 if ebr.has_name() {
-                    let span = self.get_named_span(tcx, error_region, &ebr.name);
+                    let span = self.get_named_span(tcx, error_region, ebr.name);
                     Some(RegionName {
                         name: ebr.name,
                         source: RegionNameSource::NamedEarlyBoundRegion(span)
@@ -203,13 +216,13 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             }
 
             ty::ReStatic => Some(RegionName {
-                name: keywords::StaticLifetime.name().as_interned_str(),
+                name: kw::StaticLifetime.as_interned_str(),
                 source: RegionNameSource::Static
             }),
 
             ty::ReFree(free_region) => match free_region.bound_region {
                 ty::BoundRegion::BrNamed(_, name) => {
-                    let span = self.get_named_span(tcx, error_region, &name);
+                    let span = self.get_named_span(tcx, error_region, name);
                     Some(RegionName {
                         name,
                         source: RegionNameSource::NamedFreeRegion(span),
@@ -292,7 +305,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         &self,
         tcx: TyCtxt<'_, '_, 'tcx>,
         error_region: &RegionKind,
-        name: &InternedString,
+        name: InternedString,
     ) -> Span {
         let scope = error_region.free_region_binding_scope(tcx);
         let node = tcx.hir().as_local_hir_id(scope).unwrap_or(hir::DUMMY_HIR_ID);
@@ -491,12 +504,12 @@ impl<'tcx> RegionInferenceContext<'tcx> {
                     ty::Adt(_adt_def, substs),
                     hir::TyKind::Path(hir::QPath::Resolved(None, path)),
                 ) => {
-                    match path.def {
+                    match path.res {
                         // Type parameters of the type alias have no reason to
                         // be the same as those of the ADT.
                         // FIXME: We should be able to do something similar to
                         // match_adt_and_segment in this case.
-                        hir::def::Def::TyAlias(_) => (),
+                        Res::Def(DefKind::TyAlias, _) => (),
                         _ => if let Some(last_segment) = path.segments.last() {
                             if let Some(name) = self.match_adt_and_segment(
                                 substs,
@@ -675,10 +688,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             "give_name_if_anonymous_region_appears_in_output: return_ty = {:?}",
             return_ty
         );
-        if !infcx
-            .tcx
-            .any_free_region_meets(&return_ty, |r| r.to_region_vid() == fr)
-        {
+        if !tcx.any_free_region_meets(&return_ty, |r| r.to_region_vid() == fr) {
             return None;
         }
 
@@ -723,12 +733,63 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         })
     }
 
+    fn give_name_if_anonymous_region_appears_in_yield_ty(
+        &self,
+        infcx: &InferCtxt<'_, '_, 'tcx>,
+        mir: &Mir<'tcx>,
+        mir_def_id: DefId,
+        fr: RegionVid,
+        counter: &mut usize,
+    ) -> Option<RegionName> {
+        // Note: generators from `async fn` yield `()`, so we don't have to
+        // worry about them here.
+        let yield_ty = self.universal_regions.yield_ty?;
+        debug!(
+            "give_name_if_anonymous_region_appears_in_yield_ty: yield_ty = {:?}",
+            yield_ty,
+        );
+
+        let tcx = infcx.tcx;
+
+        if !tcx.any_free_region_meets(&yield_ty, |r| r.to_region_vid() == fr) {
+            return None;
+        }
+
+        let mut highlight = RegionHighlightMode::default();
+        highlight.highlighting_region_vid(fr, *counter);
+        let type_name = infcx.extract_type_name(&yield_ty, Some(highlight));
+
+        let mir_node_id = tcx.hir().as_local_node_id(mir_def_id).expect("non-local mir");
+
+        let yield_span = match tcx.hir().get(mir_node_id) {
+            hir::Node::Expr(hir::Expr {
+                node: hir::ExprKind::Closure(_, _, _, span, _),
+                ..
+            }) => (
+                tcx.sess.source_map().end_point(*span)
+            ),
+            _ => mir.span,
+        };
+
+        debug!(
+            "give_name_if_anonymous_region_appears_in_yield_ty: \
+             type_name = {:?}, yield_span = {:?}",
+            yield_span,
+            type_name,
+        );
+
+        Some(RegionName {
+            name: self.synthesize_region_name(counter),
+            source: RegionNameSource::AnonRegionFromYieldTy(yield_span, type_name),
+        })
+    }
+
     /// Creates a synthetic region named `'1`, incrementing the
     /// counter.
     fn synthesize_region_name(&self, counter: &mut usize) -> InternedString {
         let c = *counter;
         *counter += 1;
 
-        Name::intern(&format!("'{:?}", c)).as_interned_str()
+        InternedString::intern(&format!("'{:?}", c))
     }
 }

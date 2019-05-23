@@ -7,10 +7,8 @@ use crate::middle::region;
 use crate::ty::{self, DefIdTree, ParamConst, Ty, TyCtxt, TypeFoldable};
 use crate::ty::subst::{Kind, Subst, UnpackedKind};
 use crate::mir::interpret::ConstValue;
-use syntax::symbol::{keywords, Symbol};
-
 use rustc_target::spec::abi::Abi;
-use syntax::symbol::InternedString;
+use syntax::symbol::{kw, InternedString};
 
 use std::cell::Cell;
 use std::fmt::{self, Write as _};
@@ -355,11 +353,10 @@ pub trait PrettyPrinter<'gcx: 'tcx, 'tcx>:
             // the children of the visible parent (as was done when computing
             // `visible_parent_map`), looking for the specific child we currently have and then
             // have access to the re-exported name.
-            DefPathData::Module(ref mut name) |
             DefPathData::TypeNs(ref mut name) if Some(visible_parent) != actual_parent => {
                 let reexport = self.tcx().item_children(visible_parent)
                     .iter()
-                    .find(|child| child.def.def_id() == def_id)
+                    .find(|child| child.res.def_id() == def_id)
                     .map(|child| child.ident.as_interned_str());
                 if let Some(reexport) = reexport {
                     *name = reexport;
@@ -367,7 +364,7 @@ pub trait PrettyPrinter<'gcx: 'tcx, 'tcx>:
             }
             // Re-exported `extern crate` (#43189).
             DefPathData::CrateRoot => {
-                data = DefPathData::Module(
+                data = DefPathData::TypeNs(
                     self.tcx().original_crate_name(def_id.krate).as_interned_str(),
                 );
             }
@@ -583,16 +580,16 @@ pub trait PrettyPrinter<'gcx: 'tcx, 'tcx>:
                 if let Some(hir_id) = self.tcx().hir().as_local_hir_id(did) {
                     p!(write("@{:?}", self.tcx().hir().span_by_hir_id(hir_id)));
                     let mut sep = " ";
-                    for (freevar, upvar_ty) in self.tcx().freevars(did)
+                    for (upvar, upvar_ty) in self.tcx().upvars(did)
                         .as_ref()
-                        .map_or(&[][..], |fv| &fv[..])
+                        .map_or(&[][..], |v| &v[..])
                         .iter()
                         .zip(upvar_tys)
                     {
                         p!(
                             write("{}{}:",
                                     sep,
-                                    self.tcx().hir().name_by_hir_id(freevar.var_id())),
+                                    self.tcx().hir().name_by_hir_id(upvar.var_id())),
                             print(upvar_ty));
                         sep = ", ";
                     }
@@ -626,16 +623,16 @@ pub trait PrettyPrinter<'gcx: 'tcx, 'tcx>:
                         p!(write("@{:?}", self.tcx().hir().span_by_hir_id(hir_id)));
                     }
                     let mut sep = " ";
-                    for (freevar, upvar_ty) in self.tcx().freevars(did)
+                    for (upvar, upvar_ty) in self.tcx().upvars(did)
                         .as_ref()
-                        .map_or(&[][..], |fv| &fv[..])
+                        .map_or(&[][..], |v| &v[..])
                         .iter()
                         .zip(upvar_tys)
                     {
                         p!(
                             write("{}{}:",
                                     sep,
-                                    self.tcx().hir().name_by_hir_id(freevar.var_id())),
+                                    self.tcx().hir().name_by_hir_id(upvar.var_id())),
                             print(upvar_ty));
                         sep = ", ";
                     }
@@ -712,7 +709,7 @@ pub trait PrettyPrinter<'gcx: 'tcx, 'tcx>:
             // in order to place the projections inside the `<...>`.
             if !resugared {
                 // Use a type that can't appear in defaults of type parameters.
-                let dummy_self = self.tcx().mk_infer(ty::FreshTy(0));
+                let dummy_self = self.tcx().mk_ty_infer(ty::FreshTy(0));
                 let principal = principal.with_self_ty(self.tcx(), dummy_self);
 
                 let args = self.generic_args_to_print(
@@ -859,15 +856,16 @@ impl TyCtxt<'_, '_, '_> {
     // (but also some things just print a `DefId` generally so maybe we need this?)
     fn guess_def_namespace(self, def_id: DefId) -> Namespace {
         match self.def_key(def_id).disambiguated_data.data {
-            DefPathData::ValueNs(..) |
-            DefPathData::EnumVariant(..) |
-            DefPathData::Field(..) |
-            DefPathData::AnonConst |
-            DefPathData::ConstParam(..) |
-            DefPathData::ClosureExpr |
-            DefPathData::Ctor => Namespace::ValueNS,
+            DefPathData::TypeNs(..)
+            | DefPathData::CrateRoot
+            | DefPathData::ImplTrait => Namespace::TypeNS,
 
-            DefPathData::MacroDef(..) => Namespace::MacroNS,
+            DefPathData::ValueNs(..)
+            | DefPathData::AnonConst
+            | DefPathData::ClosureExpr
+            | DefPathData::Ctor => Namespace::ValueNS,
+
+            DefPathData::MacroNs(..) => Namespace::MacroNS,
 
             _ => Namespace::TypeNS,
         }
@@ -982,7 +980,7 @@ impl<F: fmt::Write> Printer<'gcx, 'tcx> for FmtPrinter<'_, 'gcx, 'tcx, F> {
             if self.tcx.sess.rust_2018() {
                 // We add the `crate::` keyword on Rust 2018, only when desired.
                 if SHOULD_PREFIX_WITH_CRATE.with(|flag| flag.get()) {
-                    write!(self, "{}", keywords::Crate.name())?;
+                    write!(self, "{}", kw::Crate)?;
                     self.empty_path = false;
                 }
             }
@@ -1142,14 +1140,16 @@ impl<F: fmt::Write> PrettyPrinter<'gcx, 'tcx> for FmtPrinter<'_, 'gcx, 'tcx, F> 
 
         match *region {
             ty::ReEarlyBound(ref data) => {
-                data.name != "" && data.name != "'_"
+                data.name.as_symbol() != kw::Invalid &&
+                data.name.as_symbol() != kw::UnderscoreLifetime
             }
 
             ty::ReLateBound(_, br) |
             ty::ReFree(ty::FreeRegion { bound_region: br, .. }) |
             ty::RePlaceholder(ty::Placeholder { name: br, .. }) => {
                 if let ty::BrNamed(_, name) = br {
-                    if name != "" && name != "'_" {
+                    if name.as_symbol() != kw::Invalid &&
+                       name.as_symbol() != kw::UnderscoreLifetime {
                         return true;
                     }
                 }
@@ -1205,7 +1205,7 @@ impl<F: fmt::Write> FmtPrinter<'_, '_, '_, F> {
         // `explain_region()` or `note_and_explain_region()`.
         match *region {
             ty::ReEarlyBound(ref data) => {
-                if data.name != "" {
+                if data.name.as_symbol() != kw::Invalid {
                     p!(write("{}", data.name));
                     return Ok(self);
                 }
@@ -1214,7 +1214,8 @@ impl<F: fmt::Write> FmtPrinter<'_, '_, '_, F> {
             ty::ReFree(ty::FreeRegion { bound_region: br, .. }) |
             ty::RePlaceholder(ty::Placeholder { name: br, .. }) => {
                 if let ty::BrNamed(_, name) = br {
-                    if name != "" && name != "'_" {
+                    if name.as_symbol() != kw::Invalid &&
+                       name.as_symbol() != kw::UnderscoreLifetime {
                         p!(write("{}", name));
                         return Ok(self);
                     }
@@ -1285,10 +1286,10 @@ impl<F: fmt::Write> FmtPrinter<'_, 'gcx, 'tcx, F> {
     {
         fn name_by_region_index(index: usize) -> InternedString {
             match index {
-                0 => Symbol::intern("'r"),
-                1 => Symbol::intern("'s"),
-                i => Symbol::intern(&format!("'t{}", i-2)),
-            }.as_interned_str()
+                0 => InternedString::intern("'r"),
+                1 => InternedString::intern("'s"),
+                i => InternedString::intern(&format!("'t{}", i-2)),
+            }
         }
 
         // Replace any anonymous late-bound regions with named
@@ -1481,7 +1482,7 @@ define_print_and_forward_display! {
 
     ty::ExistentialTraitRef<'tcx> {
         // Use a type that can't appear in defaults of type parameters.
-        let dummy_self = cx.tcx().mk_infer(ty::FreshTy(0));
+        let dummy_self = cx.tcx().mk_ty_infer(ty::FreshTy(0));
         let trait_ref = self.with_self_ty(cx.tcx(), dummy_self);
         p!(print(trait_ref))
     }

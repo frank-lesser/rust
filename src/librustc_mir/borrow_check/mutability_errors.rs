@@ -5,10 +5,10 @@ use rustc::mir::{
     Mutability, Operand, Place, PlaceBase, Projection, ProjectionElem, Static, StaticKind,
 };
 use rustc::mir::{Terminator, TerminatorKind};
-use rustc::ty::{self, Const, DefIdTree, TyS, TyCtxt};
+use rustc::ty::{self, Const, DefIdTree, Ty, TyS, TyCtxt};
 use rustc_data_structures::indexed_vec::Idx;
 use syntax_pos::Span;
-use syntax_pos::symbol::keywords;
+use syntax_pos::symbol::kw;
 
 use crate::dataflow::move_paths::InitLocation;
 use crate::borrow_check::MirBorrowckCtxt;
@@ -256,7 +256,7 @@ impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
                             // Deliberately fall into this case for all implicit self types,
                             // so that we don't fall in to the next case with them.
                             *kind == mir::ImplicitSelfKind::MutRef
-                        } else if Some(keywords::SelfLower.name()) == local_decl.name {
+                        } else if Some(kw::SelfLower) == local_decl.name {
                             // Otherwise, check if the name is the self kewyord - in which case
                             // we have an explicit self. Do the same thing in this case and check
                             // for a `self: &mut Self` to suggest removing the `&mut`.
@@ -613,7 +613,7 @@ fn suggest_ampmut<'cx, 'gcx, 'tcx>(
      })
 }
 
-fn is_closure_or_generator(ty: ty::Ty<'_>) -> bool {
+fn is_closure_or_generator(ty: Ty<'_>) -> bool {
     ty.is_closure() || ty.is_generator()
 }
 
@@ -626,7 +626,7 @@ fn is_closure_or_generator(ty: ty::Ty<'_>) -> bool {
 /// ```
 fn annotate_struct_field(
     tcx: TyCtxt<'cx, 'gcx, 'tcx>,
-    ty: ty::Ty<'tcx>,
+    ty: Ty<'tcx>,
     field: &mir::Field,
 ) -> Option<(Span, String)> {
     // Expect our local to be a reference to a struct of some kind.

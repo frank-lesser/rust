@@ -4,7 +4,7 @@ use std::mem;
 
 use syntax::source_map::{self, Span, DUMMY_SP};
 use rustc::hir::def_id::DefId;
-use rustc::hir::def::Def;
+use rustc::hir::def::DefKind;
 use rustc::mir;
 use rustc::ty::layout::{
     self, Size, Align, HasDataLayout, LayoutOf, TyLayout
@@ -172,6 +172,14 @@ impl<'a, 'mir, 'tcx, M> layout::HasTyCtxt<'tcx> for InterpretCx<'a, 'mir, 'tcx, 
     #[inline]
     fn tcx<'d>(&'d self) -> TyCtxt<'d, 'tcx, 'tcx> {
         *self.tcx
+    }
+}
+
+impl<'a, 'mir, 'tcx, M> layout::HasParamEnv<'tcx> for InterpretCx<'a, 'mir, 'tcx, M>
+    where M: Machine<'a, 'mir, 'tcx>
+{
+    fn param_env(&self) -> ty::ParamEnv<'tcx> {
+        self.param_env
     }
 }
 
@@ -501,9 +509,11 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tc
             // entry in `locals` should never be used. Make it dead, to be sure.
             locals[mir::RETURN_PLACE].value = LocalValue::Dead;
             // Now mark those locals as dead that we do not want to initialize
-            match self.tcx.describe_def(instance.def_id()) {
+            match self.tcx.def_kind(instance.def_id()) {
                 // statics and constants don't have `Storage*` statements, no need to look for them
-                Some(Def::Static(..)) | Some(Def::Const(..)) | Some(Def::AssociatedConst(..)) => {},
+                Some(DefKind::Static)
+                | Some(DefKind::Const)
+                | Some(DefKind::AssociatedConst) => {},
                 _ => {
                     trace!("push_stack_frame: {:?}: num_bbs: {}", span, mir.basic_blocks().len());
                     for block in mir.basic_blocks() {
@@ -603,7 +613,9 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tc
         trace!("{:?} is now live", local);
 
         let local_val = LocalValue::Uninitialized;
-        // StorageLive *always* kills the value that's currently stored
+        // StorageLive *always* kills the value that's currently stored.
+        // However, we do not error if the variable already is live;
+        // see <https://github.com/rust-lang/rust/issues/42371>.
         Ok(mem::replace(&mut self.frame_mut().locals[local].value, local_val))
     }
 

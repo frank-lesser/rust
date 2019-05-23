@@ -21,7 +21,7 @@
 //! If you define a new `LateLintPass`, you will also need to add it to the
 //! `late_lint_methods!` invocation in `lib.rs`.
 
-use rustc::hir::def::Def;
+use rustc::hir::def::{Res, DefKind};
 use rustc::hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::ty::{self, Ty};
 use rustc::{lint, util};
@@ -42,11 +42,10 @@ use syntax::edition::Edition;
 use syntax::feature_gate::{AttributeGate, AttributeTemplate, AttributeType};
 use syntax::feature_gate::{Stability, deprecated_attributes};
 use syntax_pos::{BytePos, Span, SyntaxContext};
-use syntax::symbol::{Symbol, keywords};
+use syntax::symbol::{Symbol, kw, sym};
 use syntax::errors::{Applicability, DiagnosticBuilder};
 use syntax::print::pprust::expr_to_string;
 use syntax::visit::FnKind;
-use syntax::struct_span_err;
 
 use rustc::hir::{self, GenericParamKind, PatKind};
 
@@ -154,7 +153,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonShorthandFieldPatterns {
         if let PatKind::Struct(ref qpath, ref field_pats, _) = pat.node {
             let variant = cx.tables.pat_ty(pat).ty_adt_def()
                                    .expect("struct pattern type is not an ADT")
-                                   .variant_of_def(cx.tables.qpath_def(qpath, pat.hir_id));
+                                   .variant_of_res(cx.tables.qpath_res(qpath, pat.hir_id));
             for fieldpat in field_pats {
                 if fieldpat.node.is_shorthand {
                     continue;
@@ -208,7 +207,7 @@ impl UnsafeCode {
 
 impl EarlyLintPass for UnsafeCode {
     fn check_attribute(&mut self, cx: &EarlyContext<'_>, attr: &ast::Attribute) {
-        if attr.check_name("allow_internal_unsafe") {
+        if attr.check_name(sym::allow_internal_unsafe) {
             self.report_unsafe(cx, attr.span, "`allow_internal_unsafe` allows defining \
                                                macros using unsafe without triggering \
                                                the `unsafe_code` lint at their call site");
@@ -286,7 +285,7 @@ pub struct MissingDoc {
 impl_lint_pass!(MissingDoc => [MISSING_DOCS]);
 
 fn has_doc(attr: &ast::Attribute) -> bool {
-    if !attr.check_name("doc") {
+    if !attr.check_name(sym::doc) {
         return false;
     }
 
@@ -296,7 +295,7 @@ fn has_doc(attr: &ast::Attribute) -> bool {
 
     if let Some(list) = attr.meta_item_list() {
         for meta in list {
-            if meta.check_name("include") || meta.check_name("hidden") {
+            if meta.check_name(sym::include) || meta.check_name(sym::hidden) {
                 return true;
             }
         }
@@ -356,10 +355,10 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MissingDoc {
     fn enter_lint_attrs(&mut self, _: &LateContext<'_, '_>, attrs: &[ast::Attribute]) {
         let doc_hidden = self.doc_hidden() ||
                          attrs.iter().any(|attr| {
-            attr.check_name("doc") &&
+            attr.check_name(sym::doc) &&
             match attr.meta_item_list() {
                 None => false,
-                Some(l) => attr::list_contains_name(&l, "hidden"),
+                Some(l) => attr::list_contains_name(&l, sym::hidden),
             }
         });
         self.doc_hidden_stack.push(doc_hidden);
@@ -404,7 +403,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MissingDoc {
             hir::ItemKind::Impl(.., Some(ref trait_ref), _, ref impl_item_refs) => {
                 // If the trait is private, add the impl items to private_traits so they don't get
                 // reported for missing docs.
-                let real_trait = trait_ref.path.def.def_id();
+                let real_trait = trait_ref.path.res.def_id();
                 if let Some(hir_id) = cx.tcx.hir().as_local_hir_id(real_trait) {
                     match cx.tcx.hir().find_by_hir_id(hir_id) {
                         Some(Node::Item(item)) => {
@@ -608,7 +607,7 @@ impl EarlyLintPass for AnonymousParameters {
                 for arg in sig.decl.inputs.iter() {
                     match arg.pat.node {
                         ast::PatKind::Ident(_, ident, None) => {
-                            if ident.name == keywords::Invalid.name() {
+                            if ident.name == kw::Invalid {
                                 let ty_snip = cx
                                     .sess
                                     .source_map()
@@ -724,7 +723,7 @@ impl UnusedDocComment {
 
             let span = sugared_span.take().unwrap_or_else(|| attr.span);
 
-            if attr.check_name("doc") {
+            if attr.check_name(sym::doc) {
                 let mut err = cx.struct_span_lint(UNUSED_DOC_COMMENTS, span, "unused doc comment");
 
                 err.span_label(
@@ -830,7 +829,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for InvalidNoMangleItems {
     fn check_item(&mut self, cx: &LateContext<'_, '_>, it: &hir::Item) {
         match it.node {
             hir::ItemKind::Fn(.., ref generics, _) => {
-                if let Some(no_mangle_attr) = attr::find_by_name(&it.attrs, "no_mangle") {
+                if let Some(no_mangle_attr) = attr::find_by_name(&it.attrs, sym::no_mangle) {
                     for param in &generics.params {
                         match param.kind {
                             GenericParamKind::Lifetime { .. } => {}
@@ -857,7 +856,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for InvalidNoMangleItems {
                 }
             }
             hir::ItemKind::Const(..) => {
-                if attr::contains_name(&it.attrs, "no_mangle") {
+                if attr::contains_name(&it.attrs, sym::no_mangle) {
                     // Const items do not refer to a particular location in memory, and therefore
                     // don't have anything to attach a symbol to
                     let msg = "const items should never be #[no_mangle]";
@@ -912,11 +911,11 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MutableTransmutes {
              expr: &hir::Expr)
              -> Option<(Ty<'tcx>, Ty<'tcx>)> {
             let def = if let hir::ExprKind::Path(ref qpath) = expr.node {
-                cx.tables.qpath_def(qpath, expr.hir_id)
+                cx.tables.qpath_res(qpath, expr.hir_id)
             } else {
                 return None;
             };
-            if let Def::Fn(did) = def {
+            if let Res::Def(DefKind::Fn, did) = def {
                 if !def_id_is_transmute(cx, did) {
                     return None;
                 }
@@ -930,7 +929,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MutableTransmutes {
 
         fn def_id_is_transmute(cx: &LateContext<'_, '_>, def_id: DefId) -> bool {
             cx.tcx.fn_sig(def_id).abi() == RustIntrinsic &&
-            cx.tcx.item_name(def_id) == "transmute"
+            cx.tcx.item_name(def_id) == sym::transmute
         }
     }
 }
@@ -948,7 +947,7 @@ declare_lint_pass!(
 
 impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnstableFeatures {
     fn check_attribute(&mut self, ctx: &LateContext<'_, '_>, attr: &ast::Attribute) {
-        if attr.check_name("feature") {
+        if attr.check_name(sym::feature) {
             if let Some(items) = attr.meta_item_list() {
                 for item in items {
                     ctx.span_lint(UNSTABLE_FEATURES, item.span(), "unstable feature");
@@ -1071,8 +1070,8 @@ impl TypeAliasBounds {
                 // If this is a type variable, we found a `T::Assoc`.
                 match ty.node {
                     hir::TyKind::Path(hir::QPath::Resolved(None, ref path)) => {
-                        match path.def {
-                            Def::TyParam(_) => true,
+                        match path.res {
+                            Res::Def(DefKind::TyParam, _) => true,
                             _ => false
                         }
                     }
@@ -1383,7 +1382,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnnameableTestItems {
             return;
         }
 
-        if let Some(attr) = attr::find_by_name(&it.attrs, "rustc_test_marker") {
+        if let Some(attr) = attr::find_by_name(&it.attrs, sym::rustc_test_marker) {
             cx.struct_span_lint(
                 UNNAMEABLE_TEST_ITEMS,
                 attr.span,
@@ -1438,15 +1437,10 @@ impl KeywordIdents {
                          UnderMacro(under_macro): UnderMacro,
                          ident: ast::Ident)
     {
-        let ident_str = &ident.as_str()[..];
-        let cur_edition = cx.sess.edition();
-        let is_raw_ident = |ident: ast::Ident| {
-            cx.sess.parse_sess.raw_identifier_spans.borrow().contains(&ident.span)
-        };
-        let next_edition = match cur_edition {
+        let next_edition = match cx.sess.edition() {
             Edition::Edition2015 => {
-                match ident_str {
-                    "async" | "try" => Edition::Edition2018,
+                match &ident.as_str()[..] {
+                    "async" | "await" | "try" => Edition::Edition2018,
 
                     // rust-lang/rust#56327: Conservatively do not
                     // attempt to report occurrences of `dyn` within
@@ -1462,43 +1456,16 @@ impl KeywordIdents {
                     // an identifier.
                     "dyn" if !under_macro => Edition::Edition2018,
 
-                    // Only issue warnings for `await` if the `async_await`
-                    // feature isn't being used. Otherwise, users need
-                    // to keep using `await` for the macro exposed by std.
-                    "await" if !cx.sess.features_untracked().async_await => Edition::Edition2018,
                     _ => return,
                 }
             }
 
             // There are no new keywords yet for the 2018 edition and beyond.
-            // However, `await` is a "false" keyword in the 2018 edition,
-            // and can only be used if the `async_await` feature is enabled.
-            // Otherwise, we emit an error.
-            _ => {
-                if "await" == ident_str
-                    && !cx.sess.features_untracked().async_await
-                    && !is_raw_ident(ident)
-                {
-                    let mut err = struct_span_err!(
-                        cx.sess,
-                        ident.span,
-                        E0721,
-                        "`await` is a keyword in the {} edition", cur_edition,
-                    );
-                    err.span_suggestion(
-                        ident.span,
-                        "you can use a raw identifier to stay compatible",
-                        "r#await".to_string(),
-                        Applicability::MachineApplicable,
-                    );
-                    err.emit();
-                }
-                return
-            },
+            _ => return,
         };
 
         // don't lint `r#foo`
-        if is_raw_ident(ident) {
+        if cx.sess.parse_sess.raw_identifier_spans.borrow().contains(&ident.span) {
             return;
         }
 

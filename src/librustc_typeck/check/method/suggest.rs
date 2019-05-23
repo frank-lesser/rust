@@ -8,7 +8,7 @@ use crate::util::nodemap::FxHashSet;
 use errors::{Applicability, DiagnosticBuilder};
 use rustc_data_structures::sync::Lrc;
 use rustc::hir::{self, ExprKind, Node, QPath};
-use rustc::hir::def::Def;
+use rustc::hir::def::{Res, DefKind};
 use rustc::hir::def_id::{CRATE_DEF_INDEX, LOCAL_CRATE, DefId};
 use rustc::hir::map as hir_map;
 use rustc::hir::print;
@@ -26,7 +26,7 @@ use super::{MethodError, NoMatchData, CandidateSource};
 use super::probe::Mode;
 
 impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
-    fn is_fn_ty(&self, ty: &Ty<'tcx>, span: Span) -> bool {
+    fn is_fn_ty(&self, ty: Ty<'tcx>, span: Span) -> bool {
         let tcx = self.tcx;
         match ty.sty {
             // Not all of these (e.g., unsafe fns) implement `FnOnce`,
@@ -91,14 +91,21 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     CandidateSource::ImplSource(impl_did) => {
                         // Provide the best span we can. Use the item, if local to crate, else
                         // the impl, if local to crate (item may be defaulted), else nothing.
-                        let item = self.associated_item(impl_did, item_name, Namespace::Value)
-                            .or_else(|| {
-                                self.associated_item(
-                                    self.tcx.impl_trait_ref(impl_did).unwrap().def_id,
-                                    item_name,
-                                    Namespace::Value,
-                                )
-                            }).unwrap();
+                        let item = match self.associated_item(
+                            impl_did,
+                            item_name,
+                            Namespace::Value,
+                        ).or_else(|| {
+                            let impl_trait_ref = self.tcx.impl_trait_ref(impl_did)?;
+                            self.associated_item(
+                                impl_trait_ref.def_id,
+                                item_name,
+                                Namespace::Value,
+                            )
+                        }) {
+                            Some(item) => item,
+                            None => continue,
+                        };
                         let note_span = self.tcx.hir().span_if_local(item.def_id).or_else(|| {
                             self.tcx.hir().span_if_local(impl_did)
                         });
@@ -132,9 +139,14 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         }
                     }
                     CandidateSource::TraitSource(trait_did) => {
-                        let item = self
-                            .associated_item(trait_did, item_name, Namespace::Value)
-                            .unwrap();
+                        let item = match self.associated_item(
+                            trait_did,
+                            item_name,
+                            Namespace::Value)
+                        {
+                            Some(item) => item,
+                            None => continue,
+                        };
                         let item_span = self.tcx.sess.source_map()
                             .def_span(self.tcx.def_span(item.def_id));
                         if sources.len() > 1 {
@@ -249,10 +261,9 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                             ExprKind::Path(ref qpath) => {
                                 // local binding
                                 if let &QPath::Resolved(_, ref path) = &qpath {
-                                    if let hir::def::Def::Local(hir_id) = path.def {
+                                    if let hir::def::Res::Local(hir_id) = path.res {
                                         let span = tcx.hir().span_by_hir_id(hir_id);
-                                        let snippet = tcx.sess.source_map().span_to_snippet(span)
-                                            .unwrap();
+                                        let snippet = tcx.sess.source_map().span_to_snippet(span);
                                         let filename = tcx.sess.source_map().span_to_filename(span);
 
                                         let parent_node = self.tcx.hir().get_by_hir_id(
@@ -263,12 +274,12 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                             concrete_type,
                                         );
 
-                                        match (filename, parent_node) {
+                                        match (filename, parent_node, snippet) {
                                             (FileName::Real(_), Node::Local(hir::Local {
                                                 source: hir::LocalSource::Normal,
                                                 ty,
                                                 ..
-                                            })) => {
+                                            }), Ok(ref snippet)) => {
                                                 err.span_suggestion(
                                                     // account for `let x: _ = 42;`
                                                     //                  ^^^^
@@ -375,14 +386,14 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                     self.tcx.hir().get_parent_node_by_hir_id(expr.hir_id),
                                 );
 
-                                let span = call_expr.span.trim_start(item_name.span).unwrap();
-
-                                err.span_suggestion(
-                                    span,
-                                    "remove the arguments",
-                                    String::new(),
-                                    Applicability::MaybeIncorrect,
-                                );
+                                if let Some(span) = call_expr.span.trim_start(item_name.span) {
+                                    err.span_suggestion(
+                                        span,
+                                        "remove the arguments",
+                                        String::new(),
+                                        Applicability::MaybeIncorrect,
+                                    );
+                                }
                             }
                         }
 
@@ -483,13 +494,13 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 }
 
                 if let Some(lev_candidate) = lev_candidate {
-                    let def = lev_candidate.def();
+                    let def_kind = lev_candidate.def_kind();
                     err.span_suggestion(
                         span,
                         &format!(
                             "there is {} {} with a similar name",
-                            def.article(),
-                            def.kind_name(),
+                            def_kind.article(),
+                            def_kind.descr(),
                         ),
                         lev_candidate.ident.to_string(),
                         Applicability::MaybeIncorrect,
@@ -510,9 +521,9 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 err.emit();
             }
 
-            MethodError::PrivateMatch(def, out_of_scope_traits) => {
+            MethodError::PrivateMatch(kind, _, out_of_scope_traits) => {
                 let mut err = struct_span_err!(self.tcx.sess, span, E0624,
-                                               "{} `{}` is private", def.kind_name(), item_name);
+                                               "{} `{}` is private", kind.descr(), item_name);
                 self.suggest_valid_traits(&mut err, out_of_scope_traits);
                 err.emit();
             }
@@ -799,21 +810,21 @@ fn compute_all_traits<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Vec<DefId>
     // Cross-crate:
 
     let mut external_mods = FxHashSet::default();
-    fn handle_external_def(tcx: TyCtxt<'_, '_, '_>,
+    fn handle_external_res(tcx: TyCtxt<'_, '_, '_>,
                            traits: &mut Vec<DefId>,
                            external_mods: &mut FxHashSet<DefId>,
-                           def: Def) {
-        match def {
-            Def::Trait(def_id) |
-            Def::TraitAlias(def_id) => {
+                           res: Res) {
+        match res {
+            Res::Def(DefKind::Trait, def_id) |
+            Res::Def(DefKind::TraitAlias, def_id) => {
                 traits.push(def_id);
             }
-            Def::Mod(def_id) => {
+            Res::Def(DefKind::Mod, def_id) => {
                 if !external_mods.insert(def_id) {
                     return;
                 }
                 for child in tcx.item_children(def_id).iter() {
-                    handle_external_def(tcx, traits, external_mods, child.def)
+                    handle_external_res(tcx, traits, external_mods, child.res)
                 }
             }
             _ => {}
@@ -824,7 +835,7 @@ fn compute_all_traits<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Vec<DefId>
             krate: cnum,
             index: CRATE_DEF_INDEX,
         };
-        handle_external_def(tcx, &mut traits, &mut external_mods, Def::Mod(def_id));
+        handle_external_res(tcx, &mut traits, &mut external_mods, Res::Def(DefKind::Mod, def_id));
     }
 
     traits

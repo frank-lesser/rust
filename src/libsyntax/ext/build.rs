@@ -3,7 +3,7 @@ use crate::attr;
 use crate::source_map::{dummy_spanned, respan, Spanned};
 use crate::ext::base::ExtCtxt;
 use crate::ptr::P;
-use crate::symbol::{Symbol, keywords};
+use crate::symbol::{Symbol, kw};
 use crate::ThinVec;
 
 use rustc_target::spec::abi::Abi;
@@ -628,7 +628,7 @@ impl<'a> AstBuilder for ExtCtxt<'a> {
         self.expr_path(self.path_ident(span, id))
     }
     fn expr_self(&self, span: Span) -> P<ast::Expr> {
-        self.expr_ident(span, keywords::SelfLower.ident())
+        self.expr_ident(span, Ident::with_empty_ctxt(kw::SelfLower))
     }
 
     fn expr_binary(&self, sp: Span, op: ast::BinOpKind,
@@ -697,8 +697,9 @@ impl<'a> AstBuilder for ExtCtxt<'a> {
         self.expr_struct(span, self.path_ident(span, id), fields)
     }
 
-    fn expr_lit(&self, sp: Span, lit: ast::LitKind) -> P<ast::Expr> {
-        self.expr(sp, ast::ExprKind::Lit(respan(sp, lit)))
+    fn expr_lit(&self, span: Span, lit_kind: ast::LitKind) -> P<ast::Expr> {
+        let lit = ast::Lit::from_lit_kind(lit_kind, span);
+        self.expr(span, ast::ExprKind::Lit(lit))
     }
     fn expr_usize(&self, span: Span, i: usize) -> P<ast::Expr> {
         self.expr_lit(span, ast::LitKind::Int(i as u128,
@@ -889,12 +890,13 @@ impl<'a> AstBuilder for ExtCtxt<'a> {
         self.pat_tuple_struct(span, path, vec![pat])
     }
 
-    fn arm(&self, _span: Span, pats: Vec<P<ast::Pat>>, expr: P<ast::Expr>) -> ast::Arm {
+    fn arm(&self, span: Span, pats: Vec<P<ast::Pat>>, expr: P<ast::Expr>) -> ast::Arm {
         ast::Arm {
             attrs: vec![],
             pats,
             guard: None,
             body: expr,
+            span,
         }
     }
 
@@ -1164,17 +1166,17 @@ impl<'a> AstBuilder for ExtCtxt<'a> {
         attr::mk_list_item(sp, Ident::with_empty_ctxt(name).with_span_pos(sp), mis)
     }
 
-    fn meta_name_value(&self, sp: Span, name: ast::Name, value: ast::LitKind)
+    fn meta_name_value(&self, span: Span, name: ast::Name, lit_kind: ast::LitKind)
                        -> ast::MetaItem {
-        attr::mk_name_value_item(sp, Ident::with_empty_ctxt(name).with_span_pos(sp),
-                                 respan(sp, value))
+        attr::mk_name_value_item(span, Ident::with_empty_ctxt(name).with_span_pos(span),
+                                 lit_kind, span)
     }
 
     fn item_use(&self, sp: Span,
                 vis: ast::Visibility, vp: P<ast::UseTree>) -> P<ast::Item> {
         P(ast::Item {
             id: ast::DUMMY_NODE_ID,
-            ident: keywords::Invalid.ident(),
+            ident: Ident::invalid(),
             attrs: vec![],
             node: ast::ItemKind::Use(vp),
             vis,

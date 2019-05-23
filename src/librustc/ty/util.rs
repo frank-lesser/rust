@@ -1,6 +1,7 @@
 //! Miscellaneous type-system utilities that are too small to deserve their own modules.
 
 use crate::hir;
+use crate::hir::def::DefKind;
 use crate::hir::def_id::DefId;
 use crate::hir::map::DefPathData;
 use crate::mir::interpret::{sign_extend, truncate};
@@ -21,6 +22,7 @@ use rustc_macros::HashStable;
 use std::{cmp, fmt};
 use syntax::ast;
 use syntax::attr::{self, SignedInt, UnsignedInt};
+use syntax::symbol::sym;
 use syntax_pos::{Span, DUMMY_SP};
 
 #[derive(Copy, Clone, Debug)]
@@ -446,7 +448,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         // Such access can be in plain sight (e.g., dereferencing
         // `*foo.0` of `Foo<'a>(&'a u32)`) or indirectly hidden
         // (e.g., calling `foo.0.clone()` of `Foo<T:Clone>`).
-        if self.has_attr(dtor, "unsafe_destructor_blind_to_params") {
+        if self.has_attr(dtor, sym::unsafe_destructor_blind_to_params) {
             debug!("destructor_constraint({:?}) - blind", def.did);
             return vec![];
         }
@@ -529,21 +531,13 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
 
     /// Returns `true` if `def_id` refers to a trait (i.e., `trait Foo { ... }`).
     pub fn is_trait(self, def_id: DefId) -> bool {
-        if let DefPathData::Trait(_) = self.def_key(def_id).disambiguated_data.data {
-            true
-        } else {
-            false
-        }
+        self.def_kind(def_id) == Some(DefKind::Trait)
     }
 
     /// Returns `true` if `def_id` refers to a trait alias (i.e., `trait Foo = ...;`),
     /// and `false` otherwise.
     pub fn is_trait_alias(self, def_id: DefId) -> bool {
-        if let DefPathData::TraitAlias(_) = self.def_key(def_id).disambiguated_data.data {
-            true
-        } else {
-            false
-        }
+        self.def_kind(def_id) == Some(DefKind::TraitAlias)
     }
 
     /// Returns `true` if this `DefId` refers to the implicit constructor for
@@ -601,7 +595,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     pub fn empty_substs_for_def_id(self, item_def_id: DefId) -> SubstsRef<'tcx> {
         InternalSubsts::for_item(self, item_def_id, |param, _| {
             match param.kind {
-                GenericParamDefKind::Lifetime => self.types.re_erased.into(),
+                GenericParamDefKind::Lifetime => self.lifetimes.re_erased.into(),
                 GenericParamDefKind::Type { .. } => {
                     bug!("empty_substs_for_def_id: {:?} has type parameters", item_def_id)
                 }

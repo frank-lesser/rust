@@ -6,7 +6,6 @@ use crate::ext::hygiene::Mark;
 use crate::tokenstream::TokenStream;
 use crate::mut_visit::*;
 use crate::ptr::P;
-use crate::symbol::keywords;
 use crate::ThinVec;
 
 use smallvec::{smallvec, SmallVec};
@@ -22,7 +21,7 @@ pub fn placeholder(kind: AstFragmentKind, id: ast::NodeId) -> AstFragment {
         })
     }
 
-    let ident = keywords::Invalid.ident();
+    let ident = ast::Ident::invalid();
     let attrs = Vec::new();
     let generics = ast::Generics::default();
     let vis = dummy_spanned(ast::VisibilityKind::Inherited);
@@ -199,7 +198,10 @@ impl<'a, 'b> MutVisitor for PlaceholderExpander<'a, 'b> {
 
         if let ast::IsAsync::Async { ref mut arguments, .. } = a {
             for argument in arguments.iter_mut() {
-                self.next_id(&mut argument.stmt.id);
+                self.next_id(&mut argument.move_stmt.id);
+                if let Some(ref mut pat_stmt) = &mut argument.pat_stmt {
+                    self.next_id(&mut pat_stmt.id);
+                }
             }
         }
     }

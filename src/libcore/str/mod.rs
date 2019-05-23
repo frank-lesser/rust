@@ -2188,7 +2188,11 @@ impl str {
     /// [`u8`]. This pointer will be pointing to the first byte of the string
     /// slice.
     ///
+    /// The caller must ensure that the returned pointer is never written to.
+    /// If you need to mutate the contents of the string slice, use [`as_mut_ptr`].
+    ///
     /// [`u8`]: primitive.u8.html
+    /// [`as_mut_ptr`]: #method.as_mut_ptr
     ///
     /// # Examples
     ///
@@ -2214,7 +2218,7 @@ impl str {
     /// modified in a way that it remains valid UTF-8.
     ///
     /// [`u8`]: primitive.u8.html
-    #[unstable(feature = "str_as_mut_ptr", issue = "58215")]
+    #[stable(feature = "str_as_mut_ptr", since = "1.36.0")]
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self as *mut str as *mut u8
@@ -4061,7 +4065,7 @@ impl str {
     /// Both are equivalent to:
     ///
     /// ```
-    /// println!("\\u{{2764}}\n!");
+    /// println!("\\u{{2764}}\\n!");
     /// ```
     ///
     /// Using `to_string`:

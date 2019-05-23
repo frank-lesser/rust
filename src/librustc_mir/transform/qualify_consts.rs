@@ -22,6 +22,7 @@ use rustc::middle::lang_items;
 use rustc::session::config::nightly_options;
 use syntax::ast::LitKind;
 use syntax::feature_gate::{emit_feature_err, GateIssue};
+use syntax::symbol::sym;
 use syntax_pos::{Span, DUMMY_SP};
 
 use std::fmt;
@@ -380,8 +381,8 @@ impl Qualif for IsNotPromotable {
 
                 !allowed ||
                     cx.tcx.get_attrs(def_id).iter().any(
-                        |attr| attr.check_name("thread_local"
-                    ))
+                        |attr| attr.check_name(sym::thread_local)
+                    )
             }
         }
     }
@@ -543,14 +544,14 @@ impl Qualif for IsNotImplicitlyPromotable {
 // Ensure the `IDX` values are sequential (`0..QUALIF_COUNT`).
 macro_rules! static_assert_seq_qualifs {
     ($i:expr => $first:ident $(, $rest:ident)*) => {
-        static_assert!(SEQ_QUALIFS: {
+        static_assert!({
             static_assert_seq_qualifs!($i + 1 => $($rest),*);
 
             $first::IDX == $i
         });
     };
     ($i:expr =>) => {
-        static_assert!(SEQ_QUALIFS: QUALIF_COUNT == $i);
+        static_assert!(QUALIF_COUNT == $i);
     };
 }
 static_assert_seq_qualifs!(
@@ -926,61 +927,63 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
 impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
     fn visit_place(&mut self,
                     place: &Place<'tcx>,
-                    context: PlaceContext<'tcx>,
+                    context: PlaceContext,
                     location: Location) {
         debug!("visit_place: place={:?} context={:?} location={:?}", place, context, location);
-        self.super_place(place, context, location);
-        match *place {
-            Place::Base(PlaceBase::Local(_)) => {}
-            Place::Base(PlaceBase::Static(box Static{ kind: StaticKind::Promoted(_), .. })) => {
-                unreachable!()
-            }
-            Place::Base(PlaceBase::Static(box Static{ kind: StaticKind::Static(def_id), .. })) => {
-                if self.tcx
-                       .get_attrs(def_id)
-                       .iter()
-                       .any(|attr| attr.check_name("thread_local")) {
+        place.iterate(|place_base, place_projections| {
+            match place_base {
+                PlaceBase::Local(_) => {}
+                PlaceBase::Static(box Static{ kind: StaticKind::Promoted(_), .. }) => {
+                    unreachable!()
+                }
+                PlaceBase::Static(box Static{ kind: StaticKind::Static(def_id), .. }) => {
+                    if self.tcx
+                           .get_attrs(*def_id)
+                           .iter()
+                           .any(|attr| attr.check_name(sym::thread_local)) {
+                        if self.mode != Mode::Fn {
+                            span_err!(self.tcx.sess, self.span, E0625,
+                                      "thread-local statics cannot be \
+                                       accessed at compile-time");
+                        }
+                        return;
+                    }
+
+                    // Only allow statics (not consts) to refer to other statics.
+                    if self.mode == Mode::Static || self.mode == Mode::StaticMut {
+                        if self.mode == Mode::Static && context.is_mutating_use() {
+                            // this is not strictly necessary as miri will also bail out
+                            // For interior mutability we can't really catch this statically as that
+                            // goes through raw pointers and intermediate temporaries, so miri has
+                            // to catch this anyway
+                            self.tcx.sess.span_err(
+                                self.span,
+                                "cannot mutate statics in the initializer of another static",
+                            );
+                        }
+                        return;
+                    }
+                    unleash_miri!(self);
+
                     if self.mode != Mode::Fn {
-                        span_err!(self.tcx.sess, self.span, E0625,
-                                  "thread-local statics cannot be \
-                                   accessed at compile-time");
+                        let mut err = struct_span_err!(self.tcx.sess, self.span, E0013,
+                                                       "{}s cannot refer to statics, use \
+                                                        a constant instead", self.mode);
+                        if self.tcx.sess.teach(&err.get_code().unwrap()) {
+                            err.note(
+                                "Static and const variables can refer to other const variables. \
+                                 But a const variable cannot refer to a static variable."
+                            );
+                            err.help(
+                                "To fix this, the value can be extracted as a const and then used."
+                            );
+                        }
+                        err.emit()
                     }
-                    return;
-                }
-
-                // Only allow statics (not consts) to refer to other statics.
-                if self.mode == Mode::Static || self.mode == Mode::StaticMut {
-                    if self.mode == Mode::Static && context.is_mutating_use() {
-                        // this is not strictly necessary as miri will also bail out
-                        // For interior mutability we can't really catch this statically as that
-                        // goes through raw pointers and intermediate temporaries, so miri has
-                        // to catch this anyway
-                        self.tcx.sess.span_err(
-                            self.span,
-                            "cannot mutate statics in the initializer of another static",
-                        );
-                    }
-                    return;
-                }
-                unleash_miri!(self);
-
-                if self.mode != Mode::Fn {
-                    let mut err = struct_span_err!(self.tcx.sess, self.span, E0013,
-                                                   "{}s cannot refer to statics, use \
-                                                    a constant instead", self.mode);
-                    if self.tcx.sess.teach(&err.get_code().unwrap()) {
-                        err.note(
-                            "Static and const variables can refer to other const variables. But a \
-                             const variable cannot refer to a static variable."
-                        );
-                        err.help(
-                            "To fix this, the value can be extracted as a const and then used."
-                        );
-                    }
-                    err.emit()
                 }
             }
-            Place::Projection(ref proj) => {
+
+            for proj in place_projections {
                 match proj.elem {
                     ProjectionElem::Deref => {
                         if context.is_mutating_use() {
@@ -994,7 +997,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                                 if let ty::RawPtr(_) = base_ty.sty {
                                     if !self.tcx.features().const_raw_ptr_deref {
                                         emit_feature_err(
-                                            &self.tcx.sess.parse_sess, "const_raw_ptr_deref",
+                                            &self.tcx.sess.parse_sess, sym::const_raw_ptr_deref,
                                             self.span, GateIssue::Language,
                                             &format!(
                                                 "dereferencing raw pointers in {}s is unstable",
@@ -1018,7 +1021,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                                     Mode::ConstFn => {
                                         if !self.tcx.features().const_fn_union {
                                             emit_feature_err(
-                                                &self.tcx.sess.parse_sess, "const_fn_union",
+                                                &self.tcx.sess.parse_sess, sym::const_fn_union,
                                                 self.span, GateIssue::Language,
                                                 "unions in const fn are unstable",
                                             );
@@ -1040,7 +1043,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                     }
                 }
             }
-        }
+        });
     }
 
     fn visit_operand(&mut self, operand: &Operand<'tcx>, location: Location) {
@@ -1063,7 +1066,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
         debug!("visit_rvalue: rvalue={:?} location={:?}", rvalue, location);
 
         // Check nested operands and places.
-        if let Rvalue::Ref(region, kind, ref place) = *rvalue {
+        if let Rvalue::Ref(_, kind, ref place) = *rvalue {
             // Special-case reborrows.
             let mut is_reborrow = false;
             if let Place::Projection(ref proj) = *place {
@@ -1078,16 +1081,16 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
             if is_reborrow {
                 let ctx = match kind {
                     BorrowKind::Shared => PlaceContext::NonMutatingUse(
-                        NonMutatingUseContext::SharedBorrow(region),
+                        NonMutatingUseContext::SharedBorrow,
                     ),
                     BorrowKind::Shallow => PlaceContext::NonMutatingUse(
-                        NonMutatingUseContext::ShallowBorrow(region),
+                        NonMutatingUseContext::ShallowBorrow,
                     ),
                     BorrowKind::Unique => PlaceContext::NonMutatingUse(
-                        NonMutatingUseContext::UniqueBorrow(region),
+                        NonMutatingUseContext::UniqueBorrow,
                     ),
                     BorrowKind::Mut { .. } => PlaceContext::MutatingUse(
-                        MutatingUseContext::Borrow(region),
+                        MutatingUseContext::Borrow,
                     ),
                 };
                 self.super_place(place, ctx, location);
@@ -1123,7 +1126,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                             // in const fn and constants require the feature gate
                             // FIXME: make it unsafe inside const fn and constants
                             emit_feature_err(
-                                &self.tcx.sess.parse_sess, "const_raw_ptr_to_usize_cast",
+                                &self.tcx.sess.parse_sess, sym::const_raw_ptr_to_usize_cast,
                                 self.span, GateIssue::Language,
                                 &format!(
                                     "casting pointers to integers in {}s is unstable",
@@ -1149,7 +1152,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                         // FIXME: make it unsafe to use these operations
                         emit_feature_err(
                             &self.tcx.sess.parse_sess,
-                            "const_compare_raw_pointers",
+                            sym::const_compare_raw_pointers,
                             self.span,
                             GateIssue::Language,
                             &format!("comparing raw pointers inside {}", self.mode),
@@ -1179,10 +1182,9 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
     }
 
     fn visit_terminator_kind(&mut self,
-                             bb: BasicBlock,
                              kind: &TerminatorKind<'tcx>,
                              location: Location) {
-        debug!("visit_terminator_kind: bb={:?} kind={:?} location={:?}", bb, kind, location);
+        debug!("visit_terminator_kind: kind={:?} location={:?}", kind, location);
         if let TerminatorKind::Call { ref func, ref args, ref destination, .. } = *kind {
             if let Some((ref dest, _)) = *destination {
                 self.assign(dest, ValueSource::Call {
@@ -1211,7 +1213,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                                         // const eval transmute calls only with the feature gate
                                         if !self.tcx.features().const_transmute {
                                             emit_feature_err(
-                                                &self.tcx.sess.parse_sess, "const_transmute",
+                                                &self.tcx.sess.parse_sess, sym::const_transmute,
                                                 self.span, GateIssue::Language,
                                                 &format!("The use of std::mem::transmute() \
                                                 is gated in {}s", self.mode));
@@ -1250,7 +1252,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                                         // Don't allow panics in constants without the feature gate.
                                         emit_feature_err(
                                             &self.tcx.sess.parse_sess,
-                                            "const_panic",
+                                            sym::const_panic,
                                             self.span,
                                             GateIssue::Language,
                                             &format!("panicking in {}s is unstable", self.mode),
@@ -1261,7 +1263,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                                     // Check `#[unstable]` const fns or `#[rustc_const_unstable]`
                                     // functions without the feature gate active in this crate in
                                     // order to report a better error message than the one below.
-                                    if !self.span.allows_unstable(&feature.as_str()) {
+                                    if !self.span.allows_unstable(feature) {
                                         let mut err = self.tcx.sess.struct_span_err(self.span,
                                             &format!("`{}` is not yet stable as a const fn",
                                                     self.tcx.def_path_str(def_id)));
@@ -1310,7 +1312,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                         continue;
                     }
 
-                    let candidate = Candidate::Argument { bb, index: i };
+                    let candidate = Candidate::Argument { bb: location.block, index: i };
                     // Since the argument is required to be constant,
                     // we care about constness, not promotability.
                     // If we checked for promotability, we'd miss out on
@@ -1343,7 +1345,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                 self.visit_operand(arg, location);
             }
         } else if let TerminatorKind::Drop { location: ref place, .. } = *kind {
-            self.super_terminator_kind(bb, kind, location);
+            self.super_terminator_kind(kind, location);
 
             // Deny *any* live drops anywhere other than functions.
             if self.mode != Mode::Fn {
@@ -1374,12 +1376,11 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
             }
         } else {
             // Qualify any operands inside other terminators.
-            self.super_terminator_kind(bb, kind, location);
+            self.super_terminator_kind(kind, location);
         }
     }
 
     fn visit_assign(&mut self,
-                    _: BasicBlock,
                     dest: &Place<'tcx>,
                     rvalue: &Rvalue<'tcx>,
                     location: Location) {
@@ -1394,11 +1395,11 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
         self.span = source_info.span;
     }
 
-    fn visit_statement(&mut self, bb: BasicBlock, statement: &Statement<'tcx>, location: Location) {
-        debug!("visit_statement: bb={:?} statement={:?} location={:?}", bb, statement, location);
+    fn visit_statement(&mut self, statement: &Statement<'tcx>, location: Location) {
+        debug!("visit_statement: statement={:?} location={:?}", statement, location);
         match statement.kind {
             StatementKind::Assign(..) => {
-                self.super_statement(bb, statement, location);
+                self.super_statement(statement, location);
             }
             // FIXME(eddyb) should these really do nothing?
             StatementKind::FakeRead(..) |
@@ -1410,14 +1411,6 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
             StatementKind::AscribeUserType(..) |
             StatementKind::Nop => {}
         }
-    }
-
-    fn visit_terminator(&mut self,
-                        bb: BasicBlock,
-                        terminator: &Terminator<'tcx>,
-                        location: Location) {
-        debug!("visit_terminator: bb={:?} terminator={:?} location={:?}", bb, terminator, location);
-        self.super_terminator(bb, terminator, location);
     }
 }
 
@@ -1602,7 +1595,7 @@ impl MirPass for QualifyAndPromoteConstants {
         if mode == Mode::Static {
             // `#[thread_local]` statics don't have to be `Sync`.
             for attr in &tcx.get_attrs(def_id)[..] {
-                if attr.check_name("thread_local") {
+                if attr.check_name(sym::thread_local) {
                     return;
                 }
             }
@@ -1626,7 +1619,7 @@ impl MirPass for QualifyAndPromoteConstants {
 
 fn args_required_const(tcx: TyCtxt<'_, '_, '_>, def_id: DefId) -> Option<FxHashSet<usize>> {
     let attrs = tcx.get_attrs(def_id);
-    let attr = attrs.iter().find(|a| a.check_name("rustc_args_required_const"))?;
+    let attr = attrs.iter().find(|a| a.check_name(sym::rustc_args_required_const))?;
     let mut ret = FxHashSet::default();
     for meta in attr.meta_item_list()? {
         match meta.literal()?.node {

@@ -5,7 +5,8 @@ use crate::io::prelude::*;
 use crate::cmp;
 use crate::error;
 use crate::fmt;
-use crate::io::{self, Initializer, DEFAULT_BUF_SIZE, Error, ErrorKind, SeekFrom, IoVec, IoVecMut};
+use crate::io::{self, Initializer, DEFAULT_BUF_SIZE, Error, ErrorKind, SeekFrom, IoSlice,
+        IoSliceMut};
 use crate::memchr;
 
 /// The `BufReader` struct adds buffering to any reader.
@@ -249,7 +250,7 @@ impl<R: Read> Read for BufReader<R> {
         Ok(nread)
     }
 
-    fn read_vectored(&mut self, bufs: &mut [IoVecMut<'_>]) -> io::Result<usize> {
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         let total_len = bufs.iter().map(|b| b.len()).sum::<usize>();
         if self.pos == self.cap && total_len >= self.buf.len() {
             self.discard_buffer();
@@ -609,7 +610,7 @@ impl<W: Write> Write for BufWriter<W> {
         }
     }
 
-    fn write_vectored(&mut self, bufs: &[IoVec<'_>]) -> io::Result<usize> {
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         let total_len = bufs.iter().map(|b| b.len()).sum::<usize>();
         if self.buf.len() + total_len > self.buf.capacity() {
             self.flush_buf()?;
@@ -753,7 +754,7 @@ impl<W> fmt::Display for IntoInnerError<W> {
 /// completed, rather than the entire buffer at once. Enter `LineWriter`. It
 /// does exactly that.
 ///
-/// Like [`BufWriter`], a `LineWriter`’s buffer will also be flushed when the
+/// Like [`BufWriter`][bufwriter], a `LineWriter`’s buffer will also be flushed when the
 /// `LineWriter` goes out of scope or when its internal buffer is full.
 ///
 /// [bufwriter]: struct.BufWriter.html

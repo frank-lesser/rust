@@ -16,6 +16,7 @@ use std::borrow::Cow;
 use std::io::prelude::*;
 use std::io;
 use std::cmp::{min, Reverse};
+use std::path::Path;
 use termcolor::{StandardStream, ColorChoice, ColorSpec, BufferWriter, Ansi};
 use termcolor::{WriteColor, Color, Buffer};
 
@@ -50,7 +51,12 @@ const ANONYMIZED_LINE_NUM: &str = "LL";
 /// Emitter trait for emitting errors.
 pub trait Emitter {
     /// Emit a structured diagnostic.
-    fn emit(&mut self, db: &DiagnosticBuilder<'_>);
+    fn emit_diagnostic(&mut self, db: &DiagnosticBuilder<'_>);
+
+    /// Emit a notification that an artifact has been output.
+    /// This is currently only supported for the JSON format,
+    /// other formats can, and will, simply ignore it.
+    fn emit_artifact_notification(&mut self, _path: &Path, _artifact_type: &str) {}
 
     /// Checks if should show explanations about "rustc --explain"
     fn should_show_explain(&self) -> bool {
@@ -59,7 +65,7 @@ pub trait Emitter {
 }
 
 impl Emitter for EmitterWriter {
-    fn emit(&mut self, db: &DiagnosticBuilder<'_>) {
+    fn emit_diagnostic(&mut self, db: &DiagnosticBuilder<'_>) {
         let mut primary_span = db.span.clone();
         let mut children = db.children.clone();
         let mut suggestions: &[_] = &[];
@@ -1639,7 +1645,7 @@ impl<'a> WritableDst<'a> {
                 }
             }
             Style::Quotation => {}
-            Style::OldSchoolNoteText | Style::MainHeaderMsg => {
+            Style::MainHeaderMsg => {
                 spec.set_bold(true);
                 if cfg!(windows) {
                     spec.set_intense(true)

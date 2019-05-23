@@ -1,5 +1,6 @@
 use rustc_target::spec::abi::{Abi};
 use syntax::ast;
+use syntax::symbol::sym;
 use syntax_pos::Span;
 
 use rustc::ty::{self, TyCtxt};
@@ -27,7 +28,7 @@ impl MirPass for SanityCheck {
     fn run_pass<'a, 'tcx>(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>,
                           src: MirSource<'tcx>, mir: &mut Mir<'tcx>) {
         let def_id = src.def_id();
-        if !tcx.has_attr(def_id, "rustc_mir") {
+        if !tcx.has_attr(def_id, sym::rustc_mir) {
             debug!("skipping rustc_peek::SanityCheck on {}", tcx.def_path_str(def_id));
             return;
         } else {
@@ -52,16 +53,16 @@ impl MirPass for SanityCheck {
                         DefinitelyInitializedPlaces::new(tcx, mir, &mdpe),
                         |bd, i| DebugFormatted::new(&bd.move_data().move_paths[i]));
 
-        if has_rustc_mir_with(&attributes, "rustc_peek_maybe_init").is_some() {
+        if has_rustc_mir_with(&attributes, sym::rustc_peek_maybe_init).is_some() {
             sanity_check_via_rustc_peek(tcx, mir, def_id, &attributes, &flow_inits);
         }
-        if has_rustc_mir_with(&attributes, "rustc_peek_maybe_uninit").is_some() {
+        if has_rustc_mir_with(&attributes, sym::rustc_peek_maybe_uninit).is_some() {
             sanity_check_via_rustc_peek(tcx, mir, def_id, &attributes, &flow_uninits);
         }
-        if has_rustc_mir_with(&attributes, "rustc_peek_definite_init").is_some() {
+        if has_rustc_mir_with(&attributes, sym::rustc_peek_definite_init).is_some() {
             sanity_check_via_rustc_peek(tcx, mir, def_id, &attributes, &flow_def_inits);
         }
-        if has_rustc_mir_with(&attributes, "stop_after_dataflow").is_some() {
+        if has_rustc_mir_with(&attributes, sym::stop_after_dataflow).is_some() {
             tcx.sess.fatal("stop_after_dataflow ended compilation");
         }
     }
@@ -222,7 +223,7 @@ fn is_rustc_peek<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 if let ty::FnDef(def_id, _) = func.ty.sty {
                     let abi = tcx.fn_sig(def_id).abi();
                     let name = tcx.item_name(def_id);
-                    if abi == Abi::RustIntrinsic &&  name == "rustc_peek" {
+                    if abi == Abi::RustIntrinsic && name == sym::rustc_peek {
                         return Some((args, source_info.span));
                     }
                 }

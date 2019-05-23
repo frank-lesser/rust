@@ -62,7 +62,7 @@ use crate::middle::region;
 use crate::hir::def_id::{DefId, LocalDefId};
 use crate::hir::Node;
 use crate::infer::InferCtxt;
-use crate::hir::def::{CtorOf, Def, CtorKind};
+use crate::hir::def::{CtorOf, Res, DefKind, CtorKind};
 use crate::ty::adjustment;
 use crate::ty::{self, DefIdTree, Ty, TyCtxt};
 use crate::ty::fold::TypeFoldable;
@@ -72,6 +72,7 @@ use crate::hir::{MutImmutable, MutMutable, PatKind};
 use crate::hir::pat_util::EnumerateAndAdjustIterator;
 use crate::hir;
 use syntax::ast::{self, Name};
+use syntax::symbol::sym;
 use syntax_pos::Span;
 
 use std::borrow::Cow;
@@ -665,8 +666,8 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
             }
 
             hir::ExprKind::Path(ref qpath) => {
-                let def = self.tables.qpath_def(qpath, expr.hir_id);
-                self.cat_def(expr.hir_id, expr.span, expr_ty, def)
+                let res = self.tables.qpath_res(qpath, expr.hir_id);
+                self.cat_res(expr.hir_id, expr.span, expr_ty, res)
             }
 
             hir::ExprKind::Type(ref e, _) => {
@@ -677,8 +678,8 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
             hir::ExprKind::Assign(..) | hir::ExprKind::AssignOp(..) |
             hir::ExprKind::Closure(..) | hir::ExprKind::Ret(..) |
             hir::ExprKind::Unary(..) | hir::ExprKind::Yield(..) |
-            hir::ExprKind::MethodCall(..) | hir::ExprKind::Cast(..) | hir::ExprKind::Use(..) |
-            hir::ExprKind::Array(..) | hir::ExprKind::Tup(..) | hir::ExprKind::If(..) |
+            hir::ExprKind::MethodCall(..) | hir::ExprKind::Cast(..) | hir::ExprKind::DropTemps(..) |
+            hir::ExprKind::Array(..) | hir::ExprKind::Tup(..) |
             hir::ExprKind::Binary(..) | hir::ExprKind::While(..) |
             hir::ExprKind::Block(..) | hir::ExprKind::Loop(..) | hir::ExprKind::Match(..) |
             hir::ExprKind::Lit(..) | hir::ExprKind::Break(..) |
@@ -689,27 +690,32 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
         }
     }
 
-    pub fn cat_def(&self,
+    pub fn cat_res(&self,
                    hir_id: hir::HirId,
                    span: Span,
                    expr_ty: Ty<'tcx>,
-                   def: Def)
+                   res: Res)
                    -> McResult<cmt_<'tcx>> {
-        debug!("cat_def: id={:?} expr={:?} def={:?}",
-               hir_id, expr_ty, def);
+        debug!("cat_res: id={:?} expr={:?} def={:?}",
+               hir_id, expr_ty, res);
 
-        match def {
-            Def::Ctor(..) | Def::Const(..) | Def::ConstParam(..) |
-            Def::AssociatedConst(..) | Def::Fn(..) | Def::Method(..) | Def::SelfCtor(..) => {
+        match res {
+            Res::Def(DefKind::Ctor(..), _)
+            | Res::Def(DefKind::Const, _)
+            | Res::Def(DefKind::ConstParam, _)
+            | Res::Def(DefKind::AssociatedConst, _)
+            | Res::Def(DefKind::Fn, _)
+            | Res::Def(DefKind::Method, _)
+            | Res::SelfCtor(..) => {
                 Ok(self.cat_rvalue_node(hir_id, span, expr_ty))
             }
 
-            Def::Static(def_id) => {
+            Res::Def(DefKind::Static, def_id) => {
                 // `#[thread_local]` statics may not outlive the current function, but
                 // they also cannot be moved out of.
                 let is_thread_local = self.tcx.get_attrs(def_id)[..]
                     .iter()
-                    .any(|attr| attr.check_name("thread_local"));
+                    .any(|attr| attr.check_name(sym::thread_local));
 
                 let cat = if is_thread_local {
                     let re = self.temporary_scope(hir_id.local_id);
@@ -731,12 +737,12 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
                 })
             }
 
-            Def::Upvar(var_id, _, fn_node_id) => {
+            Res::Upvar(var_id, _, fn_node_id) => {
                 let var_nid = self.tcx.hir().hir_to_node_id(var_id);
                 self.cat_upvar(hir_id, span, var_nid, fn_node_id)
             }
 
-            Def::Local(vid) => {
+            Res::Local(vid) => {
                 let vnid = self.tcx.hir().hir_to_node_id(vid);
                 Ok(cmt_ {
                     hir_id,
@@ -965,7 +971,7 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
         // we can promote to a constant, otherwise equal to enclosing temp
         // lifetime.
         let re = if promotable {
-            self.tcx.types.re_static
+            self.tcx.lifetimes.re_static
         } else {
             self.temporary_scope(hir_id.local_id)
         };
@@ -1268,20 +1274,21 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
 
         match pat.node {
             PatKind::TupleStruct(ref qpath, ref subpats, ddpos) => {
-                let def = self.tables.qpath_def(qpath, pat.hir_id);
-                let (cmt, expected_len) = match def {
-                    Def::Err => {
+                let res = self.tables.qpath_res(qpath, pat.hir_id);
+                let (cmt, expected_len) = match res {
+                    Res::Err => {
                         debug!("access to unresolvable pattern {:?}", pat);
                         return Err(())
                     }
-                    Def::Ctor(variant_ctor_did, CtorOf::Variant, CtorKind::Fn) => {
+                    Res::Def(DefKind::Ctor(CtorOf::Variant, CtorKind::Fn), variant_ctor_did) => {
                         let variant_did = self.tcx.parent(variant_ctor_did).unwrap();
                         let enum_did = self.tcx.parent(variant_did).unwrap();
                         (self.cat_downcast_if_needed(pat, cmt, variant_did),
                          self.tcx.adt_def(enum_did)
                              .variant_with_ctor_id(variant_ctor_did).fields.len())
                     }
-                    Def::Ctor(_, CtorOf::Struct, CtorKind::Fn) | Def::SelfCtor(..) => {
+                    Res::Def(DefKind::Ctor(CtorOf::Struct, CtorKind::Fn), _)
+                    | Res::SelfCtor(..) => {
                         let ty = self.pat_ty_unadjusted(&pat)?;
                         match ty.sty {
                             ty::Adt(adt_def, _) => {
@@ -1294,8 +1301,16 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
                         }
                     }
                     def => {
-                        span_bug!(pat.span, "tuple struct pattern didn't resolve \
-                                             to variant or struct {:?}", def);
+                        debug!(
+                            "tuple struct pattern didn't resolve to variant or struct {:?} at {:?}",
+                            def,
+                            pat.span,
+                        );
+                        self.tcx.sess.delay_span_bug(pat.span, &format!(
+                            "tuple struct pattern didn't resolve to variant or struct {:?}",
+                            def,
+                        ));
+                        return Err(());
                     }
                 };
 
@@ -1310,17 +1325,17 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
 
             PatKind::Struct(ref qpath, ref field_pats, _) => {
                 // {f1: p1, ..., fN: pN}
-                let def = self.tables.qpath_def(qpath, pat.hir_id);
-                let cmt = match def {
-                    Def::Err => {
+                let res = self.tables.qpath_res(qpath, pat.hir_id);
+                let cmt = match res {
+                    Res::Err => {
                         debug!("access to unresolvable pattern {:?}", pat);
                         return Err(())
                     }
-                    Def::Ctor(variant_ctor_did, CtorOf::Variant, _) => {
+                    Res::Def(DefKind::Ctor(CtorOf::Variant, _), variant_ctor_did) => {
                         let variant_did = self.tcx.parent(variant_ctor_did).unwrap();
                         self.cat_downcast_if_needed(pat, cmt, variant_did)
                     }
-                    Def::Variant(variant_did) => {
+                    Res::Def(DefKind::Variant, variant_did) => {
                         self.cat_downcast_if_needed(pat, cmt, variant_did)
                     }
                     _ => cmt,

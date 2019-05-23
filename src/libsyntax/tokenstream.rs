@@ -21,7 +21,7 @@ use crate::print::pprust;
 
 use syntax_pos::{BytePos, Mark, Span, DUMMY_SP};
 #[cfg(target_arch = "x86_64")]
-use rustc_data_structures::static_assert;
+use rustc_data_structures::static_assert_size;
 use rustc_data_structures::sync::Lrc;
 use serialize::{Decoder, Decodable, Encoder, Encodable};
 use smallvec::{SmallVec, smallvec};
@@ -158,7 +158,7 @@ pub type TreeAndJoint = (TokenTree, IsJoint);
 
 // `TokenStream` is used a lot. Make sure it doesn't unintentionally get bigger.
 #[cfg(target_arch = "x86_64")]
-static_assert!(MEM_SIZE_OF_TOKEN_STREAM: mem::size_of::<TokenStream>() == 8);
+static_assert_size!(TokenStream, 8);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IsJoint {
@@ -557,7 +557,7 @@ impl DelimSpan {
 mod tests {
     use super::*;
     use crate::syntax::ast::Ident;
-    use crate::with_globals;
+    use crate::with_default_globals;
     use crate::parse::token::Token;
     use crate::util::parser_testing::string_to_stream;
     use syntax_pos::{Span, BytePos, NO_EXPANSION};
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_concat() {
-        with_globals(|| {
+        with_default_globals(|| {
             let test_res = string_to_ts("foo::bar::baz");
             let test_fst = string_to_ts("foo::bar");
             let test_snd = string_to_ts("::baz");
@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_to_from_bijection() {
-        with_globals(|| {
+        with_default_globals(|| {
             let test_start = string_to_ts("foo::bar(baz)");
             let test_end = test_start.trees().collect();
             assert_eq!(test_start, test_end)
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn test_eq_0() {
-        with_globals(|| {
+        with_default_globals(|| {
             let test_res = string_to_ts("foo");
             let test_eqs = string_to_ts("foo");
             assert_eq!(test_res, test_eqs)
@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn test_eq_1() {
-        with_globals(|| {
+        with_default_globals(|| {
             let test_res = string_to_ts("::bar::baz");
             let test_eqs = string_to_ts("::bar::baz");
             assert_eq!(test_res, test_eqs)
@@ -612,7 +612,7 @@ mod tests {
 
     #[test]
     fn test_eq_3() {
-        with_globals(|| {
+        with_default_globals(|| {
             let test_res = string_to_ts("");
             let test_eqs = string_to_ts("");
             assert_eq!(test_res, test_eqs)
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn test_diseq_0() {
-        with_globals(|| {
+        with_default_globals(|| {
             let test_res = string_to_ts("::bar::baz");
             let test_eqs = string_to_ts("bar::baz");
             assert_eq!(test_res == test_eqs, false)
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_diseq_1() {
-        with_globals(|| {
+        with_default_globals(|| {
             let test_res = string_to_ts("(bar,baz)");
             let test_eqs = string_to_ts("bar,baz");
             assert_eq!(test_res == test_eqs, false)
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_is_empty() {
-        with_globals(|| {
+        with_default_globals(|| {
             let test0: TokenStream = Vec::<TokenTree>::new().into_iter().collect();
             let test1: TokenStream =
                 TokenTree::Token(sp(0, 1), Token::Ident(Ident::from_str("a"), false)).into();
@@ -653,12 +653,14 @@ mod tests {
 
     #[test]
     fn test_dotdotdot() {
-        let mut builder = TokenStreamBuilder::new();
-        builder.push(TokenTree::Token(sp(0, 1), Token::Dot).joint());
-        builder.push(TokenTree::Token(sp(1, 2), Token::Dot).joint());
-        builder.push(TokenTree::Token(sp(2, 3), Token::Dot));
-        let stream = builder.build();
-        assert!(stream.eq_unspanned(&string_to_ts("...")));
-        assert_eq!(stream.trees().count(), 1);
+        with_default_globals(|| {
+            let mut builder = TokenStreamBuilder::new();
+            builder.push(TokenTree::Token(sp(0, 1), Token::Dot).joint());
+            builder.push(TokenTree::Token(sp(1, 2), Token::Dot).joint());
+            builder.push(TokenTree::Token(sp(2, 3), Token::Dot));
+            let stream = builder.build();
+            assert!(stream.eq_unspanned(&string_to_ts("...")));
+            assert_eq!(stream.trees().count(), 1);
+        })
     }
 }

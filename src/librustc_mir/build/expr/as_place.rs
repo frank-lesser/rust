@@ -52,7 +52,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 region_scope,
                 lint_level,
                 value,
-            } => this.in_scope((region_scope, source_info), lint_level, block, |this| {
+            } => this.in_scope((region_scope, source_info), lint_level, |this| {
                 if mutability == Mutability::Not {
                     this.as_read_only_place(block, value)
                 } else {
@@ -192,7 +192,6 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             | ExprKind::Pointer { .. }
             | ExprKind::Repeat { .. }
             | ExprKind::Borrow { .. }
-            | ExprKind::If { .. }
             | ExprKind::Match { .. }
             | ExprKind::Loop { .. }
             | ExprKind::Block { .. }

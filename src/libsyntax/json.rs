@@ -19,6 +19,7 @@ use errors::emitter::{Emitter, HumanReadableErrorType};
 use syntax_pos::{MacroBacktrace, Span, SpanLabel, MultiSpan};
 use rustc_data_structures::sync::{self, Lrc};
 use std::io::{self, Write};
+use std::path::Path;
 use std::vec;
 use std::sync::{Arc, Mutex};
 
@@ -79,7 +80,7 @@ impl JsonEmitter {
 }
 
 impl Emitter for JsonEmitter {
-    fn emit(&mut self, db: &DiagnosticBuilder<'_>) {
+    fn emit_diagnostic(&mut self, db: &DiagnosticBuilder<'_>) {
         let data = Diagnostic::from_diagnostic_builder(db, self);
         let result = if self.pretty {
             writeln!(&mut self.dst, "{}", as_pretty_json(&data))
@@ -88,6 +89,18 @@ impl Emitter for JsonEmitter {
         };
         if let Err(e) = result {
             panic!("failed to print diagnostics: {:?}", e);
+        }
+    }
+
+    fn emit_artifact_notification(&mut self, path: &Path, artifact_type: &str) {
+        let data = ArtifactNotification { artifact: path, emit: artifact_type };
+        let result = if self.pretty {
+            writeln!(&mut self.dst, "{}", as_pretty_json(&data))
+        } else {
+            writeln!(&mut self.dst, "{}", as_json(&data))
+        };
+        if let Err(e) = result {
+            panic!("failed to print notification: {:?}", e);
         }
     }
 }
@@ -168,6 +181,14 @@ struct DiagnosticCode {
     explanation: Option<&'static str>,
 }
 
+#[derive(RustcEncodable)]
+struct ArtifactNotification<'a> {
+    /// The path of the artifact.
+    artifact: &'a Path,
+    /// What kind of artifact we're emitting.
+    emit: &'a str,
+}
+
 impl Diagnostic {
     fn from_diagnostic_builder(db: &DiagnosticBuilder<'_>,
                                je: &JsonEmitter)
@@ -200,7 +221,7 @@ impl Diagnostic {
         let buf = BufWriter::default();
         let output = buf.clone();
         je.json_rendered.new_emitter(Box::new(buf), Some(je.sm.clone()), false)
-            .ui_testing(je.ui_testing).emit(db);
+            .ui_testing(je.ui_testing).emit_diagnostic(db);
         let output = Arc::try_unwrap(output.0).unwrap().into_inner().unwrap();
         let output = String::from_utf8(output).unwrap();
 

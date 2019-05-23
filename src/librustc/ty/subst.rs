@@ -547,20 +547,35 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for SubstFolder<'a, 'gcx, 'tcx> {
 impl<'a, 'gcx, 'tcx> SubstFolder<'a, 'gcx, 'tcx> {
     fn ty_for_param(&self, p: ty::ParamTy, source_ty: Ty<'tcx>) -> Ty<'tcx> {
         // Look up the type in the substitutions. It really should be in there.
-        let opt_ty = self.substs.get(p.idx as usize).map(|k| k.unpack());
+        let opt_ty = self.substs.get(p.index as usize).map(|k| k.unpack());
         let ty = match opt_ty {
             Some(UnpackedKind::Type(ty)) => ty,
-            _ => {
+            Some(kind) => {
                 let span = self.span.unwrap_or(DUMMY_SP);
                 span_bug!(
                     span,
-                    "Type parameter `{:?}` ({:?}/{}) out of range \
+                    "expected type for `{:?}` ({:?}/{}) but found {:?} \
                      when substituting (root type={:?}) substs={:?}",
                     p,
                     source_ty,
-                    p.idx,
+                    p.index,
+                    kind,
                     self.root_ty,
-                    self.substs);
+                    self.substs,
+                );
+            }
+            None => {
+                let span = self.span.unwrap_or(DUMMY_SP);
+                span_bug!(
+                    span,
+                    "type parameter `{:?}` ({:?}/{}) out of range \
+                     when substituting (root type={:?}) substs={:?}",
+                    p,
+                    source_ty,
+                    p.index,
+                    self.root_ty,
+                    self.substs,
+                );
             }
         };
 
@@ -570,29 +585,40 @@ impl<'a, 'gcx, 'tcx> SubstFolder<'a, 'gcx, 'tcx> {
     fn const_for_param(
         &self,
         p: ParamConst,
-        source_cn: &'tcx ty::Const<'tcx>
+        source_ct: &'tcx ty::Const<'tcx>
     ) -> &'tcx ty::Const<'tcx> {
         // Look up the const in the substitutions. It really should be in there.
-        let opt_cn = self.substs.get(p.index as usize).map(|k| k.unpack());
-        let cn = match opt_cn {
-            Some(UnpackedKind::Const(cn)) => cn,
-            _ => {
+        let opt_ct = self.substs.get(p.index as usize).map(|k| k.unpack());
+        let ct = match opt_ct {
+            Some(UnpackedKind::Const(ct)) => ct,
+            Some(kind) => {
                 let span = self.span.unwrap_or(DUMMY_SP);
                 span_bug!(
                     span,
-                    "Const parameter `{:?}` ({:?}/{}) out of range \
-                     when substituting (root type={:?}) substs={:?}",
+                    "expected const for `{:?}` ({:?}/{}) but found {:?} \
+                     when substituting substs={:?}",
                     p,
-                    source_cn,
+                    source_ct,
                     p.index,
-                    self.root_ty,
+                    kind,
+                    self.substs,
+                );
+            }
+            None => {
+                let span = self.span.unwrap_or(DUMMY_SP);
+                span_bug!(
+                    span,
+                    "const parameter `{:?}` ({:?}/{}) out of range \
+                     when substituting substs={:?}",
+                    p,
+                    source_ct,
+                    p.index,
                     self.substs,
                 );
             }
         };
 
-        // FIXME(const_generics): shift const through binders
-        cn
+        self.shift_vars_through_binders(ct)
     }
 
     /// It is sometimes necessary to adjust the De Bruijn indices during substitution. This occurs
@@ -637,15 +663,15 @@ impl<'a, 'gcx, 'tcx> SubstFolder<'a, 'gcx, 'tcx> {
     /// As indicated in the diagram, here the same type `&'a int` is substituted once, but in the
     /// first case we do not increase the De Bruijn index and in the second case we do. The reason
     /// is that only in the second case have we passed through a fn binder.
-    fn shift_vars_through_binders(&self, ty: Ty<'tcx>) -> Ty<'tcx> {
-        debug!("shift_vars(ty={:?}, binders_passed={:?}, has_escaping_bound_vars={:?})",
-               ty, self.binders_passed, ty.has_escaping_bound_vars());
+    fn shift_vars_through_binders<T: TypeFoldable<'tcx>>(&self, val: T) -> T {
+        debug!("shift_vars(val={:?}, binders_passed={:?}, has_escaping_bound_vars={:?})",
+               val, self.binders_passed, val.has_escaping_bound_vars());
 
-        if self.binders_passed == 0 || !ty.has_escaping_bound_vars() {
-            return ty;
+        if self.binders_passed == 0 || !val.has_escaping_bound_vars() {
+            return val;
         }
 
-        let result = ty::fold::shift_vars(self.tcx(), &ty, self.binders_passed);
+        let result = ty::fold::shift_vars(self.tcx(), &val, self.binders_passed);
         debug!("shift_vars: shifted result = {:?}", result);
 
         result
