@@ -2,17 +2,17 @@
 
 use super::{
     Pointer, EvalResult, AllocId, ScalarMaybeUndef, write_target_uint, read_target_uint, Scalar,
-    truncate,
 };
 
 use crate::ty::layout::{Size, Align};
 use syntax::ast::Mutability;
-use std::iter;
+use std::{iter, fmt::{self, Display}};
 use crate::mir;
 use std::ops::{Deref, DerefMut};
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_macros::HashStable;
 use rustc_target::abi::HasDataLayout;
+use std::borrow::Cow;
 
 /// Used by `check_bounds` to indicate whether the pointer needs to be just inbounds
 /// or also inbounds of a *live* allocation.
@@ -20,6 +20,28 @@ use rustc_target::abi::HasDataLayout;
 pub enum InboundsCheck {
     Live,
     MaybeDead,
+}
+
+/// Used by `check_in_alloc` to indicate context of check
+#[derive(Debug, Copy, Clone, RustcEncodable, RustcDecodable, HashStable)]
+pub enum CheckInAllocMsg {
+    MemoryAccessTest,
+    NullPointerTest,
+    PointerArithmeticTest,
+    InboundsTest,
+}
+
+impl Display for CheckInAllocMsg {
+    /// When this is printed as an error the context looks like this
+    /// "{test name} failed: pointer must be in-bounds at offset..."
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", match *self {
+            CheckInAllocMsg::MemoryAccessTest => "Memory access",
+            CheckInAllocMsg::NullPointerTest => "Null pointer test",
+            CheckInAllocMsg::PointerArithmeticTest => "Pointer arithmetic",
+            CheckInAllocMsg::InboundsTest => "Inbounds test",
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, RustcEncodable, RustcDecodable)]
@@ -91,10 +113,11 @@ impl AllocationExtra<()> for () { }
 
 impl<Tag, Extra> Allocation<Tag, Extra> {
     /// Creates a read-only allocation initialized by the given bytes
-    pub fn from_bytes(slice: &[u8], align: Align, extra: Extra) -> Self {
-        let undef_mask = UndefMask::new(Size::from_bytes(slice.len() as u64), true);
+    pub fn from_bytes<'a>(slice: impl Into<Cow<'a, [u8]>>, align: Align, extra: Extra) -> Self {
+        let bytes = slice.into().into_owned();
+        let undef_mask = UndefMask::new(Size::from_bytes(bytes.len() as u64), true);
         Self {
-            bytes: slice.to_owned(),
+            bytes,
             relocations: Relocations::new(),
             undef_mask,
             align,
@@ -103,7 +126,7 @@ impl<Tag, Extra> Allocation<Tag, Extra> {
         }
     }
 
-    pub fn from_byte_aligned_bytes(slice: &[u8], extra: Extra) -> Self {
+    pub fn from_byte_aligned_bytes<'a>(slice: impl Into<Cow<'a, [u8]>>, extra: Extra) -> Self {
         Allocation::from_bytes(slice, Align::from_bytes(1).unwrap(), extra)
     }
 
@@ -131,9 +154,10 @@ impl<'tcx, Tag, Extra> Allocation<Tag, Extra> {
     fn check_bounds_ptr(
         &self,
         ptr: Pointer<Tag>,
+        msg: CheckInAllocMsg,
     ) -> EvalResult<'tcx> {
         let allocation_size = self.bytes.len() as u64;
-        ptr.check_in_alloc(Size::from_bytes(allocation_size), InboundsCheck::Live)
+        ptr.check_in_alloc(Size::from_bytes(allocation_size), msg)
     }
 
     /// Checks if the memory range beginning at `ptr` and of size `Size` is "in-bounds".
@@ -143,9 +167,10 @@ impl<'tcx, Tag, Extra> Allocation<Tag, Extra> {
         cx: &impl HasDataLayout,
         ptr: Pointer<Tag>,
         size: Size,
+        msg: CheckInAllocMsg,
     ) -> EvalResult<'tcx> {
         // if ptr.offset is in bounds, then so is ptr (because offset checks for overflow)
-        self.check_bounds_ptr(ptr.offset(size, cx)?)
+        self.check_bounds_ptr(ptr.offset(size, cx)?, msg)
     }
 }
 
@@ -164,9 +189,10 @@ impl<'tcx, Tag: Copy, Extra: AllocationExtra<Tag>> Allocation<Tag, Extra> {
         ptr: Pointer<Tag>,
         size: Size,
         check_defined_and_ptr: bool,
+        msg: CheckInAllocMsg,
     ) -> EvalResult<'tcx, &[u8]>
     {
-        self.check_bounds(cx, ptr, size)?;
+        self.check_bounds(cx, ptr, size, msg)?;
 
         if check_defined_and_ptr {
             self.check_defined(ptr, size)?;
@@ -192,7 +218,7 @@ impl<'tcx, Tag: Copy, Extra: AllocationExtra<Tag>> Allocation<Tag, Extra> {
         size: Size,
     ) -> EvalResult<'tcx, &[u8]>
     {
-        self.get_bytes_internal(cx, ptr, size, true)
+        self.get_bytes_internal(cx, ptr, size, true, CheckInAllocMsg::MemoryAccessTest)
     }
 
     /// It is the caller's responsibility to handle undefined and pointer bytes.
@@ -205,7 +231,7 @@ impl<'tcx, Tag: Copy, Extra: AllocationExtra<Tag>> Allocation<Tag, Extra> {
         size: Size,
     ) -> EvalResult<'tcx, &[u8]>
     {
-        self.get_bytes_internal(cx, ptr, size, false)
+        self.get_bytes_internal(cx, ptr, size, false, CheckInAllocMsg::MemoryAccessTest)
     }
 
     /// Just calling this already marks everything as defined and removes relocations,
@@ -218,7 +244,7 @@ impl<'tcx, Tag: Copy, Extra: AllocationExtra<Tag>> Allocation<Tag, Extra> {
     ) -> EvalResult<'tcx, &mut [u8]>
     {
         assert_ne!(size.bytes(), 0, "0-sized accesses should never even get a `Pointer`");
-        self.check_bounds(cx, ptr, size)?;
+        self.check_bounds(cx, ptr, size, CheckInAllocMsg::MemoryAccessTest)?;
 
         self.mark_definedness(ptr, size, true)?;
         self.clear_relocations(cx, ptr, size)?;
@@ -382,18 +408,9 @@ impl<'tcx, Tag: Copy, Extra: AllocationExtra<Tag>> Allocation<Tag, Extra> {
             ScalarMaybeUndef::Undef => return self.mark_definedness(ptr, type_size, false),
         };
 
-        let bytes = match val {
-            Scalar::Ptr(val) => {
-                assert_eq!(type_size, cx.data_layout().pointer_size);
-                val.offset.bytes() as u128
-            }
-
-            Scalar::Bits { bits, size } => {
-                assert_eq!(size as u64, type_size.bytes());
-                debug_assert_eq!(truncate(bits, Size::from_bytes(size.into())), bits,
-                    "Unexpected value of size {} when writing to memory", size);
-                bits
-            },
+        let bytes = match val.to_bits_or_ptr(type_size, cx) {
+            Err(val) => val.offset.bytes() as u128,
+            Ok(data) => data,
         };
 
         let endian = cx.data_layout().endian;

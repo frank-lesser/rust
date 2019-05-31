@@ -172,7 +172,7 @@ fn generic_extension<'cx>(cx: &'cx mut ExtCtxt<'_>,
                     path: Cow::from(cx.current_expansion.module.directory.as_path()),
                     ownership: cx.current_expansion.directory_ownership,
                 };
-                let mut p = Parser::new(cx.parse_sess(), tts, Some(directory), true, false);
+                let mut p = Parser::new(cx.parse_sess(), tts, Some(directory), true, false, None);
                 p.root_module_name = cx.current_expansion.module.mod_path.last()
                     .map(|id| id.as_str().to_string());
 
@@ -396,7 +396,7 @@ pub fn compile(
                         future this will become a hard error. Please use `allow_internal_unstable(\
                         foo, bar)` to only allow the `foo` and `bar` features",
                     );
-                    vec![Symbol::intern("allow_internal_unstable_backcompat_hack")].into()
+                    vec![sym::allow_internal_unstable_backcompat_hack].into()
                 })
             );
         let allow_internal_unsafe = attr::contains_name(&def.attrs, sym::allow_internal_unsafe);

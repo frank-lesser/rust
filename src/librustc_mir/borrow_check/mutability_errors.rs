@@ -1,6 +1,6 @@
 use rustc::hir;
 use rustc::hir::Node;
-use rustc::mir::{self, BindingForm, Constant, ClearCrossCrate, Local, Location, Mir};
+use rustc::mir::{self, BindingForm, Constant, ClearCrossCrate, Local, Location, Body};
 use rustc::mir::{
     Mutability, Operand, Place, PlaceBase, Projection, ProjectionElem, Static, StaticKind,
 };
@@ -420,28 +420,31 @@ impl<'a, 'gcx, 'tcx> MirBorrowckCtxt<'a, 'gcx, 'tcx> {
                     );
                 }
 
-                if let Some(name) = local_decl.name {
-                    err.span_label(
-                        span,
-                        format!(
-                            "`{NAME}` is a `{SIGIL}` {DESC}, \
-                             so the data it refers to cannot be {ACTED_ON}",
-                            NAME = name,
-                            SIGIL = pointer_sigil,
-                            DESC = pointer_desc,
-                            ACTED_ON = acted_on
-                        ),
-                    );
-                } else {
-                    err.span_label(
-                        span,
-                        format!(
-                            "cannot {ACT} through `{SIGIL}` {DESC}",
-                            ACT = act,
-                            SIGIL = pointer_sigil,
-                            DESC = pointer_desc
-                        ),
-                    );
+                match local_decl.name {
+                    Some(name) if !local_decl.from_compiler_desugaring() => {
+                        err.span_label(
+                            span,
+                            format!(
+                                "`{NAME}` is a `{SIGIL}` {DESC}, \
+                                so the data it refers to cannot be {ACTED_ON}",
+                                NAME = name,
+                                SIGIL = pointer_sigil,
+                                DESC = pointer_desc,
+                                ACTED_ON = acted_on
+                            ),
+                        );
+                    }
+                    _ => {
+                        err.span_label(
+                            span,
+                            format!(
+                                "cannot {ACT} through `{SIGIL}` {DESC}",
+                                ACT = act,
+                                SIGIL = pointer_sigil,
+                                DESC = pointer_desc
+                            ),
+                        );
+                    }
                 }
             }
 
@@ -559,7 +562,7 @@ fn suggest_ampmut_self<'cx, 'gcx, 'tcx>(
 // by trying (3.), then (2.) and finally falling back on (1.).
 fn suggest_ampmut<'cx, 'gcx, 'tcx>(
     tcx: TyCtxt<'cx, 'gcx, 'tcx>,
-    mir: &Mir<'tcx>,
+    mir: &Body<'tcx>,
     local: Local,
     local_decl: &mir::LocalDecl<'tcx>,
     opt_ty_info: Option<Span>,

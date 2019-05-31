@@ -158,7 +158,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonShorthandFieldPatterns {
                 if fieldpat.node.is_shorthand {
                     continue;
                 }
-                if fieldpat.span.ctxt().outer().expn_info().is_some() {
+                if fieldpat.span.ctxt().outer_expn_info().is_some() {
                     // Don't lint if this is a macro expansion: macro authors
                     // shouldn't have to worry about this kind of style issue
                     // (Issue #49588)
@@ -1003,7 +1003,7 @@ impl UnreachablePub {
         let mut applicability = Applicability::MachineApplicable;
         match vis.node {
             hir::VisibilityKind::Public if !cx.access_levels.is_reachable(id) => {
-                if span.ctxt().outer().expn_info().is_some() {
+                if span.ctxt().outer_expn_info().is_some() {
                     applicability = Applicability::MaybeIncorrect;
                 }
                 let def_span = cx.tcx.sess.source_map().def_span(span);
@@ -1439,8 +1439,8 @@ impl KeywordIdents {
     {
         let next_edition = match cx.sess.edition() {
             Edition::Edition2015 => {
-                match &ident.as_str()[..] {
-                    "async" | "await" | "try" => Edition::Edition2018,
+                match ident.name {
+                    kw::Async | kw::Await | kw::Try => Edition::Edition2018,
 
                     // rust-lang/rust#56327: Conservatively do not
                     // attempt to report occurrences of `dyn` within
@@ -1454,7 +1454,7 @@ impl KeywordIdents {
                     // its precise role in the parsed AST and thus are
                     // assured this is truly an attempt to use it as
                     // an identifier.
-                    "dyn" if !under_macro => Edition::Edition2018,
+                    kw::Dyn if !under_macro => Edition::Edition2018,
 
                     _ => return,
                 }

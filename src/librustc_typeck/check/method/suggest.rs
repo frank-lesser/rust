@@ -6,7 +6,6 @@ use crate::middle::lang_items::FnOnceTraitLangItem;
 use crate::namespace::Namespace;
 use crate::util::nodemap::FxHashSet;
 use errors::{Applicability, DiagnosticBuilder};
-use rustc_data_structures::sync::Lrc;
 use rustc::hir::{self, ExprKind, Node, QPath};
 use rustc::hir::def::{Res, DefKind};
 use rustc::hir::def_id::{CRATE_DEF_INDEX, LOCAL_CRATE, DefId};
@@ -197,7 +196,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             }) => {
                 let tcx = self.tcx;
 
-                let actual = self.resolve_type_vars_if_possible(&rcvr_ty);
+                let actual = self.resolve_vars_if_possible(&rcvr_ty);
                 let ty_str = self.ty_to_string(actual);
                 let is_method = mode == Mode::MethodCall;
                 let item_kind = if is_method {
@@ -844,7 +843,7 @@ fn compute_all_traits<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Vec<DefId>
 pub fn provide(providers: &mut ty::query::Providers<'_>) {
     providers.all_traits = |tcx, cnum| {
         assert_eq!(cnum, LOCAL_CRATE);
-        Lrc::new(compute_all_traits(tcx))
+        &tcx.arena.alloc(compute_all_traits(tcx))[..]
     }
 }
 
@@ -893,7 +892,7 @@ impl<'a, 'tcx, 'gcx> hir::intravisit::Visitor<'tcx> for UsePlacementFinder<'a, '
                 hir::ItemKind::Use(..) => {
                     // Don't suggest placing a `use` before the prelude
                     // import or other generated ones.
-                    if item.span.ctxt().outer().expn_info().is_none() {
+                    if item.span.ctxt().outer_expn_info().is_none() {
                         self.span = Some(item.span.shrink_to_lo());
                         self.found_use = true;
                         return;
@@ -903,7 +902,7 @@ impl<'a, 'tcx, 'gcx> hir::intravisit::Visitor<'tcx> for UsePlacementFinder<'a, '
                 hir::ItemKind::ExternCrate(_) => {}
                 // ...but do place them before the first other item.
                 _ => if self.span.map_or(true, |span| item.span < span ) {
-                    if item.span.ctxt().outer().expn_info().is_none() {
+                    if item.span.ctxt().outer_expn_info().is_none() {
                         // Don't insert between attributes and an item.
                         if item.attrs.is_empty() {
                             self.span = Some(item.span.shrink_to_lo());

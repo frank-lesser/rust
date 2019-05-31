@@ -12,7 +12,6 @@ use std::borrow::Cow;
 
 use rustc::ty::{self, Instance, ParamEnv, query::TyCtxtAt};
 use rustc::ty::layout::{Align, TargetDataLayout, Size, HasDataLayout};
-pub use rustc::mir::interpret::{truncate, write_target_uint, read_target_uint};
 use rustc_data_structures::fx::{FxHashSet, FxHashMap};
 
 use syntax::ast::Mutability;
@@ -20,7 +19,7 @@ use syntax::ast::Mutability;
 use super::{
     Pointer, AllocId, Allocation, GlobalId, AllocationExtra,
     EvalResult, Scalar, InterpError, AllocKind, PointerArithmetic,
-    Machine, AllocMap, MayLeak, ErrorHandled, InboundsCheck,
+    Machine, AllocMap, MayLeak, ErrorHandled, CheckInAllocMsg, InboundsCheck,
 };
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
@@ -248,22 +247,21 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> Memory<'a, 'mir, 'tcx, M> {
         required_align: Align
     ) -> EvalResult<'tcx> {
         // Check non-NULL/Undef, extract offset
-        let (offset, alloc_align) = match ptr {
-            Scalar::Ptr(ptr) => {
+        let (offset, alloc_align) = match ptr.to_bits_or_ptr(self.pointer_size(), self) {
+            Err(ptr) => {
                 // check this is not NULL -- which we can ensure only if this is in-bounds
                 // of some (potentially dead) allocation.
-                let align = self.check_bounds_ptr(ptr, InboundsCheck::MaybeDead)?;
+                let align = self.check_bounds_ptr(ptr, InboundsCheck::MaybeDead,
+                                                  CheckInAllocMsg::NullPointerTest)?;
                 (ptr.offset.bytes(), align)
             }
-            Scalar::Bits { bits, size } => {
-                assert_eq!(size as u64, self.pointer_size().bytes());
-                assert!(bits < (1u128 << self.pointer_size().bits()));
+            Ok(data) => {
                 // check this is not NULL
-                if bits == 0 {
+                if data == 0 {
                     return err!(InvalidNullPointerUsage);
                 }
                 // the "base address" is 0 and hence always aligned
-                (bits as u64, required_align)
+                (data as u64, required_align)
             }
         };
         // Check alignment
@@ -293,9 +291,10 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> Memory<'a, 'mir, 'tcx, M> {
         &self,
         ptr: Pointer<M::PointerTag>,
         liveness: InboundsCheck,
+        msg: CheckInAllocMsg,
     ) -> EvalResult<'tcx, Align> {
         let (allocation_size, align) = self.get_size_and_align(ptr.alloc_id, liveness)?;
-        ptr.check_in_alloc(allocation_size, liveness)?;
+        ptr.check_in_alloc(allocation_size, msg)?;
         Ok(align)
     }
 }
@@ -419,7 +418,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> Memory<'a, 'mir, 'tcx, M> {
 
     /// Obtain the size and alignment of an allocation, even if that allocation has been deallocated
     ///
-    /// If `liveness` is `InboundsCheck::Dead`, this function always returns `Ok`
+    /// If `liveness` is `InboundsCheck::MaybeDead`, this function always returns `Ok`
     pub fn get_size_and_align(
         &self,
         id: AllocId,

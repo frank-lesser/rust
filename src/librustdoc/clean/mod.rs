@@ -10,7 +10,6 @@ mod auto_trait;
 mod blanket_impl;
 
 use rustc_data_structures::indexed_vec::{IndexVec, Idx};
-use rustc_data_structures::sync::Lrc;
 use rustc_target::spec::abi::Abi;
 use rustc_typeck::hir_ty_to_ty;
 use rustc::infer::region_constraints::{RegionConstraintData, Constraint};
@@ -429,10 +428,10 @@ impl Item {
         self.type_() == ItemType::Variant
     }
     pub fn is_associated_type(&self) -> bool {
-        self.type_() == ItemType::AssociatedType
+        self.type_() == ItemType::AssocType
     }
     pub fn is_associated_const(&self) -> bool {
-        self.type_() == ItemType::AssociatedConst
+        self.type_() == ItemType::AssocConst
     }
     pub fn is_method(&self) -> bool {
         self.type_() == ItemType::Method
@@ -561,8 +560,8 @@ pub enum ItemEnum {
     MacroItem(Macro),
     ProcMacroItem(ProcMacro),
     PrimitiveItem(PrimitiveType),
-    AssociatedConstItem(Type, Option<String>),
-    AssociatedTypeItem(Vec<GenericBound>, Option<Type>),
+    AssocConstItem(Type, Option<String>),
+    AssocTypeItem(Vec<GenericBound>, Option<Type>),
     /// An item that has been stripped by a rustdoc pass
     StrippedItem(Box<ItemEnum>),
     KeywordItem(String),
@@ -589,7 +588,7 @@ impl ItemEnum {
     pub fn is_associated(&self) -> bool {
         match *self {
             ItemEnum::TypedefItem(_, _) |
-            ItemEnum::AssociatedTypeItem(_, _) => true,
+            ItemEnum::AssocTypeItem(_, _) => true,
             _ => false,
         }
     }
@@ -1687,7 +1686,7 @@ impl Clean<Generics> for hir::Generics {
 }
 
 impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics,
-                                    &'a Lrc<ty::GenericPredicates<'tcx>>) {
+                                    &'a &'tcx ty::GenericPredicates<'tcx>) {
     fn clean(&self, cx: &DocContext<'_>) -> Generics {
         use self::WherePredicate as WP;
 
@@ -2207,7 +2206,7 @@ impl Clean<Item> for hir::TraitItem {
     fn clean(&self, cx: &DocContext<'_>) -> Item {
         let inner = match self.node {
             hir::TraitItemKind::Const(ref ty, default) => {
-                AssociatedConstItem(ty.clean(cx),
+                AssocConstItem(ty.clean(cx),
                                     default.map(|e| print_const_expr(cx, e)))
             }
             hir::TraitItemKind::Method(ref sig, hir::TraitMethod::Provided(body)) => {
@@ -2227,7 +2226,7 @@ impl Clean<Item> for hir::TraitItem {
                 })
             }
             hir::TraitItemKind::Type(ref bounds, ref default) => {
-                AssociatedTypeItem(bounds.clean(cx), default.clean(cx))
+                AssocTypeItem(bounds.clean(cx), default.clean(cx))
             }
         };
         let local_did = cx.tcx.hir().local_def_id_from_hir_id(self.hir_id);
@@ -2248,7 +2247,7 @@ impl Clean<Item> for hir::ImplItem {
     fn clean(&self, cx: &DocContext<'_>) -> Item {
         let inner = match self.node {
             hir::ImplItemKind::Const(ref ty, expr) => {
-                AssociatedConstItem(ty.clean(cx),
+                AssocConstItem(ty.clean(cx),
                                     Some(print_const_expr(cx, expr)))
             }
             hir::ImplItemKind::Method(ref sig, body) => {
@@ -2277,19 +2276,19 @@ impl Clean<Item> for hir::ImplItem {
     }
 }
 
-impl<'tcx> Clean<Item> for ty::AssociatedItem {
+impl<'tcx> Clean<Item> for ty::AssocItem {
     fn clean(&self, cx: &DocContext<'_>) -> Item {
         let inner = match self.kind {
-            ty::AssociatedKind::Const => {
+            ty::AssocKind::Const => {
                 let ty = cx.tcx.type_of(self.def_id);
                 let default = if self.defaultness.has_value() {
                     Some(inline::print_inlined_const(cx, self.def_id))
                 } else {
                     None
                 };
-                AssociatedConstItem(ty.clean(cx), default)
+                AssocConstItem(ty.clean(cx), default)
             }
-            ty::AssociatedKind::Method => {
+            ty::AssocKind::Method => {
                 let generics = (cx.tcx.generics_of(self.def_id),
                                 &cx.tcx.explicit_predicates_of(self.def_id)).clean(cx);
                 let sig = cx.tcx.fn_sig(self.def_id);
@@ -2360,7 +2359,7 @@ impl<'tcx> Clean<Item> for ty::AssociatedItem {
                     })
                 }
             }
-            ty::AssociatedKind::Type => {
+            ty::AssocKind::Type => {
                 let my_name = self.ident.name.clean(cx);
 
                 if let ty::TraitContainer(did) = self.container {
@@ -2405,7 +2404,7 @@ impl<'tcx> Clean<Item> for ty::AssociatedItem {
                         None
                     };
 
-                    AssociatedTypeItem(bounds, ty.clean(cx))
+                    AssocTypeItem(bounds, ty.clean(cx))
                 } else {
                     TypedefItem(Typedef {
                         type_: cx.tcx.type_of(self.def_id).clean(cx),
@@ -2416,7 +2415,7 @@ impl<'tcx> Clean<Item> for ty::AssociatedItem {
                     }, true)
                 }
             }
-            ty::AssociatedKind::Existential => unimplemented!(),
+            ty::AssocKind::Existential => unimplemented!(),
         };
 
         let visibility = match self.container {
@@ -2957,7 +2956,7 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
             ty::Str => Primitive(PrimitiveType::Str),
             ty::Slice(ty) => Slice(box ty.clean(cx)),
             ty::Array(ty, n) => {
-                let mut n = *cx.tcx.lift(&n).expect("array lift failed");
+                let mut n = cx.tcx.lift(&n).expect("array lift failed");
                 if let ConstValue::Unevaluated(def_id, substs) = n.val {
                     let param_env = cx.tcx.param_env(def_id);
                     let cid = GlobalId {
@@ -3146,10 +3145,7 @@ impl<'tcx> Clean<Constant> for ty::Const<'tcx> {
     fn clean(&self, cx: &DocContext<'_>) -> Constant {
         Constant {
             type_: self.ty.clean(cx),
-            expr: match self.val {
-                ConstValue::Param(ty::ParamConst { name, .. }) => format!("{}", name),
-                e => format!("{:?}", e), // FIXME generic consts with expressions
-            },
+            expr: format!("{}", self),
         }
     }
 }
@@ -4127,7 +4123,7 @@ fn name_from_pat(p: &hir::Pat) -> String {
     }
 }
 
-fn print_const(cx: &DocContext<'_>, n: ty::Const<'_>) -> String {
+fn print_const(cx: &DocContext<'_>, n: &ty::Const<'_>) -> String {
     match n.val {
         ConstValue::Unevaluated(def_id, _) => {
             if let Some(hir_id) = cx.tcx.hir().as_local_hir_id(def_id) {
@@ -4137,12 +4133,15 @@ fn print_const(cx: &DocContext<'_>, n: ty::Const<'_>) -> String {
             }
         },
         _ => {
-            let mut s = String::new();
-            ::rustc::mir::fmt_const_val(&mut s, n).expect("fmt_const_val failed");
+            let mut s = n.to_string();
             // array lengths are obviously usize
             if s.ends_with("usize") {
                 let n = s.len() - "usize".len();
                 s.truncate(n);
+                if s.ends_with(": ") {
+                    let n = s.len() - ": ".len();
+                    s.truncate(n);
+                }
             }
             s
         },
@@ -4180,7 +4179,7 @@ fn resolve_type(cx: &DocContext<'_>,
         }
         Res::SelfTy(..)
         | Res::Def(DefKind::TyParam, _)
-        | Res::Def(DefKind::AssociatedTy, _) => true,
+        | Res::Def(DefKind::AssocTy, _) => true,
         _ => false,
     };
     let did = register_res(&*cx, path.res);
@@ -4434,7 +4433,7 @@ pub fn path_to_def(tcx: TyCtxt<'_, '_, '_>, path: &[Symbol]) -> Option<DefId> {
         loop {
             let segment = path_it.next()?;
 
-            for item in mem::replace(&mut items, Lrc::new(vec![])).iter() {
+            for item in mem::replace(&mut items, &[]).iter() {
                 if item.ident.name == *segment {
                     if path_it.peek().is_none() {
                         return match item.res {

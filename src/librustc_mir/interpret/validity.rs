@@ -2,13 +2,13 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::ops::RangeInclusive;
 
-use syntax_pos::symbol::Symbol;
+use syntax_pos::symbol::{sym, Symbol};
 use rustc::hir;
 use rustc::ty::layout::{self, Size, Align, TyLayout, LayoutOf, VariantIdx};
 use rustc::ty;
 use rustc_data_structures::fx::FxHashSet;
 use rustc::mir::interpret::{
-    Scalar, AllocKind, EvalResult, InterpError,
+    Scalar, AllocKind, EvalResult, InterpError, CheckInAllocMsg,
 };
 
 use super::{
@@ -188,7 +188,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> ValidityVisitor<'rt, 'a, '
 
                 PathElem::ClosureVar(name.unwrap_or_else(|| {
                     // Fall back to showing the field index.
-                    Symbol::intern(&field.to_string())
+                    sym::integer(field)
                 }))
             }
 
@@ -417,7 +417,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                         try_validation!(
                             self.ecx.memory
                                 .get(ptr.alloc_id)?
-                                .check_bounds(self.ecx, ptr, size),
+                                .check_bounds(self.ecx, ptr, size, CheckInAllocMsg::InboundsTest),
                             "dangling (not entirely in bounds) reference", self.path);
                     }
                     // Check if we have encountered this pointer+layout combination
@@ -480,8 +480,8 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                 wrapping_range_format(&layout.valid_range, max_hi),
             )
         );
-        let bits = match value {
-            Scalar::Ptr(ptr) => {
+        let bits = match value.to_bits_or_ptr(op.layout.size, self.ecx) {
+            Err(ptr) => {
                 if lo == 1 && hi == max_hi {
                     // only NULL is not allowed.
                     // We can call `check_align` to check non-NULL-ness, but have to also look
@@ -509,10 +509,8 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                     );
                 }
             }
-            Scalar::Bits { bits, size } => {
-                assert_eq!(size as u64, op.layout.size.bytes());
-                bits
-            }
+            Ok(data) =>
+                data
         };
         // Now compare. This is slightly subtle because this is a special "wrap-around" range.
         if wrapping_range_contains(&layout.valid_range, bits) {

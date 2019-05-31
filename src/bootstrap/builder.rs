@@ -318,6 +318,8 @@ impl<'a> ShouldRun<'a> {
 pub enum Kind {
     Build,
     Check,
+    Clippy,
+    Fix,
     Test,
     Bench,
     Dist,
@@ -359,7 +361,7 @@ impl<'a> Builder<'a> {
                 tool::Miri,
                 native::Lld
             ),
-            Kind::Check => describe!(
+            Kind::Check | Kind::Clippy | Kind::Fix => describe!(
                 check::Std,
                 check::Test,
                 check::Rustc,
@@ -520,6 +522,8 @@ impl<'a> Builder<'a> {
         let (kind, paths) = match build.config.cmd {
             Subcommand::Build { ref paths } => (Kind::Build, &paths[..]),
             Subcommand::Check { ref paths } => (Kind::Check, &paths[..]),
+            Subcommand::Clippy { ref paths } => (Kind::Clippy, &paths[..]),
+            Subcommand::Fix { ref paths } => (Kind::Fix, &paths[..]),
             Subcommand::Doc { ref paths } => (Kind::Doc, &paths[..]),
             Subcommand::Test { ref paths, .. } => (Kind::Test, &paths[..]),
             Subcommand::Bench { ref paths, .. } => (Kind::Bench, &paths[..]),
@@ -575,6 +579,30 @@ impl<'a> Builder<'a> {
         self.ensure(compile::Assemble {
             target_compiler: Compiler { stage, host },
         })
+    }
+
+    /// Similar to `compiler`, except handles the full-bootstrap option to
+    /// silently use the stage1 compiler instead of a stage2 compiler if one is
+    /// requested.
+    ///
+    /// Note that this does *not* have the side effect of creating
+    /// `compiler(stage, host)`, unlike `compiler` above which does have such
+    /// a side effect. The returned compiler here can only be used to compile
+    /// new artifacts, it can't be used to rely on the presence of a particular
+    /// sysroot.
+    ///
+    /// See `force_use_stage1` for documentation on what each argument is.
+    pub fn compiler_for(
+        &self,
+        stage: u32,
+        host: Interned<String>,
+        target: Interned<String>,
+    ) -> Compiler {
+        if self.build.force_use_stage1(Compiler { stage, host }, target) {
+            self.compiler(1, self.config.build)
+        } else {
+            self.compiler(stage, host)
+        }
     }
 
     pub fn sysroot(&self, compiler: Compiler) -> Interned<PathBuf> {
@@ -750,24 +778,20 @@ impl<'a> Builder<'a> {
         // This is for the original compiler, but if we're forced to use stage 1, then
         // std/test/rustc stamps won't exist in stage 2, so we need to get those from stage 1, since
         // we copy the libs forward.
-        let cmp = if self.force_use_stage1(compiler, target) {
-            self.compiler(1, compiler.host)
-        } else {
-            compiler
-        };
+        let cmp = self.compiler_for(compiler.stage, compiler.host, target);
 
         let libstd_stamp = match cmd {
-            "check" => check::libstd_stamp(self, cmp, target),
+            "check" | "clippy" | "fix" => check::libstd_stamp(self, cmp, target),
             _ => compile::libstd_stamp(self, cmp, target),
         };
 
         let libtest_stamp = match cmd {
-            "check" => check::libtest_stamp(self, cmp, target),
+            "check" | "clippy" | "fix" => check::libtest_stamp(self, cmp, target),
             _ => compile::libstd_stamp(self, cmp, target),
         };
 
         let librustc_stamp = match cmd {
-            "check" => check::librustc_stamp(self, cmp, target),
+            "check" | "clippy" | "fix" => check::librustc_stamp(self, cmp, target),
             _ => compile::librustc_stamp(self, cmp, target),
         };
 
@@ -831,9 +855,9 @@ impl<'a> Builder<'a> {
             assert_eq!(target, compiler.host);
         }
 
-        // Set a flag for `check` so that certain build scripts can do less work
-        // (e.g., not building/requiring LLVM).
-        if cmd == "check" {
+        // Set a flag for `check`/`clippy`/`fix`, so that certain build
+        // scripts can do less work (e.g. not building/requiring LLVM).
+        if cmd == "check" || cmd == "clippy" || cmd == "fix" {
             cargo.env("RUST_CHECK", "1");
         }
 
@@ -896,6 +920,11 @@ impl<'a> Builder<'a> {
                 extra_args.push_str(" ");
             }
             extra_args.push_str(&s);
+        }
+
+        if cmd == "clippy" {
+            extra_args.push_str("-Zforce-unstable-if-unmarked -Zunstable-options \
+                --json-rendered=termcolor");
         }
 
         if !extra_args.is_empty() {
@@ -966,26 +995,19 @@ impl<'a> Builder<'a> {
         if let Some(ref error_format) = self.config.rustc_error_format {
             cargo.env("RUSTC_ERROR_FORMAT", error_format);
         }
-        if cmd != "build" && cmd != "check" && cmd != "rustc" && want_rustdoc {
+        if !(["build", "check", "clippy", "fix", "rustc"].contains(&cmd)) && want_rustdoc {
             cargo.env("RUSTDOC_LIBDIR", self.rustc_libdir(compiler));
         }
 
-        if mode.is_tool() {
-            // Tools like cargo and rls don't get debuginfo by default right now, but this can be
-            // enabled in the config.  Adding debuginfo makes them several times larger.
-            if self.config.rust_debuginfo_tools {
-                cargo.env("RUSTC_DEBUGINFO", self.config.rust_debuginfo.to_string());
-                cargo.env(
-                    "RUSTC_DEBUGINFO_LINES",
-                    self.config.rust_debuginfo_lines.to_string(),
-                );
-            }
-        } else {
-            cargo.env("RUSTC_DEBUGINFO", self.config.rust_debuginfo.to_string());
-            cargo.env(
-                "RUSTC_DEBUGINFO_LINES",
-                self.config.rust_debuginfo_lines.to_string(),
-            );
+        let debuginfo_level = match mode {
+            Mode::Rustc | Mode::Codegen => self.config.rust_debuginfo_level_rustc,
+            Mode::Std | Mode::Test => self.config.rust_debuginfo_level_std,
+            Mode::ToolBootstrap | Mode::ToolStd |
+            Mode::ToolTest | Mode::ToolRustc => self.config.rust_debuginfo_level_tools,
+        };
+        cargo.env("RUSTC_DEBUGINFO_LEVEL", debuginfo_level.to_string());
+
+        if !mode.is_tool() {
             cargo.env("RUSTC_FORCE_UNSTABLE", "1");
 
             // Currently the compiler depends on crates from crates.io, and
@@ -1356,7 +1378,7 @@ mod __test {
 
         assert_eq!(
             first(builder.cache.all::<dist::Docs>()),
-            &[dist::Docs { stage: 2, host: a },]
+            &[dist::Docs { host: a },]
         );
         assert_eq!(
             first(builder.cache.all::<dist::Mingw>()),
@@ -1371,7 +1393,7 @@ mod __test {
         assert_eq!(
             first(builder.cache.all::<dist::Std>()),
             &[dist::Std {
-                compiler: Compiler { host: a, stage: 2 },
+                compiler: Compiler { host: a, stage: 1 },
                 target: a,
             },]
         );
@@ -1390,8 +1412,8 @@ mod __test {
         assert_eq!(
             first(builder.cache.all::<dist::Docs>()),
             &[
-                dist::Docs { stage: 2, host: a },
-                dist::Docs { stage: 2, host: b },
+                dist::Docs { host: a },
+                dist::Docs { host: b },
             ]
         );
         assert_eq!(
@@ -1408,7 +1430,7 @@ mod __test {
             first(builder.cache.all::<dist::Std>()),
             &[
                 dist::Std {
-                    compiler: Compiler { host: a, stage: 2 },
+                    compiler: Compiler { host: a, stage: 1 },
                     target: a,
                 },
                 dist::Std {
@@ -1432,8 +1454,8 @@ mod __test {
         assert_eq!(
             first(builder.cache.all::<dist::Docs>()),
             &[
-                dist::Docs { stage: 2, host: a },
-                dist::Docs { stage: 2, host: b },
+                dist::Docs { host: a },
+                dist::Docs { host: b },
             ]
         );
         assert_eq!(
@@ -1455,16 +1477,50 @@ mod __test {
             first(builder.cache.all::<dist::Std>()),
             &[
                 dist::Std {
-                    compiler: Compiler { host: a, stage: 2 },
+                    compiler: Compiler { host: a, stage: 1 },
                     target: a,
                 },
                 dist::Std {
-                    compiler: Compiler { host: a, stage: 2 },
+                    compiler: Compiler { host: a, stage: 1 },
                     target: b,
                 },
             ]
         );
         assert_eq!(first(builder.cache.all::<dist::Src>()), &[dist::Src]);
+    }
+
+    #[test]
+    fn dist_only_cross_host() {
+        let a = INTERNER.intern_str("A");
+        let b = INTERNER.intern_str("B");
+        let mut build = Build::new(configure(&["B"], &[]));
+        build.config.docs = false;
+        build.config.extended = true;
+        build.hosts = vec![b];
+        let mut builder = Builder::new(&build);
+        builder.run_step_descriptions(&Builder::get_step_descriptions(Kind::Dist), &[]);
+
+        assert_eq!(
+            first(builder.cache.all::<dist::Rustc>()),
+            &[
+                dist::Rustc {
+                    compiler: Compiler { host: b, stage: 2 }
+                },
+            ]
+        );
+        assert_eq!(
+            first(builder.cache.all::<compile::Rustc>()),
+            &[
+                compile::Rustc {
+                    compiler: Compiler { host: a, stage: 0 },
+                    target: a,
+                },
+                compile::Rustc {
+                    compiler: Compiler { host: a, stage: 1 },
+                    target: b,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1480,9 +1536,9 @@ mod __test {
         assert_eq!(
             first(builder.cache.all::<dist::Docs>()),
             &[
-                dist::Docs { stage: 2, host: a },
-                dist::Docs { stage: 2, host: b },
-                dist::Docs { stage: 2, host: c },
+                dist::Docs { host: a },
+                dist::Docs { host: b },
+                dist::Docs { host: c },
             ]
         );
         assert_eq!(
@@ -1508,11 +1564,11 @@ mod __test {
             first(builder.cache.all::<dist::Std>()),
             &[
                 dist::Std {
-                    compiler: Compiler { host: a, stage: 2 },
+                    compiler: Compiler { host: a, stage: 1 },
                     target: a,
                 },
                 dist::Std {
-                    compiler: Compiler { host: a, stage: 2 },
+                    compiler: Compiler { host: a, stage: 1 },
                     target: b,
                 },
                 dist::Std {
@@ -1539,9 +1595,9 @@ mod __test {
         assert_eq!(
             first(builder.cache.all::<dist::Docs>()),
             &[
-                dist::Docs { stage: 2, host: a },
-                dist::Docs { stage: 2, host: b },
-                dist::Docs { stage: 2, host: c },
+                dist::Docs { host: a },
+                dist::Docs { host: b },
+                dist::Docs { host: c },
             ]
         );
         assert_eq!(
@@ -1557,11 +1613,11 @@ mod __test {
             first(builder.cache.all::<dist::Std>()),
             &[
                 dist::Std {
-                    compiler: Compiler { host: a, stage: 2 },
+                    compiler: Compiler { host: a, stage: 1 },
                     target: a,
                 },
                 dist::Std {
-                    compiler: Compiler { host: a, stage: 2 },
+                    compiler: Compiler { host: a, stage: 1 },
                     target: b,
                 },
                 dist::Std {
@@ -1585,8 +1641,8 @@ mod __test {
         assert_eq!(
             first(builder.cache.all::<dist::Docs>()),
             &[
-                dist::Docs { stage: 2, host: a },
-                dist::Docs { stage: 2, host: b },
+                dist::Docs { host: a },
+                dist::Docs { host: b },
             ]
         );
         assert_eq!(
@@ -1608,11 +1664,11 @@ mod __test {
             first(builder.cache.all::<dist::Std>()),
             &[
                 dist::Std {
-                    compiler: Compiler { host: a, stage: 2 },
+                    compiler: Compiler { host: a, stage: 1 },
                     target: a,
                 },
                 dist::Std {
-                    compiler: Compiler { host: a, stage: 2 },
+                    compiler: Compiler { host: a, stage: 1 },
                     target: b,
                 },
             ]
@@ -1660,10 +1716,6 @@ mod __test {
                 },
                 compile::Test {
                     compiler: Compiler { host: a, stage: 1 },
-                    target: b,
-                },
-                compile::Test {
-                    compiler: Compiler { host: a, stage: 2 },
                     target: b,
                 },
             ]
@@ -1719,10 +1771,6 @@ mod __test {
                     target: a,
                 },
                 compile::Rustc {
-                    compiler: Compiler { host: a, stage: 0 },
-                    target: b,
-                },
-                compile::Rustc {
                     compiler: Compiler { host: a, stage: 1 },
                     target: b,
                 },
@@ -1755,10 +1803,6 @@ mod __test {
                 compile::Test {
                     compiler: Compiler { host: b, stage: 2 },
                     target: a,
-                },
-                compile::Test {
-                    compiler: Compiler { host: a, stage: 0 },
-                    target: b,
                 },
                 compile::Test {
                     compiler: Compiler { host: a, stage: 1 },
@@ -1807,9 +1851,6 @@ mod __test {
                     target_compiler: Compiler { host: a, stage: 1 },
                 },
                 compile::Assemble {
-                    target_compiler: Compiler { host: b, stage: 1 },
-                },
-                compile::Assemble {
                     target_compiler: Compiler { host: a, stage: 2 },
                 },
                 compile::Assemble {
@@ -1827,10 +1868,6 @@ mod __test {
                 compile::Rustc {
                     compiler: Compiler { host: a, stage: 1 },
                     target: a,
-                },
-                compile::Rustc {
-                    compiler: Compiler { host: a, stage: 0 },
-                    target: b,
                 },
                 compile::Rustc {
                     compiler: Compiler { host: a, stage: 1 },
@@ -1857,10 +1894,6 @@ mod __test {
                 compile::Test {
                     compiler: Compiler { host: b, stage: 2 },
                     target: a,
-                },
-                compile::Test {
-                    compiler: Compiler { host: a, stage: 0 },
-                    target: b,
                 },
                 compile::Test {
                     compiler: Compiler { host: a, stage: 1 },

@@ -6,7 +6,7 @@ use crate::borrow_check::nll::region_infer::{Cause, RegionName};
 use crate::borrow_check::nll::ConstraintDescription;
 use crate::borrow_check::{MirBorrowckCtxt, WriteKind};
 use rustc::mir::{
-    CastKind, ConstraintCategory, FakeReadCause, Local, Location, Mir, Operand, Place, PlaceBase,
+    CastKind, ConstraintCategory, FakeReadCause, Local, Location, Body, Operand, Place, PlaceBase,
     Projection, ProjectionElem, Rvalue, Statement, StatementKind, TerminatorKind,
 };
 use rustc::ty::{self, TyCtxt};
@@ -54,7 +54,7 @@ impl BorrowExplanation {
     pub(in crate::borrow_check) fn add_explanation_to_diagnostic<'cx, 'gcx, 'tcx>(
         &self,
         tcx: TyCtxt<'cx, 'gcx, 'tcx>,
-        mir: &Mir<'tcx>,
+        mir: &Body<'tcx>,
         err: &mut DiagnosticBuilder<'_>,
         borrow_desc: &str,
         borrow_span: Option<Span>,
@@ -112,7 +112,7 @@ impl BorrowExplanation {
                 };
 
                 match local_decl.name {
-                    Some(local_name) => {
+                    Some(local_name) if !local_decl.from_compiler_desugaring() => {
                         let message = format!(
                             "{B}borrow might be used here, when `{LOC}` is dropped \
                              and runs the {DTOR} for {TYPE}",
@@ -130,7 +130,7 @@ impl BorrowExplanation {
                             );
                         }
                     }
-                    None => {
+                    _ => {
                         err.span_label(
                             local_decl.source_info.span,
                             format!(

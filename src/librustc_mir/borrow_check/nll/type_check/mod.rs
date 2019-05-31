@@ -29,7 +29,7 @@ use rustc::infer::{InferCtxt, InferOk, LateBoundRegionConversionTime, NLLRegionV
 use rustc::infer::type_variable::TypeVariableOrigin;
 use rustc::mir::interpret::{InterpError::BoundsCheck, ConstValue};
 use rustc::mir::tcx::PlaceTy;
-use rustc::mir::visit::{PlaceContext, Visitor, MutatingUseContext, NonMutatingUseContext};
+use rustc::mir::visit::{PlaceContext, Visitor, NonMutatingUseContext};
 use rustc::mir::*;
 use rustc::traits::query::type_op;
 use rustc::traits::query::type_op::custom::CustomTypeOp;
@@ -112,7 +112,7 @@ mod relate_tys;
 pub(crate) fn type_check<'gcx, 'tcx>(
     infcx: &InferCtxt<'_, 'gcx, 'tcx>,
     param_env: ty::ParamEnv<'gcx>,
-    mir: &Mir<'tcx>,
+    mir: &Body<'tcx>,
     mir_def_id: DefId,
     universal_regions: &Rc<UniversalRegions<'tcx>>,
     location_table: &LocationTable,
@@ -179,7 +179,7 @@ fn type_check_internal<'a, 'gcx, 'tcx, R>(
     infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
     mir_def_id: DefId,
     param_env: ty::ParamEnv<'gcx>,
-    mir: &'a Mir<'tcx>,
+    mir: &'a Body<'tcx>,
     region_bound_pairs: &'a RegionBoundPairs<'tcx>,
     implicit_region_bound: ty::Region<'tcx>,
     borrowck_context: &'a mut BorrowCheckContext<'a, 'tcx>,
@@ -198,7 +198,7 @@ fn type_check_internal<'a, 'gcx, 'tcx, R>(
     );
     let errors_reported = {
         let mut verifier = TypeVerifier::new(&mut checker, mir);
-        verifier.visit_mir(mir);
+        verifier.visit_body(mir);
         verifier.errors_reported
     };
 
@@ -253,7 +253,7 @@ enum FieldAccessError {
 /// is a problem.
 struct TypeVerifier<'a, 'b: 'a, 'gcx: 'tcx, 'tcx: 'b> {
     cx: &'a mut TypeChecker<'b, 'gcx, 'tcx>,
-    mir: &'b Mir<'tcx>,
+    mir: &'b Body<'tcx>,
     last_span: Span,
     mir_def_id: DefId,
     errors_reported: bool,
@@ -368,7 +368,7 @@ impl<'a, 'b, 'gcx, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'gcx, 'tcx> {
         }
     }
 
-    fn visit_mir(&mut self, mir: &Mir<'tcx>) {
+    fn visit_body(&mut self, mir: &Body<'tcx>) {
         self.sanitize_type(&"return type", mir.return_ty());
         for local_decl in &mir.local_decls {
             self.sanitize_type(local_decl, local_decl.ty);
@@ -376,12 +376,12 @@ impl<'a, 'b, 'gcx, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'gcx, 'tcx> {
         if self.errors_reported {
             return;
         }
-        self.super_mir(mir);
+        self.super_body(mir);
     }
 }
 
 impl<'a, 'b, 'gcx, 'tcx> TypeVerifier<'a, 'b, 'gcx, 'tcx> {
-    fn new(cx: &'a mut TypeChecker<'b, 'gcx, 'tcx>, mir: &'b Mir<'tcx>) -> Self {
+    fn new(cx: &'a mut TypeChecker<'b, 'gcx, 'tcx>, mir: &'b Body<'tcx>) -> Self {
         TypeVerifier {
             mir,
             mir_def_id: cx.mir_def_id,
@@ -447,95 +447,98 @@ impl<'a, 'b, 'gcx, 'tcx> TypeVerifier<'a, 'b, 'gcx, 'tcx> {
         context: PlaceContext,
     ) -> PlaceTy<'tcx> {
         debug!("sanitize_place: {:?}", place);
-        let place_ty = match place {
-            Place::Base(PlaceBase::Local(index)) =>
-                PlaceTy::from_ty(self.mir.local_decls[*index].ty),
-            Place::Base(PlaceBase::Static(box Static { kind, ty: sty })) => {
-                let sty = self.sanitize_type(place, sty);
-                let check_err =
-                    |verifier: &mut TypeVerifier<'a, 'b, 'gcx, 'tcx>,
-                     place: &Place<'tcx>,
-                     ty,
-                     sty| {
-                        if let Err(terr) = verifier.cx.eq_types(
-                            sty,
-                            ty,
-                            location.to_locations(),
-                            ConstraintCategory::Boring,
-                        ) {
-                            span_mirbug!(
-                            verifier,
-                            place,
-                            "bad promoted type ({:?}: {:?}): {:?}",
-                            ty,
-                            sty,
-                            terr
-                        );
-                        };
-                    };
-                match kind {
-                    StaticKind::Promoted(promoted) => {
-                        if !self.errors_reported {
-                            let promoted_mir = &self.mir.promoted[*promoted];
-                            self.sanitize_promoted(promoted_mir, location);
 
-                            let promoted_ty = promoted_mir.return_ty();
-                            check_err(self, place, promoted_ty, sty);
+        place.iterate(|place_base, place_projection| {
+            let mut place_ty = match place_base {
+                PlaceBase::Local(index) =>
+                    PlaceTy::from_ty(self.mir.local_decls[*index].ty),
+                PlaceBase::Static(box Static { kind, ty: sty }) => {
+                    let sty = self.sanitize_type(place, sty);
+                    let check_err =
+                        |verifier: &mut TypeVerifier<'a, 'b, 'gcx, 'tcx>,
+                         place: &Place<'tcx>,
+                         ty,
+                         sty| {
+                            if let Err(terr) = verifier.cx.eq_types(
+                                sty,
+                                ty,
+                                location.to_locations(),
+                                ConstraintCategory::Boring,
+                            ) {
+                                span_mirbug!(
+                                verifier,
+                                place,
+                                "bad promoted type ({:?}: {:?}): {:?}",
+                                ty,
+                                sty,
+                                terr
+                            );
+                            };
+                        };
+                    match kind {
+                        StaticKind::Promoted(promoted) => {
+                            if !self.errors_reported {
+                                let promoted_mir = &self.mir.promoted[*promoted];
+                                self.sanitize_promoted(promoted_mir, location);
+
+                                let promoted_ty = promoted_mir.return_ty();
+                                check_err(self, place, promoted_ty, sty);
+                            }
+                        }
+                        StaticKind::Static(def_id) => {
+                            let ty = self.tcx().type_of(*def_id);
+                            let ty = self.cx.normalize(ty, location);
+
+                            check_err(self, place, ty, sty);
                         }
                     }
-                    StaticKind::Static(def_id) => {
-                        let ty = self.tcx().type_of(*def_id);
-                        let ty = self.cx.normalize(ty, location);
-
-                        check_err(self, place, ty, sty);
-                    }
+                    PlaceTy::from_ty(sty)
                 }
-                PlaceTy::from_ty(sty)
+            };
+
+            // FIXME use place_projection.is_empty() when is available
+            if let Place::Base(_) = place {
+                if let PlaceContext::NonMutatingUse(NonMutatingUseContext::Copy) = context {
+                    let tcx = self.tcx();
+                    let trait_ref = ty::TraitRef {
+                        def_id: tcx.lang_items().copy_trait().unwrap(),
+                        substs: tcx.mk_substs_trait(place_ty.ty, &[]),
+                    };
+
+                    // In order to have a Copy operand, the type T of the
+                    // value must be Copy. Note that we prove that T: Copy,
+                    // rather than using the `is_copy_modulo_regions`
+                    // test. This is important because
+                    // `is_copy_modulo_regions` ignores the resulting region
+                    // obligations and assumes they pass. This can result in
+                    // bounds from Copy impls being unsoundly ignored (e.g.,
+                    // #29149). Note that we decide to use Copy before knowing
+                    // whether the bounds fully apply: in effect, the rule is
+                    // that if a value of some type could implement Copy, then
+                    // it must.
+                    self.cx.prove_trait_ref(
+                        trait_ref,
+                        location.to_locations(),
+                        ConstraintCategory::CopyBound,
+                    );
+                }
             }
-            Place::Projection(ref proj) => {
-                let base_context = if context.is_mutating_use() {
-                    PlaceContext::MutatingUse(MutatingUseContext::Projection)
-                } else {
-                    PlaceContext::NonMutatingUse(NonMutatingUseContext::Projection)
-                };
-                let base_ty = self.sanitize_place(&proj.base, location, base_context);
-                if base_ty.variant_index.is_none() {
-                    if base_ty.ty.references_error() {
+
+            for proj in place_projection {
+                if place_ty.variant_index.is_none() {
+                    if place_ty.ty.references_error() {
                         assert!(self.errors_reported);
                         return PlaceTy::from_ty(self.tcx().types.err);
                     }
                 }
-                self.sanitize_projection(base_ty, &proj.elem, place, location)
+                place_ty = self.sanitize_projection(place_ty, &proj.elem, place, location)
             }
-        };
-        if let PlaceContext::NonMutatingUse(NonMutatingUseContext::Copy) = context {
-            let tcx = self.tcx();
-            let trait_ref = ty::TraitRef {
-                def_id: tcx.lang_items().copy_trait().unwrap(),
-                substs: tcx.mk_substs_trait(place_ty.ty, &[]),
-            };
 
-            // In order to have a Copy operand, the type T of the
-            // value must be Copy. Note that we prove that T: Copy,
-            // rather than using the `is_copy_modulo_regions`
-            // test. This is important because
-            // `is_copy_modulo_regions` ignores the resulting region
-            // obligations and assumes they pass. This can result in
-            // bounds from Copy impls being unsoundly ignored (e.g.,
-            // #29149). Note that we decide to use Copy before knowing
-            // whether the bounds fully apply: in effect, the rule is
-            // that if a value of some type could implement Copy, then
-            // it must.
-            self.cx.prove_trait_ref(
-                trait_ref,
-                location.to_locations(),
-                ConstraintCategory::CopyBound,
-            );
-        }
-        place_ty
+            place_ty
+        })
     }
 
-    fn sanitize_promoted(&mut self, promoted_mir: &'b Mir<'tcx>, location: Location) {
+    fn sanitize_promoted(&mut self, promoted_mir: &'b Body<'tcx>, location: Location) {
         // Determine the constraints from the promoted MIR by running the type
         // checker on the promoted MIR, then transfer the constraints back to
         // the main MIR, changing the locations to the provided location.
@@ -559,7 +562,7 @@ impl<'a, 'b, 'gcx, 'tcx> TypeVerifier<'a, 'b, 'gcx, 'tcx> {
             &mut closure_bounds
         );
 
-        self.visit_mir(promoted_mir);
+        self.visit_body(promoted_mir);
 
         if !self.errors_reported {
             // if verifier failed, don't do further checks to avoid ICEs
@@ -966,7 +969,7 @@ impl Locations {
     }
 
     /// Gets a span representing the location.
-    pub fn span(&self, mir: &Mir<'_>) -> Span {
+    pub fn span(&self, mir: &Body<'_>) -> Span {
         match self {
             Locations::All(span) => *span,
             Locations::Single(l) => mir.source_info(*l).span,
@@ -977,7 +980,7 @@ impl Locations {
 impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
     fn new(
         infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
-        mir: &'a Mir<'tcx>,
+        mir: &'a Body<'tcx>,
         mir_def_id: DefId,
         param_env: ty::ParamEnv<'gcx>,
         region_bound_pairs: &'a RegionBoundPairs<'tcx>,
@@ -1260,7 +1263,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
                         debug!(
                             "eq_opaque_type_and_type: concrete_ty={:?}={:?} opaque_defn_ty={:?}",
                             opaque_decl.concrete_ty,
-                            infcx.resolve_type_vars_if_possible(&opaque_decl.concrete_ty),
+                            infcx.resolve_vars_if_possible(&opaque_decl.concrete_ty),
                             opaque_defn_ty
                         );
                         obligations.add(infcx
@@ -1314,7 +1317,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
         self.infcx.tcx
     }
 
-    fn check_stmt(&mut self, mir: &Mir<'tcx>, stmt: &Statement<'tcx>, location: Location) {
+    fn check_stmt(&mut self, mir: &Body<'tcx>, stmt: &Statement<'tcx>, location: Location) {
         debug!("check_stmt: {:?}", stmt);
         let tcx = self.tcx();
         match stmt.kind {
@@ -1453,7 +1456,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
 
     fn check_terminator(
         &mut self,
-        mir: &Mir<'tcx>,
+        mir: &Body<'tcx>,
         term: &Terminator<'tcx>,
         term_location: Location,
     ) {
@@ -1615,7 +1618,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
 
     fn check_call_dest(
         &mut self,
-        mir: &Mir<'tcx>,
+        mir: &Body<'tcx>,
         term: &Terminator<'tcx>,
         sig: &ty::FnSig<'tcx>,
         destination: &Option<(Place<'tcx>, BasicBlock)>,
@@ -1684,7 +1687,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
 
     fn check_call_inputs(
         &mut self,
-        mir: &Mir<'tcx>,
+        mir: &Body<'tcx>,
         term: &Terminator<'tcx>,
         sig: &ty::FnSig<'tcx>,
         args: &[Operand<'tcx>],
@@ -1725,7 +1728,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
         }
     }
 
-    fn check_iscleanup(&mut self, mir: &Mir<'tcx>, block_data: &BasicBlockData<'tcx>) {
+    fn check_iscleanup(&mut self, mir: &Body<'tcx>, block_data: &BasicBlockData<'tcx>) {
         let is_cleanup = block_data.is_cleanup;
         self.last_span = block_data.terminator().source_info.span;
         match block_data.terminator().kind {
@@ -1817,7 +1820,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
 
     fn assert_iscleanup(
         &mut self,
-        mir: &Mir<'tcx>,
+        mir: &Body<'tcx>,
         ctxt: &dyn fmt::Debug,
         bb: BasicBlock,
         iscleanuppad: bool,
@@ -1833,7 +1836,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
         }
     }
 
-    fn check_local(&mut self, mir: &Mir<'tcx>, local: Local, local_decl: &LocalDecl<'tcx>) {
+    fn check_local(&mut self, mir: &Body<'tcx>, local: Local, local_decl: &LocalDecl<'tcx>) {
         match mir.local_kind(local) {
             LocalKind::ReturnPointer | LocalKind::Arg => {
                 // return values of normal functions are required to be
@@ -1935,7 +1938,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
         }
     }
 
-    fn check_rvalue(&mut self, mir: &Mir<'tcx>, rvalue: &Rvalue<'tcx>, location: Location) {
+    fn check_rvalue(&mut self, mir: &Body<'tcx>, rvalue: &Rvalue<'tcx>, location: Location) {
         let tcx = self.tcx();
 
         match rvalue {
@@ -2271,7 +2274,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
 
     fn check_aggregate_rvalue(
         &mut self,
-        mir: &Mir<'tcx>,
+        mir: &Body<'tcx>,
         rvalue: &Rvalue<'tcx>,
         aggregate_kind: &AggregateKind<'tcx>,
         operands: &[Operand<'tcx>],
@@ -2329,7 +2332,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
     /// - `borrowed_place`: the place `P` being borrowed
     fn add_reborrow_constraint(
         &mut self,
-        mir: &Mir<'tcx>,
+        mir: &Body<'tcx>,
         location: Location,
         borrow_region: ty::Region<'tcx>,
         borrowed_place: &Place<'tcx>,
@@ -2370,7 +2373,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
             "add_reborrow_constraint({:?}, {:?}, {:?})",
             location, borrow_region, borrowed_place
         );
-        while let Place::Projection(box PlaceProjection { base, elem }) = borrowed_place {
+        while let Place::Projection(box Projection { base, elem }) = borrowed_place {
             debug!("add_reborrow_constraint - iteration {:?}", borrowed_place);
 
             match *elem {
@@ -2618,7 +2621,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
         })
     }
 
-    fn typeck_mir(&mut self, mir: &Mir<'tcx>) {
+    fn typeck_mir(&mut self, mir: &Body<'tcx>) {
         self.last_span = mir.span;
         debug!("run_on_mir: {:?}", mir.span);
 

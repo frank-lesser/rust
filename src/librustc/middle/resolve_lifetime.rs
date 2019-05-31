@@ -15,7 +15,6 @@ use crate::rustc::lint;
 use crate::session::Session;
 use crate::util::nodemap::{DefIdMap, FxHashMap, FxHashSet, HirIdMap, HirIdSet};
 use errors::{Applicability, DiagnosticBuilder};
-use rustc_data_structures::sync::Lrc;
 use rustc_macros::HashStable;
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -171,16 +170,11 @@ pub enum Set1<T> {
 
 impl<T: PartialEq> Set1<T> {
     pub fn insert(&mut self, value: T) {
-        if let Set1::Empty = *self {
-            *self = Set1::One(value);
-            return;
-        }
-        if let Set1::One(ref old) = *self {
-            if *old == value {
-                return;
-            }
-        }
-        *self = Set1::Many;
+        *self = match self {
+            Set1::Empty => Set1::One(value),
+            Set1::One(old) if *old == value => return,
+            _ => Set1::Many,
+        };
     }
 }
 
@@ -211,10 +205,10 @@ struct NamedRegionMap {
 /// See [`NamedRegionMap`].
 #[derive(Default)]
 pub struct ResolveLifetimes {
-    defs: FxHashMap<LocalDefId, Lrc<FxHashMap<ItemLocalId, Region>>>,
-    late_bound: FxHashMap<LocalDefId, Lrc<FxHashSet<ItemLocalId>>>,
+    defs: FxHashMap<LocalDefId, FxHashMap<ItemLocalId, Region>>,
+    late_bound: FxHashMap<LocalDefId, FxHashSet<ItemLocalId>>,
     object_lifetime_defaults:
-        FxHashMap<LocalDefId, Lrc<FxHashMap<ItemLocalId, Lrc<Vec<ObjectLifetimeDefault>>>>>,
+        FxHashMap<LocalDefId, FxHashMap<ItemLocalId, Vec<ObjectLifetimeDefault>>>,
 }
 
 impl_stable_hash_for!(struct crate::middle::resolve_lifetime::ResolveLifetimes {
@@ -347,7 +341,7 @@ pub fn provide(providers: &mut ty::query::Providers<'_>) {
 
         named_region_map: |tcx, id| {
             let id = LocalDefId::from_def_id(DefId::local(id)); // (*)
-            tcx.resolve_lifetimes(LOCAL_CRATE).defs.get(&id).cloned()
+            tcx.resolve_lifetimes(LOCAL_CRATE).defs.get(&id)
         },
 
         is_late_bound_map: |tcx, id| {
@@ -355,7 +349,6 @@ pub fn provide(providers: &mut ty::query::Providers<'_>) {
             tcx.resolve_lifetimes(LOCAL_CRATE)
                 .late_bound
                 .get(&id)
-                .cloned()
         },
 
         object_lifetime_defaults_map: |tcx, id| {
@@ -363,7 +356,6 @@ pub fn provide(providers: &mut ty::query::Providers<'_>) {
             tcx.resolve_lifetimes(LOCAL_CRATE)
                 .object_lifetime_defaults
                 .get(&id)
-                .cloned()
         },
 
         ..*providers
@@ -379,7 +371,7 @@ pub fn provide(providers: &mut ty::query::Providers<'_>) {
 fn resolve_lifetimes<'tcx>(
     tcx: TyCtxt<'_, 'tcx, 'tcx>,
     for_krate: CrateNum,
-) -> Lrc<ResolveLifetimes> {
+) -> &'tcx ResolveLifetimes {
     assert_eq!(for_krate, LOCAL_CRATE);
 
     let named_region_map = krate(tcx);
@@ -388,24 +380,22 @@ fn resolve_lifetimes<'tcx>(
 
     for (hir_id, v) in named_region_map.defs {
         let map = rl.defs.entry(hir_id.owner_local_def_id()).or_default();
-        Lrc::get_mut(map).unwrap().insert(hir_id.local_id, v);
+        map.insert(hir_id.local_id, v);
     }
     for hir_id in named_region_map.late_bound {
         let map = rl.late_bound
             .entry(hir_id.owner_local_def_id())
             .or_default();
-        Lrc::get_mut(map).unwrap().insert(hir_id.local_id);
+        map.insert(hir_id.local_id);
     }
     for (hir_id, v) in named_region_map.object_lifetime_defaults {
         let map = rl.object_lifetime_defaults
             .entry(hir_id.owner_local_def_id())
             .or_default();
-        Lrc::get_mut(map)
-            .unwrap()
-            .insert(hir_id.local_id, Lrc::new(v));
+        map.insert(hir_id.local_id, v);
     }
 
-    Lrc::new(rl)
+    tcx.arena.alloc(rl)
 }
 
 fn krate<'tcx>(tcx: TyCtxt<'_, 'tcx, 'tcx>) -> NamedRegionMap {
@@ -1929,7 +1919,7 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
             }
         };
         let type_def_id = match res {
-            Res::Def(DefKind::AssociatedTy, def_id)
+            Res::Def(DefKind::AssocTy, def_id)
                 if depth == 1 => Some(parent_def_id(self, def_id)),
             Res::Def(DefKind::Variant, def_id)
                 if depth == 0 => Some(parent_def_id(self, def_id)),
@@ -2117,7 +2107,7 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
         };
 
         let has_self = match assoc_item_kind {
-            Some(hir::AssociatedItemKind::Method { has_self }) => has_self,
+            Some(hir::AssocItemKind::Method { has_self }) => has_self,
             _ => false,
         };
 

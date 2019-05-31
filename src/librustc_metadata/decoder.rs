@@ -18,7 +18,7 @@ use rustc::mir::interpret::AllocDecodingSession;
 use rustc::session::Session;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::codec::TyDecoder;
-use rustc::mir::Mir;
+use rustc::mir::Body;
 use rustc::util::captures::Captures;
 
 use std::io;
@@ -401,7 +401,7 @@ impl<'tcx> EntryKind<'tcx> {
     fn def_kind(&self) -> Option<DefKind> {
         Some(match *self {
             EntryKind::Const(..) => DefKind::Const,
-            EntryKind::AssociatedConst(..) => DefKind::AssociatedConst,
+            EntryKind::AssocConst(..) => DefKind::AssocConst,
             EntryKind::ImmStatic |
             EntryKind::MutStatic |
             EntryKind::ForeignImmStatic |
@@ -415,8 +415,8 @@ impl<'tcx> EntryKind<'tcx> {
             EntryKind::TypeParam => DefKind::TyParam,
             EntryKind::ConstParam => DefKind::ConstParam,
             EntryKind::Existential => DefKind::Existential,
-            EntryKind::AssociatedType(_) => DefKind::AssociatedTy,
-            EntryKind::AssociatedExistential(_) => DefKind::AssociatedExistential,
+            EntryKind::AssocType(_) => DefKind::AssocTy,
+            EntryKind::AssocExistential(_) => DefKind::AssocExistential,
             EntryKind::Mod(_) => DefKind::Mod,
             EntryKind::Variant(_) => DefKind::Variant,
             EntryKind::Trait(_) => DefKind::Trait,
@@ -708,26 +708,30 @@ impl<'a, 'tcx> CrateMetadata {
     }
 
     /// Iterates over all the stability attributes in the given crate.
-    pub fn get_lib_features(&self) -> Vec<(ast::Name, Option<ast::Name>)> {
+    pub fn get_lib_features(
+        &self,
+        tcx: TyCtxt<'_, 'tcx, '_>,
+    ) -> &'tcx [(ast::Name, Option<ast::Name>)] {
         // FIXME: For a proc macro crate, not sure whether we should return the "host"
         // features or an empty Vec. Both don't cause ICEs.
-        self.root
+        tcx.arena.alloc_from_iter(self.root
             .lib_features
-            .decode(self)
-            .collect()
+            .decode(self))
     }
 
     /// Iterates over the language items in the given crate.
-    pub fn get_lang_items(&self) -> Vec<(DefId, usize)> {
+    pub fn get_lang_items(
+        &self,
+        tcx: TyCtxt<'_, 'tcx, '_>,
+    ) -> &'tcx [(DefId, usize)] {
         if self.proc_macros.is_some() {
             // Proc macro crates do not export any lang-items to the target.
-            vec![]
+            &[]
         } else {
-            self.root
+            tcx.arena.alloc_from_iter(self.root
                 .lang_items
                 .decode(self)
-                .map(|(def_index, index)| (self.local_def_id(def_index), index))
-                .collect()
+                .map(|(def_index, index)| (self.local_def_id(def_index), index)))
         }
     }
 
@@ -869,7 +873,7 @@ impl<'a, 'tcx> CrateMetadata {
 
     pub fn const_is_rvalue_promotable_to_static(&self, id: DefIndex) -> bool {
         match self.entry(id).kind {
-            EntryKind::AssociatedConst(_, data, _) |
+            EntryKind::AssocConst(_, data, _) |
             EntryKind::Const(data, _) => data.ast_promotable,
             _ => bug!(),
         }
@@ -883,7 +887,7 @@ impl<'a, 'tcx> CrateMetadata {
     pub fn maybe_get_optimized_mir(&self,
                                    tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                    id: DefIndex)
-                                   -> Option<Mir<'tcx>> {
+                                   -> Option<Body<'tcx>> {
         match self.is_proc_macro(id) {
             true => None,
             false => self.entry(id).mir.map(|mir| mir.decode((self, tcx))),
@@ -893,38 +897,38 @@ impl<'a, 'tcx> CrateMetadata {
     pub fn mir_const_qualif(&self, id: DefIndex) -> u8 {
         match self.entry(id).kind {
             EntryKind::Const(qualif, _) |
-            EntryKind::AssociatedConst(AssociatedContainer::ImplDefault, qualif, _) |
-            EntryKind::AssociatedConst(AssociatedContainer::ImplFinal, qualif, _) => {
+            EntryKind::AssocConst(AssocContainer::ImplDefault, qualif, _) |
+            EntryKind::AssocConst(AssocContainer::ImplFinal, qualif, _) => {
                 qualif.mir
             }
             _ => bug!(),
         }
     }
 
-    pub fn get_associated_item(&self, id: DefIndex) -> ty::AssociatedItem {
+    pub fn get_associated_item(&self, id: DefIndex) -> ty::AssocItem {
         let item = self.entry(id);
         let def_key = self.def_key(id);
         let parent = self.local_def_id(def_key.parent.unwrap());
         let name = def_key.disambiguated_data.data.get_opt_name().unwrap();
 
         let (kind, container, has_self) = match item.kind {
-            EntryKind::AssociatedConst(container, _, _) => {
-                (ty::AssociatedKind::Const, container, false)
+            EntryKind::AssocConst(container, _, _) => {
+                (ty::AssocKind::Const, container, false)
             }
             EntryKind::Method(data) => {
                 let data = data.decode(self);
-                (ty::AssociatedKind::Method, data.container, data.has_self)
+                (ty::AssocKind::Method, data.container, data.has_self)
             }
-            EntryKind::AssociatedType(container) => {
-                (ty::AssociatedKind::Type, container, false)
+            EntryKind::AssocType(container) => {
+                (ty::AssocKind::Type, container, false)
             }
-            EntryKind::AssociatedExistential(container) => {
-                (ty::AssociatedKind::Existential, container, false)
+            EntryKind::AssocExistential(container) => {
+                (ty::AssocKind::Existential, container, false)
             }
             _ => bug!("cannot get associated-item of `{:?}`", def_key)
         };
 
-        ty::AssociatedItem {
+        ty::AssocItem {
             ident: Ident::from_interned_str(name),
             kind,
             vis: item.visibility.decode(self),
@@ -1013,39 +1017,45 @@ impl<'a, 'tcx> CrateMetadata {
         None
     }
 
-    pub fn get_inherent_implementations_for_type(&self, id: DefIndex) -> Vec<DefId> {
-        self.entry(id)
-            .inherent_impls
-            .decode(self)
-            .map(|index| self.local_def_id(index))
-            .collect()
+    pub fn get_inherent_implementations_for_type(
+        &self,
+        tcx: TyCtxt<'_, 'tcx, '_>,
+        id: DefIndex
+    ) -> &'tcx [DefId] {
+        tcx.arena.alloc_from_iter(self.entry(id)
+                                      .inherent_impls
+                                      .decode(self)
+                                      .map(|index| self.local_def_id(index)))
     }
 
-    pub fn get_implementations_for_trait(&self,
-                                         filter: Option<DefId>,
-                                         result: &mut Vec<DefId>) {
+    pub fn get_implementations_for_trait(
+        &self,
+        tcx: TyCtxt<'_, 'tcx, '_>,
+        filter: Option<DefId>,
+    ) -> &'tcx [DefId] {
         if self.proc_macros.is_some() {
             // proc-macro crates export no trait impls.
-            return
+            return &[]
         }
 
         // Do a reverse lookup beforehand to avoid touching the crate_num
         // hash map in the loop below.
         let filter = match filter.map(|def_id| self.reverse_translate_def_id(def_id)) {
             Some(Some(def_id)) => Some((def_id.krate.as_u32(), def_id.index)),
-            Some(None) => return,
+            Some(None) => return &[],
             None => None,
         };
 
         if let Some(filter) = filter {
-            if let Some(impls) = self.trait_impls
-                                     .get(&filter) {
-                result.extend(impls.decode(self).map(|idx| self.local_def_id(idx)));
+            if let Some(impls) = self.trait_impls.get(&filter) {
+                tcx.arena.alloc_from_iter(impls.decode(self).map(|idx| self.local_def_id(idx)))
+            } else {
+                &[]
             }
         } else {
-            for impls in self.trait_impls.values() {
-                result.extend(impls.decode(self).map(|idx| self.local_def_id(idx)));
-            }
+            tcx.arena.alloc_from_iter(self.trait_impls.values().flat_map(|impls| {
+                impls.decode(self).map(|idx| self.local_def_id(idx))
+            }))
         }
     }
 
@@ -1075,36 +1085,43 @@ impl<'a, 'tcx> CrateMetadata {
         }
     }
 
-    pub fn get_foreign_modules(&self, sess: &Session) -> Vec<ForeignModule> {
+    pub fn get_foreign_modules(
+        &self,
+        tcx: TyCtxt<'_, 'tcx, '_>,
+    ) -> &'tcx [ForeignModule] {
         if self.proc_macros.is_some() {
             // Proc macro crates do not have any *target* foreign modules.
-            vec![]
+            &[]
         } else {
-            self.root.foreign_modules.decode((self, sess)).collect()
+            tcx.arena.alloc_from_iter(self.root.foreign_modules.decode((self, tcx.sess)))
         }
     }
 
-    pub fn get_dylib_dependency_formats(&self) -> Vec<(CrateNum, LinkagePreference)> {
-        self.root
+    pub fn get_dylib_dependency_formats(
+        &self,
+        tcx: TyCtxt<'_, 'tcx, '_>,
+    ) -> &'tcx [(CrateNum, LinkagePreference)] {
+        tcx.arena.alloc_from_iter(self.root
             .dylib_dependency_formats
             .decode(self)
             .enumerate()
             .flat_map(|(i, link)| {
                 let cnum = CrateNum::new(i + 1);
                 link.map(|link| (self.cnum_map[cnum], link))
-            })
-            .collect()
+            }))
     }
 
-    pub fn get_missing_lang_items(&self) -> Vec<lang_items::LangItem> {
+    pub fn get_missing_lang_items(
+        &self,
+        tcx: TyCtxt<'_, 'tcx, '_>,
+    ) -> &'tcx [lang_items::LangItem] {
         if self.proc_macros.is_some() {
             // Proc macro crates do not depend on any target weak lang-items.
-            vec![]
+            &[]
         } else {
-            self.root
+            tcx.arena.alloc_from_iter(self.root
                 .lang_items_missing
-                .decode(self)
-                .collect()
+                .decode(self))
         }
     }
 
@@ -1133,7 +1150,7 @@ impl<'a, 'tcx> CrateMetadata {
     pub fn get_rendered_const(&self, id: DefIndex) -> String {
         match self.entry(id).kind {
             EntryKind::Const(_, data) |
-            EntryKind::AssociatedConst(_, _, data) => data.decode(self).0,
+            EntryKind::AssocConst(_, _, data) => data.decode(self).0,
             _ => bug!(),
         }
     }

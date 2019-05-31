@@ -253,15 +253,16 @@ impl<T: ?Sized> Box<T> {
     #[unstable(feature = "ptr_internals", issue = "0", reason = "use into_raw_non_null instead")]
     #[inline]
     #[doc(hidden)]
-    pub fn into_unique(mut b: Box<T>) -> Unique<T> {
+    pub fn into_unique(b: Box<T>) -> Unique<T> {
+        let mut unique = b.0;
+        mem::forget(b);
         // Box is kind-of a library type, but recognized as a "unique pointer" by
         // Stacked Borrows.  This function here corresponds to "reborrowing to
         // a raw pointer", but there is no actual reborrow here -- so
         // without some care, the pointer we are returning here still carries
-        // the `Uniq` tag.  We round-trip through a mutable reference to avoid that.
-        let unique = unsafe { b.0.as_mut() as *mut T };
-        mem::forget(b);
-        unsafe { Unique::new_unchecked(unique) }
+        // the tag of `b`, with `Unique` permission.
+        // We round-trip through a mutable reference to avoid that.
+        unsafe { Unique::new_unchecked(unique.as_mut() as *mut T) }
     }
 
     /// Consumes and leaks the `Box`, returning a mutable reference,
@@ -394,11 +395,10 @@ impl<T: Clone> Clone for Box<T> {
 #[stable(feature = "box_slice_clone", since = "1.3.0")]
 impl Clone for Box<str> {
     fn clone(&self) -> Self {
-        let len = self.len();
-        let buf = RawVec::with_capacity(len);
+        // this makes a copy of the data
+        let buf: Box<[u8]> = self.as_bytes().into();
         unsafe {
-            ptr::copy_nonoverlapping(self.as_ptr(), buf.ptr(), len);
-            from_boxed_utf8_unchecked(buf.into_box())
+            from_boxed_utf8_unchecked(buf)
         }
     }
 }
@@ -545,9 +545,12 @@ impl<T: Copy> From<&[T]> for Box<[T]> {
     /// println!("{:?}", boxed_slice);
     /// ```
     fn from(slice: &[T]) -> Box<[T]> {
-        let mut boxed = unsafe { RawVec::with_capacity(slice.len()).into_box() };
-        boxed.copy_from_slice(slice);
-        boxed
+        let len = slice.len();
+        let buf = RawVec::with_capacity(len);
+        unsafe {
+            ptr::copy_nonoverlapping(slice.as_ptr(), buf.ptr(), len);
+            buf.into_box()
+        }
     }
 }
 
@@ -758,13 +761,14 @@ impl<A, F: Fn<A> + ?Sized> Fn<A> for Box<F> {
     }
 }
 
+/// `FnBox` is deprecated and will be removed.
+/// `Box<dyn FnOnce()>` can be called directly, since Rust 1.35.0.
+///
 /// `FnBox` is a version of the `FnOnce` intended for use with boxed
-/// closure objects. The idea is that where one would normally store a
-/// `Box<dyn FnOnce()>` in a data structure, you should use
+/// closure objects. The idea was that where one would normally store a
+/// `Box<dyn FnOnce()>` in a data structure, you whould use
 /// `Box<dyn FnBox()>`. The two traits behave essentially the same, except
-/// that a `FnBox` closure can only be called if it is boxed. (Note
-/// that `FnBox` may be deprecated in the future if `Box<dyn FnOnce()>`
-/// closures become directly usable.)
+/// that a `FnBox` closure can only be called if it is boxed.
 ///
 /// # Examples
 ///
@@ -776,6 +780,7 @@ impl<A, F: Fn<A> + ?Sized> Fn<A> for Box<F> {
 ///
 /// ```
 /// #![feature(fnbox)]
+/// #![allow(deprecated)]
 ///
 /// use std::boxed::FnBox;
 /// use std::collections::HashMap;
@@ -795,16 +800,38 @@ impl<A, F: Fn<A> + ?Sized> Fn<A> for Box<F> {
 ///     }
 /// }
 /// ```
+///
+/// In Rust 1.35.0 or later, use `FnOnce`, `FnMut`, or `Fn` instead:
+///
+/// ```
+/// use std::collections::HashMap;
+///
+/// fn make_map() -> HashMap<i32, Box<dyn FnOnce() -> i32>> {
+///     let mut map: HashMap<i32, Box<dyn FnOnce() -> i32>> = HashMap::new();
+///     map.insert(1, Box::new(|| 22));
+///     map.insert(2, Box::new(|| 44));
+///     map
+/// }
+///
+/// fn main() {
+///     let mut map = make_map();
+///     for i in &[1, 2] {
+///         let f = map.remove(&i).unwrap();
+///         assert_eq!(f(), i * 22);
+///     }
+/// }
+/// ```
 #[rustc_paren_sugar]
-#[unstable(feature = "fnbox",
-           reason = "will be deprecated if and when `Box<FnOnce>` becomes usable", issue = "28796")]
+#[unstable(feature = "fnbox", issue = "28796")]
+#[rustc_deprecated(reason = "use `FnOnce`, `FnMut`, or `Fn` instead", since = "1.37.0")]
 pub trait FnBox<A>: FnOnce<A> {
     /// Performs the call operation.
     fn call_box(self: Box<Self>, args: A) -> Self::Output;
 }
 
-#[unstable(feature = "fnbox",
-           reason = "will be deprecated if and when `Box<FnOnce>` becomes usable", issue = "28796")]
+#[unstable(feature = "fnbox", issue = "28796")]
+#[rustc_deprecated(reason = "use `FnOnce`, `FnMut`, or `Fn` instead", since = "1.37.0")]
+#[allow(deprecated, deprecated_in_future)]
 impl<A, F> FnBox<A> for F
     where F: FnOnce<A>
 {

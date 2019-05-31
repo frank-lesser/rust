@@ -1,7 +1,7 @@
-use rustc::mir::interpret::{ConstValue, ErrorHandled};
+use rustc::mir::interpret::{ConstValue, ErrorHandled, Pointer, Scalar};
 use rustc::mir;
 use rustc::ty;
-use rustc::ty::layout::{self, Align, LayoutOf, TyLayout};
+use rustc::ty::layout::{self, Align, LayoutOf, TyLayout, Size};
 
 use crate::base;
 use crate::MemFlags;
@@ -67,12 +67,12 @@ impl<'a, 'tcx: 'a, V: CodegenObject> OperandRef<'tcx, V> {
 
     pub fn from_const<Bx: BuilderMethods<'a, 'tcx, Value = V>>(
         bx: &mut Bx,
-        val: ty::Const<'tcx>
-    ) -> Result<Self, ErrorHandled> {
+        val: &'tcx ty::Const<'tcx>
+    ) -> Self {
         let layout = bx.layout_of(val.ty);
 
         if layout.is_zst() {
-            return Ok(OperandRef::new_zst(bx, layout));
+            return OperandRef::new_zst(bx, layout);
         }
 
         let val = match val.val {
@@ -92,28 +92,32 @@ impl<'a, 'tcx: 'a, V: CodegenObject> OperandRef<'tcx, V> {
                 );
                 OperandValue::Immediate(llval)
             },
-            ConstValue::Slice(a, b) => {
+            ConstValue::Slice { data, start, end } => {
                 let a_scalar = match layout.abi {
                     layout::Abi::ScalarPair(ref a, _) => a,
                     _ => bug!("from_const: invalid ScalarPair layout: {:#?}", layout)
                 };
+                let a = Scalar::from(Pointer::new(
+                    bx.tcx().alloc_map.lock().allocate(data),
+                    Size::from_bytes(start as u64),
+                )).into();
                 let a_llval = bx.scalar_to_backend(
                     a,
                     a_scalar,
                     bx.scalar_pair_element_backend_type(layout, 0, true),
                 );
-                let b_llval = bx.const_usize(b);
+                let b_llval = bx.const_usize((end - start) as u64);
                 OperandValue::Pair(a_llval, b_llval)
             },
             ConstValue::ByRef(ptr, alloc) => {
-                return Ok(bx.load_operand(bx.from_const_alloc(layout, alloc, ptr.offset)));
+                return bx.load_operand(bx.from_const_alloc(layout, alloc, ptr.offset));
             },
         };
 
-        Ok(OperandRef {
+        OperandRef {
             val,
             layout
-        })
+        }
     }
 
     /// Asserts that this operand refers to a scalar and returns
@@ -464,7 +468,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             mir::Operand::Constant(ref constant) => {
                 let ty = self.monomorphize(&constant.ty);
                 self.eval_mir_constant(constant)
-                    .and_then(|c| OperandRef::from_const(bx, c))
+                    .map(|c| OperandRef::from_const(bx, c))
                     .unwrap_or_else(|err| {
                         match err {
                             // errored or at least linted

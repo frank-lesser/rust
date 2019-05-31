@@ -70,20 +70,20 @@ impl Step for Std {
 
         builder.ensure(StartupObjects { compiler, target });
 
-        if builder.force_use_stage1(compiler, target) {
-            let from = builder.compiler(1, builder.config.build);
+        let compiler_to_use = builder.compiler_for(compiler.stage, compiler.host, target);
+        if compiler_to_use != compiler {
             builder.ensure(Std {
-                compiler: from,
+                compiler: compiler_to_use,
                 target,
             });
-            builder.info(&format!("Uplifting stage1 std ({} -> {})", from.host, target));
+            builder.info(&format!("Uplifting stage1 std ({} -> {})", compiler_to_use.host, target));
 
             // Even if we're not building std this stage, the new sysroot must
             // still contain the third party objects needed by various targets.
             copy_third_party_objects(builder, &compiler, target);
 
             builder.ensure(StdLink {
-                compiler: from,
+                compiler: compiler_to_use,
                 target_compiler: compiler,
                 target,
             });
@@ -100,6 +100,7 @@ impl Step for Std {
                 &compiler.host, target));
         run_cargo(builder,
                   &mut cargo,
+                  vec![],
                   &libstd_stamp(builder, compiler, target),
                   false);
 
@@ -402,15 +403,16 @@ impl Step for Test {
             return;
         }
 
-        if builder.force_use_stage1(compiler, target) {
+        let compiler_to_use = builder.compiler_for(compiler.stage, compiler.host, target);
+        if compiler_to_use != compiler {
             builder.ensure(Test {
-                compiler: builder.compiler(1, builder.config.build),
+                compiler: compiler_to_use,
                 target,
             });
             builder.info(
                 &format!("Uplifting stage1 test ({} -> {})", builder.config.build, target));
             builder.ensure(TestLink {
-                compiler: builder.compiler(1, builder.config.build),
+                compiler: compiler_to_use,
                 target_compiler: compiler,
                 target,
             });
@@ -425,6 +427,7 @@ impl Step for Test {
                 &compiler.host, target));
         run_cargo(builder,
                   &mut cargo,
+                  vec![],
                   &libtest_stamp(builder, compiler, target),
                   false);
 
@@ -527,15 +530,16 @@ impl Step for Rustc {
             return;
         }
 
-        if builder.force_use_stage1(compiler, target) {
+        let compiler_to_use = builder.compiler_for(compiler.stage, compiler.host, target);
+        if compiler_to_use != compiler {
             builder.ensure(Rustc {
-                compiler: builder.compiler(1, builder.config.build),
+                compiler: compiler_to_use,
                 target,
             });
             builder.info(&format!("Uplifting stage1 rustc ({} -> {})",
                 builder.config.build, target));
             builder.ensure(RustcLink {
-                compiler: builder.compiler(1, builder.config.build),
+                compiler: compiler_to_use,
                 target_compiler: compiler,
                 target,
             });
@@ -556,6 +560,7 @@ impl Step for Rustc {
                  compiler.stage, &compiler.host, target));
         run_cargo(builder,
                   &mut cargo,
+                  vec![],
                   &librustc_stamp(builder, compiler, target),
                   false);
 
@@ -585,13 +590,6 @@ pub fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Command) {
 
     let libdir_relative = builder.config.libdir_relative().unwrap_or(Path::new("lib"));
     cargo.env("CFG_LIBDIR_RELATIVE", libdir_relative);
-
-    // If we're not building a compiler with debugging information then remove
-    // these two env vars which would be set otherwise.
-    if builder.config.rust_debuginfo_only_std {
-        cargo.env_remove("RUSTC_DEBUGINFO");
-        cargo.env_remove("RUSTC_DEBUGINFO_LINES");
-    }
 
     if let Some(ref ver_date) = builder.rust_info.commit_date() {
         cargo.env("CFG_VER_DATE", ver_date);
@@ -691,9 +689,10 @@ impl Step for CodegenBackend {
             return;
         }
 
-        if builder.force_use_stage1(compiler, target) {
+        let compiler_to_use = builder.compiler_for(compiler.stage, compiler.host, target);
+        if compiler_to_use != compiler {
             builder.ensure(CodegenBackend {
-                compiler: builder.compiler(1, builder.config.build),
+                compiler: compiler_to_use,
                 target,
                 backend,
             });
@@ -714,6 +713,7 @@ impl Step for CodegenBackend {
         let _folder = builder.fold_output(|| format!("stage{}-rustc_codegen_llvm", compiler.stage));
         let files = run_cargo(builder,
                               cargo.arg("--features").arg(features),
+                              vec![],
                               &tmp_stamp,
                               false);
         if builder.config.dry_run {
@@ -1084,6 +1084,7 @@ pub fn add_to_sysroot(
 
 pub fn run_cargo(builder: &Builder<'_>,
                  cargo: &mut Command,
+                 tail_args: Vec<String>,
                  stamp: &Path,
                  is_check: bool)
     -> Vec<PathBuf>
@@ -1106,7 +1107,7 @@ pub fn run_cargo(builder: &Builder<'_>,
     // files we need to probe for later.
     let mut deps = Vec::new();
     let mut toplevel = Vec::new();
-    let ok = stream_cargo(builder, cargo, &mut |msg| {
+    let ok = stream_cargo(builder, cargo, tail_args, &mut |msg| {
         let (filenames, crate_types) = match msg {
             CargoMessage::CompilerArtifact {
                 filenames,
@@ -1115,6 +1116,10 @@ pub fn run_cargo(builder: &Builder<'_>,
                 },
                 ..
             } => (filenames, crate_types),
+            CargoMessage::CompilerMessage { message } => {
+                eprintln!("{}", message.rendered);
+                return;
+            }
             _ => return,
         };
         for filename in filenames {
@@ -1242,6 +1247,7 @@ pub fn run_cargo(builder: &Builder<'_>,
 pub fn stream_cargo(
     builder: &Builder<'_>,
     cargo: &mut Command,
+    tail_args: Vec<String>,
     cb: &mut dyn FnMut(CargoMessage<'_>),
 ) -> bool {
     if builder.config.dry_run {
@@ -1251,6 +1257,10 @@ pub fn stream_cargo(
     // stderr as piped so we can get those pretty colors.
     cargo.arg("--message-format").arg("json")
          .stdout(Stdio::piped());
+
+    for arg in tail_args {
+        cargo.arg(arg);
+    }
 
     builder.verbose(&format!("running: {:?}", cargo));
     let mut child = match cargo.spawn() {
@@ -1298,5 +1308,13 @@ pub enum CargoMessage<'a> {
     },
     BuildScriptExecuted {
         package_id: Cow<'a, str>,
+    },
+    CompilerMessage {
+        message: ClippyMessage<'a>
     }
+}
+
+#[derive(Deserialize)]
+pub struct ClippyMessage<'a> {
+    rendered: Cow<'a, str>,
 }

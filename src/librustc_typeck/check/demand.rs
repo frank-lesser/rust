@@ -8,7 +8,7 @@ use syntax_pos::Span;
 use rustc::hir;
 use rustc::hir::Node;
 use rustc::hir::{print, lowering::is_range_literal};
-use rustc::ty::{self, Ty, AssociatedItem};
+use rustc::ty::{self, Ty, AssocItem};
 use rustc::ty::adjustment::AllowTwoPhase;
 use errors::{Applicability, DiagnosticBuilder};
 
@@ -179,7 +179,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
     }
 
     pub fn get_conversion_methods(&self, span: Span, expected: Ty<'tcx>, checked_ty: Ty<'tcx>)
-                              -> Vec<AssociatedItem> {
+                              -> Vec<AssocItem> {
         let mut methods = self.probe_for_return_type(span,
                                                      probe::Mode::MethodCall,
                                                      expected,
@@ -205,9 +205,9 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
     }
 
     // This function checks if the method isn't static and takes other arguments than `self`.
-    fn has_no_input_arg(&self, method: &AssociatedItem) -> bool {
+    fn has_no_input_arg(&self, method: &AssocItem) -> bool {
         match method.kind {
-            ty::AssociatedKind::Method => {
+            ty::AssocKind::Method => {
                 self.tcx.fn_sig(method.def_id).inputs().skip_binder().len() == 1
             }
             _ => false,
@@ -270,7 +270,11 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         None
     }
 
-    fn is_hir_id_from_struct_pattern_shorthand_field(&self, hir_id: hir::HirId, sp: Span) -> bool {
+    crate fn is_hir_id_from_struct_pattern_shorthand_field(
+        &self,
+        hir_id: hir::HirId,
+        sp: Span,
+    ) -> bool {
         let cm = self.sess().source_map();
         let parent_id = self.tcx.hir().get_parent_node_by_hir_id(hir_id);
         if let Some(parent) = self.tcx.hir().find_by_hir_id(parent_id) {
@@ -306,11 +310,12 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
     /// In addition of this check, it also checks between references mutability state. If the
     /// expected is mutable but the provided isn't, maybe we could just say "Hey, try with
     /// `&mut`!".
-    pub fn check_ref(&self,
-                 expr: &hir::Expr,
-                 checked_ty: Ty<'tcx>,
-                 expected: Ty<'tcx>)
-                 -> Option<(Span, &'static str, String)> {
+    pub fn check_ref(
+        &self,
+        expr: &hir::Expr,
+        checked_ty: Ty<'tcx>,
+        expected: Ty<'tcx>,
+    ) -> Option<(Span, &'static str, String)> {
         let cm = self.sess().source_map();
         let sp = expr.span;
         if !cm.span_to_filename(sp).is_real() {
@@ -326,7 +331,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
         // Check the `expn_info()` to see if this is a macro; if so, it's hard to
         // extract the text and make a good suggestion, so don't bother.
-        let is_macro = sp.ctxt().outer().expn_info().is_some();
+        let is_macro = sp.ctxt().outer_expn_info().is_some();
 
         match (&expr.node, &expected.sty, &checked_ty.sty) {
             (_, &ty::Ref(_, exp, _), &ty::Ref(_, check, _)) => match (&exp.sty, &check.sty) {
@@ -397,6 +402,29 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         } else {
                             String::new()
                         };
+                        if let Some(hir::Node::Expr(hir::Expr {
+                            node: hir::ExprKind::Assign(left_expr, _),
+                            ..
+                        })) = self.tcx.hir().find_by_hir_id(
+                            self.tcx.hir().get_parent_node_by_hir_id(expr.hir_id),
+                        ) {
+                            if mutability == hir::Mutability::MutMutable {
+                                // Found the following case:
+                                // fn foo(opt: &mut Option<String>){ opt = None }
+                                //                                   ---   ^^^^
+                                //                                   |     |
+                                //    consider dereferencing here: `*opt`  |
+                                // expected mutable reference, found enum `Option`
+                                if let Ok(src) = cm.span_to_snippet(left_expr.span) {
+                                    return Some((
+                                        left_expr.span,
+                                        "consider dereferencing here to assign to the mutable \
+                                         borrowed piece of memory",
+                                        format!("*{}", src),
+                                    ));
+                                }
+                            }
+                        }
                         return Some(match mutability {
                             hir::Mutability::MutMutable => (
                                 sp,

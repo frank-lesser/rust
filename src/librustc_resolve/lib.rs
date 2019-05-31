@@ -589,7 +589,7 @@ impl<'a> PathSource<'a> {
                 | Res::Def(DefKind::Trait, _)
                 | Res::Def(DefKind::TraitAlias, _)
                 | Res::Def(DefKind::TyAlias, _)
-                | Res::Def(DefKind::AssociatedTy, _)
+                | Res::Def(DefKind::AssocTy, _)
                 | Res::PrimTy(..)
                 | Res::Def(DefKind::TyParam, _)
                 | Res::SelfTy(..)
@@ -615,14 +615,14 @@ impl<'a> PathSource<'a> {
                 | Res::Upvar(..)
                 | Res::Def(DefKind::Fn, _)
                 | Res::Def(DefKind::Method, _)
-                | Res::Def(DefKind::AssociatedConst, _)
+                | Res::Def(DefKind::AssocConst, _)
                 | Res::SelfCtor(..)
                 | Res::Def(DefKind::ConstParam, _) => true,
                 _ => false,
             },
             PathSource::Pat => match res {
                 Res::Def(DefKind::Ctor(_, CtorKind::Const), _) |
-                Res::Def(DefKind::Const, _) | Res::Def(DefKind::AssociatedConst, _) |
+                Res::Def(DefKind::Const, _) | Res::Def(DefKind::AssocConst, _) |
                 Res::SelfCtor(..) => true,
                 _ => false,
             },
@@ -635,14 +635,14 @@ impl<'a> PathSource<'a> {
                 | Res::Def(DefKind::Union, _)
                 | Res::Def(DefKind::Variant, _)
                 | Res::Def(DefKind::TyAlias, _)
-                | Res::Def(DefKind::AssociatedTy, _)
+                | Res::Def(DefKind::AssocTy, _)
                 | Res::SelfTy(..) => true,
                 _ => false,
             },
             PathSource::TraitItem(ns) => match res {
-                Res::Def(DefKind::AssociatedConst, _)
+                Res::Def(DefKind::AssocConst, _)
                 | Res::Def(DefKind::Method, _) if ns == ValueNS => true,
-                Res::Def(DefKind::AssociatedTy, _) if ns == TypeNS => true,
+                Res::Def(DefKind::AssocTy, _) if ns == TypeNS => true,
                 _ => false,
             },
             PathSource::Visibility => match res {
@@ -762,7 +762,7 @@ impl<'tcx> Visitor<'tcx> for UsePlacementFinder {
                 ItemKind::Use(..) => {
                     // don't suggest placing a use before the prelude
                     // import or other generated ones
-                    if item.span.ctxt().outer().expn_info().is_none() {
+                    if item.span.ctxt().outer_expn_info().is_none() {
                         self.span = Some(item.span.shrink_to_lo());
                         self.found_use = true;
                         return;
@@ -772,7 +772,7 @@ impl<'tcx> Visitor<'tcx> for UsePlacementFinder {
                 ItemKind::ExternCrate(_) => {}
                 // but place them before the first other item
                 _ => if self.span.map_or(true, |span| item.span < span ) {
-                    if item.span.ctxt().outer().expn_info().is_none() {
+                    if item.span.ctxt().outer_expn_info().is_none() {
                         // don't insert between attributes and an item
                         if item.attrs.is_empty() {
                             self.span = Some(item.span.shrink_to_lo());
@@ -860,7 +860,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Resolver<'a> {
             FnKind::ItemFn(_, ref header, ..) =>
                 (FnItemRibKind, &header.asyncness.node),
             FnKind::Method(_, ref sig, _, _) =>
-                (TraitOrImplItemRibKind, &sig.header.asyncness.node),
+                (AssocItemRibKind, &sig.header.asyncness.node),
             FnKind::Closure(_) =>
                 // Async closures aren't resolved through `visit_fn`-- they're
                 // processed separately
@@ -1033,7 +1033,7 @@ enum RibKind<'a> {
     /// methods or associated types. Allow references to ty params that impl or trait
     /// binds. Disallow any other upvars (including other ty params that are
     /// upvars).
-    TraitOrImplItemRibKind,
+    AssocItemRibKind,
 
     /// We passed through a function definition. Disallow upvars.
     /// Permit only those const parameters that are specified in the function's generics.
@@ -1511,9 +1511,9 @@ impl<'a> NameBinding<'a> {
 
     fn is_importable(&self) -> bool {
         match self.res() {
-            Res::Def(DefKind::AssociatedConst, _)
+            Res::Def(DefKind::AssocConst, _)
             | Res::Def(DefKind::Method, _)
-            | Res::Def(DefKind::AssociatedTy, _) => false,
+            | Res::Def(DefKind::AssocTy, _) => false,
             _ => true,
         }
     }
@@ -2308,7 +2308,7 @@ impl<'a> Resolver<'a> {
 
     fn hygienic_lexical_parent(&mut self, module: Module<'a>, span: &mut Span)
                                -> Option<Module<'a>> {
-        if !module.expansion.is_descendant_of(span.ctxt().outer()) {
+        if !module.expansion.outer_is_descendant_of(span.ctxt()) {
             return Some(self.macro_def_scope(span.remove_mark()));
         }
 
@@ -2344,7 +2344,7 @@ impl<'a> Resolver<'a> {
             module.expansion.is_descendant_of(parent.expansion) {
                 // The macro is a proc macro derive
                 if module.expansion.looks_like_proc_macro_derive() {
-                    if parent.expansion.is_descendant_of(span.ctxt().outer()) {
+                    if parent.expansion.outer_is_descendant_of(span.ctxt()) {
                         *poisoned = Some(node_id);
                         return module.parent;
                     }
@@ -2612,7 +2612,7 @@ impl<'a> Resolver<'a> {
 
                         for trait_item in trait_items {
                             let generic_params = HasGenericParams(&trait_item.generics,
-                                                                    TraitOrImplItemRibKind);
+                                                                    AssocItemRibKind);
                             this.with_generic_param_rib(generic_params, |this| {
                                 match trait_item.node {
                                     TraitItemKind::Const(ref ty, ref default) => {
@@ -2899,7 +2899,7 @@ impl<'a> Resolver<'a> {
 
                                     // We also need a new scope for the impl item type parameters.
                                     let generic_params = HasGenericParams(&impl_item.generics,
-                                                                          TraitOrImplItemRibKind);
+                                                                          AssocItemRibKind);
                                     this.with_generic_param_rib(generic_params, |this| {
                                         use self::ResolutionError::*;
                                         match impl_item.node {
@@ -4074,7 +4074,7 @@ impl<'a> Resolver<'a> {
                                 seen.insert(node_id, depth);
                             }
                         }
-                        ItemRibKind | FnItemRibKind | TraitOrImplItemRibKind => {
+                        ItemRibKind | FnItemRibKind | AssocItemRibKind => {
                             // This was an attempt to access an upvar inside a
                             // named function item. This is not allowed, so we
                             // report an error.
@@ -4103,7 +4103,7 @@ impl<'a> Resolver<'a> {
             Res::Def(DefKind::TyParam, _) | Res::SelfTy(..) => {
                 for rib in ribs {
                     match rib.kind {
-                        NormalRibKind | TraitOrImplItemRibKind | ClosureRibKind(..) |
+                        NormalRibKind | AssocItemRibKind | ClosureRibKind(..) |
                         ModuleRibKind(..) | MacroDefinition(..) | ForwardTyParamBanRibKind |
                         ConstantItemRibKind | TyParamAsConstParamTy => {
                             // Nothing to do. Continue.

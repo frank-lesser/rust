@@ -462,6 +462,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             type Region = !;
             type Type = !;
             type DynExistential = !;
+            type Const = !;
 
             fn tcx<'a>(&'a self) -> TyCtxt<'a, 'gcx, 'tcx> {
                 self.tcx
@@ -485,6 +486,13 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 self,
                 _predicates: &'tcx ty::List<ty::ExistentialPredicate<'tcx>>,
             ) -> Result<Self::DynExistential, Self::Error> {
+                Err(NonTrivialPath)
+            }
+
+            fn print_const(
+                self,
+                _ct: &'tcx ty::Const<'tcx>,
+            ) -> Result<Self::Const, Self::Error> {
                 Err(NonTrivialPath)
             }
 
@@ -644,7 +652,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                         for sp in prior_arms {
                             err.span_label(*sp, format!(
                                 "this is found to be of type `{}`",
-                                self.resolve_type_vars_if_possible(&last_ty),
+                                self.resolve_vars_if_possible(&last_ty),
                             ));
                         }
                     } else if let Some(sp) = prior_arms.last() {
@@ -1270,7 +1278,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         &self,
         exp_found: &ty::error::ExpectedFound<Ty<'tcx>>,
     ) -> Option<(DiagnosticStyledString, DiagnosticStyledString)> {
-        let exp_found = self.resolve_type_vars_if_possible(exp_found);
+        let exp_found = self.resolve_vars_if_possible(exp_found);
         if exp_found.references_error() {
             return None;
         }
@@ -1283,7 +1291,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         &self,
         exp_found: &ty::error::ExpectedFound<T>,
     ) -> Option<(DiagnosticStyledString, DiagnosticStyledString)> {
-        let exp_found = self.resolve_type_vars_if_possible(exp_found);
+        let exp_found = self.resolve_vars_if_possible(exp_found);
         if exp_found.references_error() {
             return None;
         }

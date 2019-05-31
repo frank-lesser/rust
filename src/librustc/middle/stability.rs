@@ -437,7 +437,7 @@ impl<'a, 'tcx> Index<'tcx> {
                         reason: Some(Symbol::intern(reason)),
                         issue: 27812,
                     },
-                    feature: Symbol::intern("rustc_private"),
+                    feature: sym::rustc_private,
                     rustc_depr: None,
                     const_stability: None,
                     promotable: false,
@@ -527,8 +527,8 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         // Check if `def_id` is a trait method.
         match self.def_kind(def_id) {
             Some(DefKind::Method) |
-            Some(DefKind::AssociatedTy) |
-            Some(DefKind::AssociatedConst) => {
+            Some(DefKind::AssocTy) |
+            Some(DefKind::AssocConst) => {
                 if let ty::TraitContainer(trait_def_id) = self.associated_item(def_id).container {
                     // Trait methods do not declare visibility (even
                     // for visibility info in cstore). Use containing
@@ -880,10 +880,10 @@ pub fn check_unused_or_stable_features<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
     // FIXME: only remove `libc` when `stdbuild` is active.
     // FIXME: remove special casing for `test`.
     remaining_lib_features.remove(&Symbol::intern("libc"));
-    remaining_lib_features.remove(&Symbol::intern("test"));
+    remaining_lib_features.remove(&sym::test);
 
     let check_features =
-        |remaining_lib_features: &mut FxHashMap<_, _>, defined_features: &Vec<_>| {
+        |remaining_lib_features: &mut FxHashMap<_, _>, defined_features: &[_]| {
             for &(feature, since) in defined_features {
                 if let Some(since) = since {
                     if let Some(span) = remaining_lib_features.get(&feature) {
@@ -908,7 +908,7 @@ pub fn check_unused_or_stable_features<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
             if remaining_lib_features.is_empty() {
                 break;
             }
-            check_features(&mut remaining_lib_features, &tcx.defined_lib_features(cnum));
+            check_features(&mut remaining_lib_features, tcx.defined_lib_features(cnum));
         }
     }
 

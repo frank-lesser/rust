@@ -425,6 +425,13 @@ impl GenericArg {
             GenericArg::Const(c) => c.value.hir_id,
         }
     }
+
+    pub fn is_const(&self) -> bool {
+        match self {
+            GenericArg::Const(_) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, RustcEncodable, RustcDecodable, Debug, HashStable)]
@@ -2422,7 +2429,7 @@ pub struct TraitItemRef {
     pub id: TraitItemId,
     #[stable_hasher(project(name))]
     pub ident: Ident,
-    pub kind: AssociatedItemKind,
+    pub kind: AssocItemKind,
     pub span: Span,
     pub defaultness: Defaultness,
 }
@@ -2438,14 +2445,14 @@ pub struct ImplItemRef {
     pub id: ImplItemId,
     #[stable_hasher(project(name))]
     pub ident: Ident,
-    pub kind: AssociatedItemKind,
+    pub kind: AssocItemKind,
     pub span: Span,
     pub vis: Visibility,
     pub defaultness: Defaultness,
 }
 
 #[derive(Copy, Clone, PartialEq, RustcEncodable, RustcDecodable, Debug, HashStable)]
-pub enum AssociatedItemKind {
+pub enum AssocItemKind {
     Const,
     Method { has_self: bool },
     Type,

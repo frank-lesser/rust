@@ -17,7 +17,6 @@ use rustc::ty::{GenericParamDef, GenericParamDefKind};
 use rustc::ty::subst::{Kind, Subst, InternalSubsts, SubstsRef};
 use rustc::ty::wf::object_region_bounds;
 use rustc::mir::interpret::ConstValue;
-use rustc_data_structures::sync::Lrc;
 use rustc_target::spec::abi;
 use crate::require_c_abi_if_c_variadic;
 use smallvec::SmallVec;
@@ -46,7 +45,7 @@ pub trait AstConv<'gcx, 'tcx> {
     /// Returns the set of bounds in scope for the type parameter with
     /// the given id.
     fn get_type_parameter_bounds(&self, span: Span, def_id: DefId)
-                                 -> Lrc<ty::GenericPredicates<'tcx>>;
+                                 -> &'tcx ty::GenericPredicates<'tcx>;
 
     /// What lifetime should we use when a lifetime is omitted (and not elided)?
     fn re_infer(&self, span: Span, _def: Option<&ty::GenericParamDef>)
@@ -824,7 +823,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx> + 'o {
                                            -> bool
     {
         self.tcx().associated_items(trait_def_id).any(|item| {
-            item.kind == ty::AssociatedKind::Type &&
+            item.kind == ty::AssocKind::Type &&
             self.tcx().hygienic_eq(assoc_name, item.ident, trait_def_id)
         })
     }
@@ -904,9 +903,9 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx> + 'o {
         }?;
 
         let (assoc_ident, def_scope) =
-            tcx.adjust_ident(binding.item_name, candidate.def_id(), hir_ref_id);
+            tcx.adjust_ident_and_get_scope(binding.item_name, candidate.def_id(), hir_ref_id);
         let assoc_ty = tcx.associated_items(candidate.def_id()).find(|i| {
-            i.kind == ty::AssociatedKind::Type && i.ident.modern() == assoc_ident
+            i.kind == ty::AssocKind::Type && i.ident.modern() == assoc_ident
         }).expect("missing associated type");
 
         if !assoc_ty.vis.is_accessible_from(def_scope, tcx) {
@@ -1046,7 +1045,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx> + 'o {
                 ty::Predicate::Trait(pred) => {
                     associated_types
                         .extend(tcx.associated_items(pred.def_id())
-                        .filter(|item| item.kind == ty::AssociatedKind::Type)
+                        .filter(|item| item.kind == ty::AssocKind::Type)
                         .map(|item| item.def_id));
                 }
                 ty::Predicate::Projection(pred) => {
@@ -1301,7 +1300,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx> + 'o {
 
             for bound in bounds {
                 let bound_span = self.tcx().associated_items(bound.def_id()).find(|item| {
-                    item.kind == ty::AssociatedKind::Type &&
+                    item.kind == ty::AssocKind::Type &&
                         self.tcx().hygienic_eq(assoc_name, item.ident, bound.def_id())
                 })
                 .and_then(|item| self.tcx().hir().span_if_local(item.def_id));
@@ -1434,7 +1433,8 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx> + 'o {
         };
 
         let trait_did = bound.def_id();
-        let (assoc_ident, def_scope) = tcx.adjust_ident(assoc_ident, trait_did, hir_ref_id);
+        let (assoc_ident, def_scope) =
+            tcx.adjust_ident_and_get_scope(assoc_ident, trait_did, hir_ref_id);
         let item = tcx.associated_items(trait_did).find(|i| {
             Namespace::from(i.kind) == Namespace::Type &&
                 i.ident.modern() == assoc_ident
@@ -1443,7 +1443,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx> + 'o {
         let ty = self.projected_ty_from_poly_trait_ref(span, item.def_id, bound);
         let ty = self.normalize_ty(span, ty);
 
-        let kind = DefKind::AssociatedTy;
+        let kind = DefKind::AssocTy;
         if !item.vis.is_accessible_from(def_scope, tcx) {
             let msg = format!("{} `{}` is private", kind.descr(), assoc_ident);
             tcx.sess.span_err(span, &msg);
@@ -1686,7 +1686,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx> + 'o {
 
             // Case 4. Reference to a method or associated const.
             DefKind::Method
-            | DefKind::AssociatedConst => {
+            | DefKind::AssocConst => {
                 if segments.len() >= 2 {
                     let generics = tcx.generics_of(def_id);
                     path_segs.push(PathSeg(generics.parent.unwrap(), last - 1));
@@ -1780,7 +1780,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx> + 'o {
                 self.prohibit_generics(&path.segments);
                 tcx.mk_self_type()
             }
-            Res::Def(DefKind::AssociatedTy, def_id) => {
+            Res::Def(DefKind::AssocTy, def_id) => {
                 debug_assert!(path.segments.len() >= 2);
                 self.prohibit_generics(&path.segments[..path.segments.len() - 2]);
                 self.qpath_to_ty(span,
