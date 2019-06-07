@@ -62,6 +62,8 @@ const WHITELIST_CRATES: &[CrateVersion<'_>] = &[
 const WHITELIST: &[Crate<'_>] = &[
     Crate("adler32"),
     Crate("aho-corasick"),
+    Crate("annotate-snippets"),
+    Crate("ansi_term"),
     Crate("arrayvec"),
     Crate("atty"),
     Crate("autocfg"),
@@ -92,6 +94,7 @@ const WHITELIST: &[Crate<'_>] = &[
     Crate("fuchsia-zircon-sys"),
     Crate("getopts"),
     Crate("humantime"),
+    Crate("indexmap"),
     Crate("itertools"),
     Crate("jobserver"),
     Crate("kernel32-sys"),

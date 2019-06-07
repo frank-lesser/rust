@@ -8,7 +8,7 @@ pub use self::BorrowKind::*;
 pub use self::IntVarValue::*;
 pub use self::fold::TypeFoldable;
 
-use crate::hir::{map as hir_map, UpvarMap, GlobMap, TraitMap};
+use crate::hir::{map as hir_map, GlobMap, TraitMap};
 use crate::hir::Node;
 use crate::hir::def::{Res, DefKind, CtorOf, CtorKind, ExportMap};
 use crate::hir::def_id::{CrateNum, DefId, LocalDefId, CRATE_DEF_INDEX, LOCAL_CRATE};
@@ -51,6 +51,7 @@ use syntax::symbol::{kw, sym, Symbol, LocalInternedString, InternedString};
 use syntax_pos::Span;
 
 use smallvec;
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 use rustc_data_structures::stable_hasher::{StableHasher, StableHasherResult,
                                            HashStable};
@@ -75,7 +76,7 @@ pub use self::sty::TyKind::*;
 pub use self::binding::BindingMode;
 pub use self::binding::BindingMode::*;
 
-pub use self::context::{TyCtxt, FreeRegionInfo, GlobalArenas, AllArenas, tls, keep_local};
+pub use self::context::{TyCtxt, FreeRegionInfo, AllArenas, tls, keep_local};
 pub use self::context::{Lift, TypeckTables, CtxtInterners, GlobalCtxt};
 pub use self::context::{
     UserTypeAnnotationIndex, UserType, CanonicalUserType,
@@ -122,7 +123,6 @@ mod sty;
 
 #[derive(Clone)]
 pub struct Resolutions {
-    pub upvars: UpvarMap,
     pub trait_map: TraitMap,
     pub maybe_unused_trait_imports: NodeSet,
     pub maybe_unused_extern_crates: Vec<(NodeId, Span)>,
@@ -808,7 +808,7 @@ pub struct UpvarBorrow<'tcx> {
     pub region: ty::Region<'tcx>,
 }
 
-pub type UpvarListMap = FxHashMap<DefId, Vec<UpvarId>>;
+pub type UpvarListMap = FxHashMap<DefId, FxIndexMap<hir::HirId, UpvarId>>;
 pub type UpvarCaptureMap<'tcx> = FxHashMap<UpvarId, UpvarCapture<'tcx>>;
 
 #[derive(Copy, Clone)]
@@ -1090,7 +1090,7 @@ pub enum Predicate<'tcx> {
     /// See the `ProjectionPredicate` struct for details.
     Projection(PolyProjectionPredicate<'tcx>),
 
-    /// no syntax: `T` well-formed
+    /// No syntax: `T` well-formed.
     WellFormed(Ty<'tcx>),
 
     /// Trait must be object-safe.
@@ -1245,19 +1245,17 @@ impl<'tcx> TraitPredicate<'tcx> {
 
 impl<'tcx> PolyTraitPredicate<'tcx> {
     pub fn def_id(&self) -> DefId {
-        // ok to skip binder since trait def-id does not care about regions
+        // Ok to skip binder since trait def-ID does not care about regions.
         self.skip_binder().def_id()
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
          Hash, Debug, RustcEncodable, RustcDecodable, HashStable)]
-pub struct OutlivesPredicate<A,B>(pub A, pub B); // `A: B`
-pub type PolyOutlivesPredicate<A,B> = ty::Binder<OutlivesPredicate<A,B>>;
-pub type RegionOutlivesPredicate<'tcx> = OutlivesPredicate<ty::Region<'tcx>,
-                                                           ty::Region<'tcx>>;
-pub type TypeOutlivesPredicate<'tcx> = OutlivesPredicate<Ty<'tcx>,
-                                                         ty::Region<'tcx>>;
+pub struct OutlivesPredicate<A, B>(pub A, pub B); // `A: B`
+pub type PolyOutlivesPredicate<A, B> = ty::Binder<OutlivesPredicate<A, B>>;
+pub type RegionOutlivesPredicate<'tcx> = OutlivesPredicate<ty::Region<'tcx>, ty::Region<'tcx>>;
+pub type TypeOutlivesPredicate<'tcx> = OutlivesPredicate<Ty<'tcx>, ty::Region<'tcx>>;
 pub type PolyRegionOutlivesPredicate<'tcx> = ty::Binder<RegionOutlivesPredicate<'tcx>>;
 pub type PolyTypeOutlivesPredicate<'tcx> = ty::Binder<TypeOutlivesPredicate<'tcx>>;
 
@@ -1314,7 +1312,7 @@ impl<'tcx> PolyProjectionPredicate<'tcx> {
     /// Note that this is not the `DefId` of the `TraitRef` containing this
     /// associated type, which is in `tcx.associated_item(projection_def_id()).container`.
     pub fn projection_def_id(&self) -> DefId {
-        // okay to skip binder since trait def-id does not care about regions
+        // Ok to skip binder since trait def-ID does not care about regions.
         self.skip_binder().projection_ty.item_def_id
     }
 }
@@ -1371,7 +1369,7 @@ impl<'tcx> ToPredicate<'tcx> for PolyProjectionPredicate<'tcx> {
     }
 }
 
-// A custom iterator used by Predicate::walk_tys.
+// A custom iterator used by `Predicate::walk_tys`.
 enum WalkTysIter<'tcx, I, J, K>
     where I: Iterator<Item = Ty<'tcx>>,
           J: Iterator<Item = Ty<'tcx>>,
@@ -1505,7 +1503,7 @@ impl<'tcx> Predicate<'tcx> {
 ///
 /// Example:
 ///
-///     struct Foo<T,U:Bar<T>> { ... }
+///     struct Foo<T, U: Bar<T>> { ... }
 ///
 /// Here, the `GenericPredicates` for `Foo` would contain a list of bounds like
 /// `[[], [U:Bar<T>]]`. Now if there were some particular reference
@@ -2785,10 +2783,10 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 e.span
             }
             Some(f) => {
-                bug!("Node id {} is not an expr: {:?}", id, f);
+                bug!("node-ID {} is not an expr: {:?}", id, f);
             }
             None => {
-                bug!("Node id {} is not present in the node map", id);
+                bug!("node-ID {} is not present in the node map", id);
             }
         }
     }
@@ -3089,7 +3087,8 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         // comparison fails frequently, and we want to avoid the expensive
         // `modern()` calls required for the span comparison whenever possible.
         use_name.name == def_name.name &&
-        self.adjust_ident(use_name, def_parent_def_id).span.ctxt() == def_name.modern().span.ctxt()
+        use_name.span.ctxt().hygienic_eq(def_name.span.ctxt(),
+                                         self.expansion_that_defined(def_parent_def_id))
     }
 
     fn expansion_that_defined(self, scope: DefId) -> Mark {
@@ -3100,15 +3099,13 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     }
 
     pub fn adjust_ident(self, mut ident: Ident, scope: DefId) -> Ident {
-        ident = ident.modern();
-        ident.span.adjust(self.expansion_that_defined(scope));
+        ident.span.modernize_and_adjust(self.expansion_that_defined(scope));
         ident
     }
 
     pub fn adjust_ident_and_get_scope(self, mut ident: Ident, scope: DefId, block: hir::HirId)
                                       -> (Ident, DefId) {
-        ident = ident.modern();
-        let scope = match ident.span.adjust(self.expansion_that_defined(scope)) {
+        let scope = match ident.span.modernize_and_adjust(self.expansion_that_defined(scope)) {
             Some(actual_expansion) =>
                 self.hir().definitions().parent_module_of_macro_def(actual_expansion),
             None => self.hir().get_module_parent_by_hir_id(block),

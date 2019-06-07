@@ -163,8 +163,8 @@ pub trait MutVisitor: Sized {
         noop_visit_lifetime(l, self);
     }
 
-    fn visit_ty_binding(&mut self, t: &mut TypeBinding) {
-        noop_visit_ty_binding(t, self);
+    fn visit_ty_constraint(&mut self, t: &mut AssocTyConstraint) {
+        noop_visit_ty_constraint(t, self);
     }
 
     fn visit_mod(&mut self, m: &mut Mod) {
@@ -207,10 +207,6 @@ pub trait MutVisitor: Sized {
         noop_visit_local(l, self);
     }
 
-    fn visit_local_source(&mut self, l: &mut LocalSource) {
-        noop_visit_local_source(l, self);
-    }
-
     fn visit_mac(&mut self, _mac: &mut Mac) {
         panic!("visit_mac disabled by default");
         // N.B., see note about macros above. If you really want a visitor that
@@ -232,10 +228,6 @@ pub trait MutVisitor: Sized {
 
     fn visit_arg(&mut self, a: &mut Arg) {
         noop_visit_arg(a, self);
-    }
-
-    fn visit_arg_source(&mut self, a: &mut ArgSource) {
-        noop_visit_arg_source(a, self);
     }
 
     fn visit_generics(&mut self, generics: &mut Generics) {
@@ -408,11 +400,20 @@ pub fn noop_visit_guard<T: MutVisitor>(g: &mut Guard, vis: &mut T) {
     }
 }
 
-pub fn noop_visit_ty_binding<T: MutVisitor>(TypeBinding { id, ident, ty, span }: &mut TypeBinding,
-                                            vis: &mut T) {
+pub fn noop_visit_ty_constraint<T: MutVisitor>(
+    AssocTyConstraint { id, ident, kind, span }: &mut AssocTyConstraint,
+    vis: &mut T
+) {
     vis.visit_id(id);
     vis.visit_ident(ident);
-    vis.visit_ty(ty);
+    match kind {
+        AssocTyConstraintKind::Equality { ref mut ty } => {
+            vis.visit_ty(ty);
+        }
+        AssocTyConstraintKind::Bound { ref mut bounds } => {
+            visit_bounds(bounds, vis);
+        }
+    }
     vis.visit_span(span);
 }
 
@@ -507,9 +508,9 @@ pub fn noop_visit_generic_arg<T: MutVisitor>(arg: &mut GenericArg, vis: &mut T) 
 
 pub fn noop_visit_angle_bracketed_parameter_data<T: MutVisitor>(data: &mut AngleBracketedArgs,
                                                                 vis: &mut T) {
-    let AngleBracketedArgs { args, bindings, span } = data;
+    let AngleBracketedArgs { args, constraints, span } = data;
     visit_vec(args, |arg| vis.visit_generic_arg(arg));
-    visit_vec(bindings, |binding| vis.visit_ty_binding(binding));
+    visit_vec(constraints, |constraint| vis.visit_ty_constraint(constraint));
     vis.visit_span(span);
 }
 
@@ -522,17 +523,13 @@ pub fn noop_visit_parenthesized_parameter_data<T: MutVisitor>(args: &mut Parenth
 }
 
 pub fn noop_visit_local<T: MutVisitor>(local: &mut P<Local>, vis: &mut T) {
-    let Local { id, pat, ty, init, span, attrs, source } = local.deref_mut();
+    let Local { id, pat, ty, init, span, attrs } = local.deref_mut();
     vis.visit_id(id);
     vis.visit_pat(pat);
     visit_opt(ty, |ty| vis.visit_ty(ty));
     visit_opt(init, |init| vis.visit_expr(init));
     vis.visit_span(span);
     visit_thin_attrs(attrs, vis);
-    vis.visit_local_source(source);
-}
-
-pub fn noop_visit_local_source<T: MutVisitor>(_local_source: &mut LocalSource, _vis: &mut T) {
 }
 
 pub fn noop_visit_attribute<T: MutVisitor>(attr: &mut Attribute, vis: &mut T) {
@@ -571,25 +568,16 @@ pub fn noop_visit_meta_item<T: MutVisitor>(mi: &mut MetaItem, vis: &mut T) {
     vis.visit_span(span);
 }
 
-pub fn noop_visit_arg<T: MutVisitor>(Arg { id, pat, ty, source }: &mut Arg, vis: &mut T) {
+pub fn noop_visit_arg<T: MutVisitor>(Arg { id, pat, ty }: &mut Arg, vis: &mut T) {
     vis.visit_id(id);
     vis.visit_pat(pat);
     vis.visit_ty(ty);
-    vis.visit_arg_source(source);
-}
-
-pub fn noop_visit_arg_source<T: MutVisitor>(source: &mut ArgSource, vis: &mut T) {
-    match source {
-        ArgSource::Normal => {},
-        ArgSource::AsyncFn(pat) => vis.visit_pat(pat),
-    }
 }
 
 pub fn noop_visit_tt<T: MutVisitor>(tt: &mut TokenTree, vis: &mut T) {
     match tt {
-        TokenTree::Token(span, tok) => {
-            vis.visit_span(span);
-            vis.visit_token(tok);
+        TokenTree::Token(token) => {
+            vis.visit_token(token);
         }
         TokenTree::Delimited(DelimSpan { open, close }, _delim, tts) => {
             vis.visit_span(open);
@@ -606,17 +594,26 @@ pub fn noop_visit_tts<T: MutVisitor>(TokenStream(tts): &mut TokenStream, vis: &m
     })
 }
 
-// apply ident visitor if it's an ident, apply other visits to interpolated nodes
+// Apply ident visitor if it's an ident, apply other visits to interpolated nodes.
+// In practice the ident part is not actually used by specific visitors right now,
+// but there's a test below checking that it works.
 pub fn noop_visit_token<T: MutVisitor>(t: &mut Token, vis: &mut T) {
-    match t {
-        token::Ident(id, _is_raw) => vis.visit_ident(id),
-        token::Lifetime(id) => vis.visit_ident(id),
+    let Token { kind, span } = t;
+    match kind {
+        token::Ident(name, _) | token::Lifetime(name) => {
+            let mut ident = Ident::new(*name, *span);
+            vis.visit_ident(&mut ident);
+            *name = ident.name;
+            *span = ident.span;
+            return; // avoid visiting the span for the second time
+        }
         token::Interpolated(nt) => {
             let mut nt = Lrc::make_mut(nt);
             vis.visit_interpolated(&mut nt);
         }
         _ => {}
     }
+    vis.visit_span(span);
 }
 
 /// Apply visitor to elements of interpolated nodes.
@@ -690,25 +687,9 @@ pub fn noop_visit_interpolated<T: MutVisitor>(nt: &mut token::Nonterminal, vis: 
 
 pub fn noop_visit_asyncness<T: MutVisitor>(asyncness: &mut IsAsync, vis: &mut T) {
     match asyncness {
-        IsAsync::Async { closure_id, return_impl_trait_id, ref mut arguments } => {
+        IsAsync::Async { closure_id, return_impl_trait_id } => {
             vis.visit_id(closure_id);
             vis.visit_id(return_impl_trait_id);
-            for AsyncArgument { ident, arg, pat_stmt, move_stmt } in arguments.iter_mut() {
-                vis.visit_ident(ident);
-                if let Some(arg) = arg {
-                    vis.visit_arg(arg);
-                }
-                visit_clobber(move_stmt, |stmt| {
-                    vis.flat_map_stmt(stmt)
-                        .expect_one("expected visitor to produce exactly one item")
-                });
-                visit_opt(pat_stmt, |stmt| {
-                    visit_clobber(stmt, |stmt| {
-                        vis.flat_map_stmt(stmt)
-                            .expect_one("expected visitor to produce exactly one item")
-                    })
-                });
-            }
         }
         IsAsync::NotAsync => {}
     }

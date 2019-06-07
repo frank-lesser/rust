@@ -21,11 +21,10 @@ use crate::ty::error::{ExpectedFound, TypeError, UnconstrainedNumeric};
 use crate::ty::fold::{TypeFolder, TypeFoldable};
 use crate::ty::relate::RelateResult;
 use crate::ty::subst::{Kind, InternalSubsts, SubstsRef};
-use crate::ty::{self, GenericParamDefKind, Ty, TyCtxt, CtxtInterners, InferConst};
+use crate::ty::{self, GenericParamDefKind, Ty, TyCtxt, InferConst};
 use crate::ty::{FloatVid, IntVid, TyVid, ConstVid};
 use crate::util::nodemap::FxHashMap;
 
-use arena::SyncDroplessArena;
 use errors::DiagnosticBuilder;
 use rustc_data_structures::unify as ut;
 use std::cell::{Cell, Ref, RefCell, RefMut};
@@ -40,8 +39,8 @@ use self::lexical_region_resolve::LexicalRegionResolutions;
 use self::outlives::env::OutlivesEnvironment;
 use self::region_constraints::{GenericKind, RegionConstraintData, VarInfos, VerifyBound};
 use self::region_constraints::{RegionConstraintCollector, RegionSnapshot};
-use self::type_variable::TypeVariableOrigin;
-use self::unify_key::{ToType, ConstVariableOrigin};
+use self::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
+use self::unify_key::{ToType, ConstVariableOrigin, ConstVariableOriginKind};
 
 pub mod at;
 pub mod canonical;
@@ -468,8 +467,6 @@ impl<'tcx> fmt::Display for FixupError<'tcx> {
 /// `F: for<'b, 'tcx> where 'gcx: 'tcx FnOnce(InferCtxt<'b, 'gcx, 'tcx>)`.
 pub struct InferCtxtBuilder<'a, 'gcx: 'a + 'tcx, 'tcx: 'a> {
     global_tcx: TyCtxt<'a, 'gcx, 'gcx>,
-    arena: SyncDroplessArena,
-    interners: Option<CtxtInterners<'tcx>>,
     fresh_tables: Option<RefCell<ty::TypeckTables<'tcx>>>,
 }
 
@@ -477,8 +474,6 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'gcx> {
     pub fn infer_ctxt(self) -> InferCtxtBuilder<'a, 'gcx, 'tcx> {
         InferCtxtBuilder {
             global_tcx: self,
-            arena: SyncDroplessArena::default(),
-            interners: None,
             fresh_tables: None,
         }
     }
@@ -518,14 +513,10 @@ impl<'a, 'gcx, 'tcx> InferCtxtBuilder<'a, 'gcx, 'tcx> {
     pub fn enter<R>(&'tcx mut self, f: impl for<'b> FnOnce(InferCtxt<'b, 'gcx, 'tcx>) -> R) -> R {
         let InferCtxtBuilder {
             global_tcx,
-            ref arena,
-            ref mut interners,
             ref fresh_tables,
         } = *self;
         let in_progress_tables = fresh_tables.as_ref();
-        // Check that we haven't entered before
-        assert!(interners.is_none());
-        global_tcx.enter_local(arena, interners, |tcx| {
+        global_tcx.enter_local(|tcx| {
             f(InferCtxt {
                 tcx,
                 in_progress_tables,
@@ -923,10 +914,9 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         // variable, and because type variable's can't (at present, at
         // least) capture any of the things bound by this binder.
         //
-        // Really, there is no *particular* reason to do this
-        // `shallow_resolve` here except as a
-        // micro-optimization. Naturally I could not
-        // resist. -nmatsakis
+        // NOTE(nmatsakis): really, there is no *particular* reason to do this
+        // `shallow_resolve` here except as a micro-optimization.
+        // Naturally I could not resist.
         let two_unbound_type_vars = {
             let a = self.shallow_resolve(predicate.skip_binder().a);
             let b = self.shallow_resolve(predicate.skip_binder().b);
@@ -1119,13 +1109,19 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 let ty_var_id = self.type_variables.borrow_mut().new_var(
                     self.universe(),
                     false,
-                    TypeVariableOrigin::TypeParameterDefinition(span, param.name),
+                    TypeVariableOrigin {
+                        kind: TypeVariableOriginKind::TypeParameterDefinition(param.name),
+                        span,
+                    },
                 );
 
                 self.tcx.mk_ty_var(ty_var_id).into()
             }
             GenericParamDefKind::Const { .. } => {
-                let origin = ConstVariableOrigin::ConstParameterDefinition(span, param.name);
+                let origin = ConstVariableOrigin {
+                    kind: ConstVariableOriginKind::ConstParameterDefinition(param.name),
+                    span,
+                };
                 let const_var_id =
                     self.const_unification_table
                         .borrow_mut()
@@ -1421,8 +1417,16 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         T: TypeFoldable<'tcx>
     {
         let fld_r = |br| self.next_region_var(LateBoundRegion(span, br, lbrct));
-        let fld_t = |_| self.next_ty_var(TypeVariableOrigin::MiscVariable(span));
-        let fld_c = |_, ty| self.next_const_var(ty, ConstVariableOrigin::MiscVariable(span));
+        let fld_t = |_| {
+            self.next_ty_var(TypeVariableOrigin {
+                kind: TypeVariableOriginKind::MiscVariable,
+                span,
+            })
+        };
+        let fld_c = |_, ty| self.next_const_var(ty, ConstVariableOrigin {
+            kind: ConstVariableOriginKind:: MiscVariable,
+            span,
+        });
         self.tcx.replace_bound_vars(value, fld_r, fld_t, fld_c)
     }
 

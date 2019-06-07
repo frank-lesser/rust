@@ -2,9 +2,9 @@ use rustc::hir;
 use rustc::hir::def::Namespace;
 use rustc::hir::def_id::DefId;
 use rustc::mir::{
-    AggregateKind, BindingForm, ClearCrossCrate, Constant, Field, Local,
-    LocalKind, Location, Operand, Place, PlaceBase, ProjectionElem, Rvalue,
-    Statement, StatementKind, Static, StaticKind, TerminatorKind,
+    AggregateKind, Constant, Field, Local, LocalKind, Location, Operand,
+    Place, PlaceBase, ProjectionElem, Rvalue, Statement, StatementKind, Static,
+    StaticKind, TerminatorKind,
 };
 use rustc::ty::{self, DefIdTree, Ty};
 use rustc::ty::layout::VariantIdx;
@@ -180,9 +180,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                                     &including_downcast,
                                 )?;
                             } else if let Place::Base(PlaceBase::Local(local)) = proj.base {
-                                if let Some(ClearCrossCrate::Set(BindingForm::RefForGuard)) =
-                                    self.mir.local_decls[local].is_user_variable
-                                {
+                                if self.mir.local_decls[local].is_ref_for_guard() {
                                     self.append_place_to_string(
                                         &proj.base,
                                         buf,
@@ -348,9 +346,10 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     // `tcx.upvars(def_id)` returns an `Option`, which is `None` in case
                     // the closure comes from another crate. But in that case we wouldn't
                     // be borrowck'ing it, so we can just unwrap:
-                    let upvar = self.infcx.tcx.upvars(def_id).unwrap()[field.index()];
+                    let (&var_id, _) = self.infcx.tcx.upvars(def_id).unwrap()
+                        .get_index(field.index()).unwrap();
 
-                    self.infcx.tcx.hir().name_by_hir_id(upvar.var_id()).to_string()
+                    self.infcx.tcx.hir().name_by_hir_id(var_id).to_string()
                 }
                 _ => {
                     // Might need a revision when the fields in trait RFC is implemented
@@ -380,6 +379,26 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         } else {
             debug!("is_place_thread_local: no");
             false
+        }
+    }
+
+    /// Add a note that a type does not implement `Copy`
+    pub(super) fn note_type_does_not_implement_copy(
+        &self,
+        err: &mut DiagnosticBuilder<'a>,
+        place_desc: &str,
+        ty: Ty<'tcx>,
+        span: Option<Span>,
+    ) {
+        let message = format!(
+            "move occurs because {} has type `{}`, which does not implement the `Copy` trait",
+            place_desc,
+            ty,
+        );
+        if let Some(span) = span {
+            err.span_label(span, message);
+        } else {
+            err.note(&message);
         }
     }
 }
@@ -645,12 +664,12 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         if let hir::ExprKind::Closure(
             .., args_span, _
         ) = expr {
-            for (v, place) in self.infcx.tcx.upvars(def_id)?.iter().zip(places) {
+            for (upvar, place) in self.infcx.tcx.upvars(def_id)?.values().zip(places) {
                 match place {
                     Operand::Copy(place) |
                     Operand::Move(place) if target_place == place => {
                         debug!("closure_span: found captured local {:?}", place);
-                        return Some((*args_span, v.span));
+                        return Some((*args_span, upvar.span));
                     },
                     _ => {}
                 }

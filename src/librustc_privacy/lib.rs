@@ -948,16 +948,6 @@ impl<'a, 'tcx> Visitor<'tcx> for NamePrivacyVisitor<'a, 'tcx> {
 
         intravisit::walk_pat(self, pat);
     }
-
-    fn visit_argument_source(&mut self, s: &'tcx hir::ArgSource) {
-        match s {
-            // Don't visit the pattern in `ArgSource::AsyncFn`, it contains a pattern which has
-            // a `NodeId` w/out a type, as it is only used for getting the name of the original
-            // pattern for diagnostics where only an `hir::Arg` is present.
-            hir::ArgSource::AsyncFn(..) => {},
-            _ => intravisit::walk_argument_source(self, s),
-        }
-    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -1050,12 +1040,11 @@ impl<'a, 'tcx> Visitor<'tcx> for TypePrivacyVisitor<'a, 'tcx> {
         if !self.in_body {
             // Avoid calling `hir_trait_to_predicates` in bodies, it will ICE.
             // The traits' privacy in bodies is already checked as a part of trait object types.
-            let (principal, projections) =
-                rustc_typeck::hir_trait_to_predicates(self.tcx, trait_ref);
+            let (principal, bounds) = rustc_typeck::hir_trait_to_predicates(self.tcx, trait_ref);
             if self.visit_trait(*principal.skip_binder()) {
                 return;
             }
-            for (poly_predicate, _) in projections {
+            for (poly_predicate, _) in bounds.projection_bounds {
                 let tcx = self.tcx;
                 if self.visit(poly_predicate.skip_binder().ty) ||
                    self.visit_trait(poly_predicate.skip_binder().projection_ty.trait_ref(tcx)) {
@@ -1145,16 +1134,6 @@ impl<'a, 'tcx> Visitor<'tcx> for TypePrivacyVisitor<'a, 'tcx> {
         }
 
         intravisit::walk_pat(self, pattern);
-    }
-
-    fn visit_argument_source(&mut self, s: &'tcx hir::ArgSource) {
-        match s {
-            // Don't visit the pattern in `ArgSource::AsyncFn`, it contains a pattern which has
-            // a `NodeId` w/out a type, as it is only used for getting the name of the original
-            // pattern for diagnostics where only an `hir::Arg` is present.
-            hir::ArgSource::AsyncFn(..) => {},
-            _ => intravisit::walk_argument_source(self, s),
-        }
     }
 
     fn visit_local(&mut self, local: &'tcx hir::Local) {

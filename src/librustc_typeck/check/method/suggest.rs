@@ -11,7 +11,7 @@ use rustc::hir::def::{Res, DefKind};
 use rustc::hir::def_id::{CRATE_DEF_INDEX, LOCAL_CRATE, DefId};
 use rustc::hir::map as hir_map;
 use rustc::hir::print;
-use rustc::infer::type_variable::TypeVariableOrigin;
+use rustc::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc::traits::Obligation;
 use rustc::ty::{self, Ty, TyCtxt, ToPolyTraitRef, ToPredicate, TypeFoldable};
 use rustc::ty::print::with_crate_prefix;
@@ -43,7 +43,10 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 self.autoderef(span, ty).any(|(ty, _)| {
                     self.probe(|_| {
                         let fn_once_substs = tcx.mk_substs_trait(ty, &[
-                            self.next_ty_var(TypeVariableOrigin::MiscVariable(span)).into()
+                            self.next_ty_var(TypeVariableOrigin {
+                                kind: TypeVariableOriginKind::MiscVariable,
+                                span,
+                            }).into()
                         ]);
                         let trait_ref = ty::TraitRef::new(fn_once, fn_once_substs);
                         let poly_trait_ref = trait_ref.to_poly_trait_ref();
@@ -323,6 +326,11 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                     Applicability::MachineApplicable,
                                 );
                             }
+                        }
+                        if let ty::RawPtr(_) = &actual.sty {
+                            err.note("try using `<*const T>::as_ref()` to get a reference to the \
+                                      type behind the pointer: https://doc.rust-lang.org/std/\
+                                      primitive.pointer.html#method.as_ref");
                         }
                         err
                     }

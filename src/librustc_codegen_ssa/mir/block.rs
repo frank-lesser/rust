@@ -1,11 +1,10 @@
 use rustc::middle::lang_items;
-use rustc::ty::{self, Ty, TypeFoldable};
+use rustc::ty::{self, Ty, TypeFoldable, Instance};
 use rustc::ty::layout::{self, LayoutOf, HasTyCtxt, FnTypeExt};
 use rustc::mir::{self, Place, PlaceBase, Static, StaticKind};
 use rustc::mir::interpret::InterpError;
 use rustc_target::abi::call::{ArgType, FnType, PassMode, IgnoreMode};
 use rustc_target::spec::abi::Abi;
-use rustc_mir::monomorphize;
 use crate::base;
 use crate::MemFlags;
 use crate::common::{self, IntPredicate};
@@ -310,7 +309,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     ) {
         let ty = location.ty(self.mir, bx.tcx()).ty;
         let ty = self.monomorphize(&ty);
-        let drop_fn = monomorphize::resolve_drop_in_place(bx.tcx(), ty);
+        let drop_fn = Instance::resolve_drop_in_place(bx.tcx(), ty);
 
         if let ty::InstanceDef::DropGlue(_, None) = drop_fn.def {
             // we don't actually need to drop anything.
@@ -968,7 +967,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         bx.range_metadata(llval, 0..2);
                     }
                 }
-                // We store bools as i8 so we need to truncate to i1.
+                // We store bools as `i8` so we need to truncate to `i1`.
                 llval = base::to_immediate(bx, llval, arg.layout);
             }
         }
@@ -1098,7 +1097,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         fn_ret: &ArgType<'tcx, Ty<'tcx>>,
         llargs: &mut Vec<Bx::Value>, is_intrinsic: bool
     ) -> ReturnDest<'tcx, Bx::Value> {
-        // If the return is ignored, we can just return a do-nothing ReturnDest
+        // If the return is ignored, we can just return a do-nothing `ReturnDest`.
         if fn_ret.is_ignore() {
             return ReturnDest::Nothing;
         }
@@ -1107,8 +1106,8 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 LocalRef::Place(dest) => dest,
                 LocalRef::UnsizedPlace(_) => bug!("return type must be sized"),
                 LocalRef::Operand(None) => {
-                    // Handle temporary places, specifically Operand ones, as
-                    // they don't have allocas
+                    // Handle temporary places, specifically `Operand` ones, as
+                    // they don't have `alloca`s.
                     return if fn_ret.is_indirect() {
                         // Odd, but possible, case, we have an operand temporary,
                         // but the calling convention has an indirect return.
@@ -1118,8 +1117,8 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         ReturnDest::IndirectOperand(tmp, index)
                     } else if is_intrinsic {
                         // Currently, intrinsics always need a location to store
-                        // the result. so we create a temporary alloca for the
-                        // result
+                        // the result, so we create a temporary `alloca` for the
+                        // result.
                         let tmp = PlaceRef::alloca(bx, fn_ret.layout, "tmp_ret");
                         tmp.storage_live(bx);
                         ReturnDest::IndirectOperand(tmp, index)
@@ -1138,7 +1137,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             if dest.align < dest.layout.align.abi {
                 // Currently, MIR code generation does not create calls
                 // that store directly to fields of packed structs (in
-                // fact, the calls it creates write only to temps),
+                // fact, the calls it creates write only to temps).
                 //
                 // If someone changes that, please update this code path
                 // to create a temporary.
@@ -1233,12 +1232,12 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 }
 
 enum ReturnDest<'tcx, V> {
-    // Do nothing, the return value is indirect or ignored
+    // Do nothing; the return value is indirect or ignored.
     Nothing,
-    // Store the return value to the pointer
+    // Store the return value to the pointer.
     Store(PlaceRef<'tcx, V>),
-    // Stores an indirect return value to an operand local place
+    // Store an indirect return value to an operand local place.
     IndirectOperand(PlaceRef<'tcx, V>, mir::Local),
-    // Stores a direct return value to an operand local place
+    // Store a direct return value to an operand local place.
     DirectOperand(mir::Local)
 }

@@ -50,7 +50,7 @@ assert_eq!(size_of::<Option<core::num::", stringify!($Ty), ">>(), size_of::<", s
                 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
                 #[repr(transparent)]
                 #[rustc_layout_scalar_valid_range_start(1)]
-                #[cfg_attr(not(stage0), rustc_nonnull_optimization_guaranteed)]
+                #[cfg_attr(not(bootstrap), rustc_nonnull_optimization_guaranteed)]
                 pub struct $Ty($Int);
             }
 
@@ -463,15 +463,12 @@ assert_eq!(m, ", $swapped, ");
 Basic usage:
 
 ```
-#![feature(reverse_bits)]
-
 let n = ", $swap_op, stringify!($SelfT), ";
 let m = n.reverse_bits();
 
 assert_eq!(m, ", $reversed, ");
 ```"),
-            #[unstable(feature = "reverse_bits", issue = "48763")]
-            #[rustc_const_unstable(feature = "const_int_conversion")]
+            #[stable(feature = "reverse_bits", since = "1.37.0")]
             #[inline]
             #[must_use]
             pub const fn reverse_bits(self) -> Self {
@@ -2514,14 +2511,12 @@ assert_eq!(m, ", $swapped, ");
 Basic usage:
 
 ```
-#![feature(reverse_bits)]
-
 let n = ", $swap_op, stringify!($SelfT), ";
 let m = n.reverse_bits();
 
 assert_eq!(m, ", $reversed, ");
 ```"),
-            #[unstable(feature = "reverse_bits", issue = "48763")]
+            #[stable(feature = "reverse_bits", since = "1.37.0")]
             #[inline]
             #[must_use]
             pub const fn reverse_bits(self) -> Self {

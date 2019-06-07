@@ -6,7 +6,7 @@ use crate::ast::{Attribute, MacDelimiter, GenericArg};
 use crate::util::parser::{self, AssocOp, Fixity};
 use crate::attr;
 use crate::source_map::{self, SourceMap, Spanned};
-use crate::parse::token::{self, BinOpToken, Nonterminal, Token};
+use crate::parse::token::{self, BinOpToken, Nonterminal, TokenKind};
 use crate::parse::lexer::comments;
 use crate::parse::{self, ParseSess};
 use crate::print::pp::{self, Breaks};
@@ -189,7 +189,7 @@ pub fn literal_to_string(lit: token::Lit) -> String {
     out
 }
 
-pub fn token_to_string(tok: &Token) -> String {
+pub fn token_to_string(tok: &TokenKind) -> String {
     match *tok {
         token::Eq                   => "=".to_string(),
         token::Lt                   => "<".to_string(),
@@ -357,7 +357,7 @@ pub fn vis_to_string(v: &ast::Visibility) -> String {
 }
 
 pub fn fun_to_string(decl: &ast::FnDecl,
-                     header: &ast::FnHeader,
+                     header: ast::FnHeader,
                      name: ast::Ident,
                      generics: &ast::Generics)
                      -> String {
@@ -724,10 +724,10 @@ pub trait PrintState<'a> {
     /// expression arguments as expressions). It can be done! I think.
     fn print_tt(&mut self, tt: tokenstream::TokenTree) -> io::Result<()> {
         match tt {
-            TokenTree::Token(_, ref tk) => {
-                self.writer().word(token_to_string(tk))?;
-                match *tk {
-                    parse::token::DocComment(..) => {
+            TokenTree::Token(ref token) => {
+                self.writer().word(token_to_string(&token))?;
+                match token.kind {
+                    token::DocComment(..) => {
                         self.writer().hardbreak()
                     }
                     _ => Ok(())
@@ -1040,7 +1040,7 @@ impl<'a> State<'a> {
         match item.node {
             ast::ForeignItemKind::Fn(ref decl, ref generics) => {
                 self.head("")?;
-                self.print_fn(decl, &ast::FnHeader::default(),
+                self.print_fn(decl, ast::FnHeader::default(),
                               Some(item.ident),
                               generics, &item.vis)?;
                 self.end()?; // end head-ibox
@@ -1170,7 +1170,7 @@ impl<'a> State<'a> {
                 self.s.word(";")?;
                 self.end()?; // end the outer cbox
             }
-            ast::ItemKind::Fn(ref decl, ref header, ref param_names, ref body) => {
+            ast::ItemKind::Fn(ref decl, header, ref param_names, ref body) => {
                 self.head("")?;
                 self.print_fn(
                     decl,
@@ -1522,7 +1522,7 @@ impl<'a> State<'a> {
                             vis: &ast::Visibility)
                             -> io::Result<()> {
         self.print_fn(&m.decl,
-                      &m.header,
+                      m.header,
                       Some(ident),
                       &generics,
                       vis)
@@ -1715,7 +1715,7 @@ impl<'a> State<'a> {
         match els {
             Some(_else) => {
                 match _else.node {
-                    // "another else-if"
+                    // Another `else if` block.
                     ast::ExprKind::If(ref i, ref then, ref e) => {
                         self.cbox(INDENT_UNIT - 1)?;
                         self.ibox(0)?;
@@ -1725,7 +1725,7 @@ impl<'a> State<'a> {
                         self.print_block(then)?;
                         self.print_else(e.as_ref().map(|e| &**e))
                     }
-                    // "another else-if-let"
+                    // Another `else if let` block.
                     ast::ExprKind::IfLet(ref pats, ref expr, ref then, ref e) => {
                         self.cbox(INDENT_UNIT - 1)?;
                         self.ibox(0)?;
@@ -1738,14 +1738,14 @@ impl<'a> State<'a> {
                         self.print_block(then)?;
                         self.print_else(e.as_ref().map(|e| &**e))
                     }
-                    // "final else"
+                    // Final `else` block.
                     ast::ExprKind::Block(ref b, _) => {
                         self.cbox(INDENT_UNIT - 1)?;
                         self.ibox(0)?;
                         self.s.word(" else ")?;
                         self.print_block(b)
                     }
-                    // BLEAH, constraints would be great here
+                    // Constraints would be great here!
                     _ => {
                         panic!("print_if saw if with weird alternative");
                     }
@@ -2113,7 +2113,7 @@ impl<'a> State<'a> {
                 self.bclose_(expr.span, INDENT_UNIT)?;
             }
             ast::ExprKind::Closure(
-                capture_clause, ref asyncness, movability, ref decl, ref body, _) => {
+                capture_clause, asyncness, movability, ref decl, ref body, _) => {
                 self.print_movability(movability)?;
                 self.print_asyncness(asyncness)?;
                 self.print_capture_clause(capture_clause)?;
@@ -2450,14 +2450,21 @@ impl<'a> State<'a> {
 
                 let mut comma = data.args.len() != 0;
 
-                for binding in data.bindings.iter() {
+                for constraint in data.constraints.iter() {
                     if comma {
                         self.word_space(",")?
                     }
-                    self.print_ident(binding.ident)?;
+                    self.print_ident(constraint.ident)?;
                     self.s.space()?;
-                    self.word_space("=")?;
-                    self.print_type(&binding.ty)?;
+                    match constraint.kind {
+                        ast::AssocTyConstraintKind::Equality { ref ty } => {
+                            self.word_space("=")?;
+                            self.print_type(ty)?;
+                        }
+                        ast::AssocTyConstraintKind::Bound { ref bounds } => {
+                            self.print_type_bounds(":", &*bounds)?;
+                        }
+                    }
                     comma = true;
                 }
 
@@ -2710,7 +2717,7 @@ impl<'a> State<'a> {
 
     pub fn print_fn(&mut self,
                     decl: &ast::FnDecl,
-                    header: &ast::FnHeader,
+                    header: ast::FnHeader,
                     name: Option<ast::Ident>,
                     generics: &ast::Generics,
                     vis: &ast::Visibility) -> io::Result<()> {
@@ -2765,7 +2772,8 @@ impl<'a> State<'a> {
         }
     }
 
-    pub fn print_asyncness(&mut self, asyncness: &ast::IsAsync) -> io::Result<()> {
+    pub fn print_asyncness(&mut self, asyncness: ast::IsAsync)
+                                -> io::Result<()> {
         if asyncness.is_async() {
             self.word_nbsp("async")?;
         }
@@ -3037,7 +3045,7 @@ impl<'a> State<'a> {
             span: syntax_pos::DUMMY_SP,
         };
         self.print_fn(decl,
-                      &ast::FnHeader { unsafety, abi, ..ast::FnHeader::default() },
+                      ast::FnHeader { unsafety, abi, ..ast::FnHeader::default() },
                       name,
                       &generics,
                       &source_map::dummy_spanned(ast::VisibilityKind::Inherited))?;
@@ -3100,7 +3108,7 @@ impl<'a> State<'a> {
     }
 
     pub fn print_fn_header_info(&mut self,
-                                header: &ast::FnHeader,
+                                header: ast::FnHeader,
                                 vis: &ast::Visibility) -> io::Result<()> {
         self.s.word(visibility_qualified(vis, ""))?;
 
@@ -3109,7 +3117,7 @@ impl<'a> State<'a> {
             ast::Constness::Const => self.word_nbsp("const")?
         }
 
-        self.print_asyncness(&header.asyncness.node)?;
+        self.print_asyncness(header.asyncness.node)?;
         self.print_unsafety(header.unsafety)?;
 
         if header.abi != Abi::Rust {
@@ -3158,7 +3166,7 @@ mod tests {
             assert_eq!(
                 fun_to_string(
                     &decl,
-                    &ast::FnHeader {
+                    ast::FnHeader {
                         unsafety: ast::Unsafety::Normal,
                         constness: source_map::dummy_spanned(ast::Constness::NotConst),
                         asyncness: source_map::dummy_spanned(ast::IsAsync::NotAsync),

@@ -4,10 +4,9 @@ use rustc::ich::NodeIdHashingMode;
 use rustc::mir::interpret::{ConstValue, Scalar};
 use rustc::ty::print::{PrettyPrinter, Printer, Print};
 use rustc::ty::subst::{Kind, UnpackedKind};
-use rustc::ty::{self, Ty, TyCtxt, TypeFoldable};
+use rustc::ty::{self, Ty, TyCtxt, TypeFoldable, Instance};
 use rustc::util::common::record_time;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_mir::monomorphize::Instance;
 
 use log::debug;
 
@@ -440,7 +439,7 @@ impl fmt::Write for SymbolPrinter<'_, '_> {
                 '-' | ':' => self.path.temp_buf.push('.'),
 
                 // Avoid crashing LLVM in certain (LTO-related) situations, see #60925.
-                'm' if self.path.temp_buf.ends_with(".llv") => self.path.temp_buf.push_str("$6d$"),
+                'm' if self.path.temp_buf.ends_with(".llv") => self.path.temp_buf.push_str("$u6d$"),
 
                 // These are legal symbols
                 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '.' | '$' => self.path.temp_buf.push(c),

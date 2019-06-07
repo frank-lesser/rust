@@ -1,8 +1,7 @@
 use crate::build;
-use crate::build::scope::{CachedBlock, DropKind};
+use crate::build::scope::DropKind;
 use crate::hair::cx::Cx;
 use crate::hair::{LintLevel, BindingMode, PatternKind};
-use crate::shim;
 use crate::transform::MirSource;
 use crate::util as mir_util;
 use rustc::hir;
@@ -31,8 +30,6 @@ pub fn mir_build<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Body<'
 
     // Figure out what primary body this item has.
     let (body_id, return_ty_span) = match tcx.hir().get_by_hir_id(id) {
-        Node::Ctor(ctor) => return create_constructor_shim(tcx, id, ctor),
-
         Node::Expr(hir::Expr { node: hir::ExprKind::Closure(_, decl, body_id, _, _), .. })
         | Node::Item(hir::Item { node: hir::ItemKind::Fn(decl, _, _, body_id), .. })
         | Node::ImplItem(
@@ -126,6 +123,7 @@ pub fn mir_build<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Body<'
                             opt_ty_info = None;
                             self_arg = None;
                         }
+
                         ArgInfo(fn_sig.inputs()[index], opt_ty_info, Some(&*arg.pat), self_arg)
                     });
 
@@ -233,38 +231,6 @@ impl<'a, 'gcx: 'tcx, 'tcx> MutVisitor<'tcx> for GlobalizeMir<'a, 'gcx> {
     }
 }
 
-fn create_constructor_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                     ctor_id: hir::HirId,
-                                     v: &'tcx hir::VariantData)
-                                     -> Body<'tcx>
-{
-    let span = tcx.hir().span_by_hir_id(ctor_id);
-    if let hir::VariantData::Tuple(ref fields, ctor_id) = *v {
-        tcx.infer_ctxt().enter(|infcx| {
-            let mut mir = shim::build_adt_ctor(&infcx, ctor_id, fields, span);
-
-            // Convert the `mir::Body` to global types.
-            let tcx = infcx.tcx.global_tcx();
-            let mut globalizer = GlobalizeMir {
-                tcx,
-                span: mir.span
-            };
-            globalizer.visit_body(&mut mir);
-            let mir = unsafe {
-                mem::transmute::<Body<'_>, Body<'tcx>>(mir)
-            };
-
-            mir_util::dump_mir(tcx, None, "mir_map", &0,
-                               MirSource::item(tcx.hir().local_def_id_from_hir_id(ctor_id)),
-                               &mir, |_, _| Ok(()) );
-
-            mir
-        })
-    } else {
-        span_bug!(span, "attempting to create MIR for non-tuple variant {:?}", v);
-    }
-}
-
 ///////////////////////////////////////////////////////////////////////////
 // BuildMir -- walks a crate, looking for fn items and methods to build MIR from
 
@@ -288,9 +254,9 @@ pub enum BlockFrame {
     /// Evaluation is currently within a statement.
     ///
     /// Examples include:
-    ///  1. `EXPR;`
-    ///  2. `let _ = EXPR;`
-    ///  3. `let x = EXPR;`
+    /// 1. `EXPR;`
+    /// 2. `let _ = EXPR;`
+    /// 3. `let x = EXPR;`
     Statement {
         /// If true, then statement discards result from evaluating
         /// the expression (such as examples 1 and 2 above).
@@ -614,10 +580,7 @@ fn should_abort_on_panic<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
 ///////////////////////////////////////////////////////////////////////////
 /// the main entry point for building MIR for a function
 
-struct ArgInfo<'gcx>(Ty<'gcx>,
-                     Option<Span>,
-                     Option<&'gcx hir::Pat>,
-                     Option<ImplicitSelfKind>);
+struct ArgInfo<'gcx>(Ty<'gcx>, Option<Span>, Option<&'gcx hir::Pat>, Option<ImplicitSelfKind>);
 
 fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
                                    fn_id: hir::HirId,
@@ -651,10 +614,9 @@ fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
         .get(&fn_def_id)
         .into_iter()
         .flatten()
-        .map(|upvar_id| {
-            let var_hir_id = upvar_id.var_path.hir_id;
+        .map(|(&var_hir_id, &upvar_id)| {
             let var_node_id = tcx_hir.hir_to_node_id(var_hir_id);
-            let capture = hir_tables.upvar_capture(*upvar_id);
+            let capture = hir_tables.upvar_capture(upvar_id);
             let by_ref = match capture {
                 ty::UpvarCapture::ByValue => false,
                 ty::UpvarCapture::ByRef(..) => true,
@@ -884,21 +846,13 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             // debuginfo and so that error reporting knows that this is a user
             // variable. For any other pattern the pattern introduces new
             // variables which will be named instead.
-            let mut name = None;
-            if let Some(pat) = pattern {
-                match pat.node {
-                    hir::PatKind::Binding(hir::BindingAnnotation::Unannotated, _, ident, _)
-                    | hir::PatKind::Binding(hir::BindingAnnotation::Mutable, _, ident, _) => {
-                        name = Some(ident.name);
-                    }
-                    _ => (),
-                }
-            }
-
-            let source_info = SourceInfo {
-                scope: OUTERMOST_SOURCE_SCOPE,
-                span: pattern.map_or(self.fn_span, |pat| pat.span)
+            let (name, span) = if let Some(pat) = pattern {
+                (pat.simple_ident().map(|ident| ident.name), pat.span)
+            } else {
+                (None, self.fn_span)
             };
+
+            let source_info = SourceInfo { scope: OUTERMOST_SOURCE_SCOPE, span, };
             self.local_decls.push(LocalDecl {
                 mutability: Mutability::Mut,
                 ty,
@@ -923,8 +877,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             // Make sure we drop (parts of) the argument even when not matched on.
             self.schedule_drop(
                 pattern.as_ref().map_or(ast_body.span, |pat| pat.span),
-                argument_scope, &place, ty,
-                DropKind::Value { cached_block: CachedBlock::default() },
+                argument_scope, &place, ty, DropKind::Value,
             );
 
             if let Some(pattern) = pattern {
@@ -933,7 +886,13 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
 
                 match *pattern.kind {
                     // Don't introduce extra copies for simple bindings
-                    PatternKind::Binding { mutability, var, mode: BindingMode::ByValue, .. } => {
+                    PatternKind::Binding {
+                        mutability,
+                        var,
+                        mode: BindingMode::ByValue,
+                        subpattern: None,
+                        ..
+                    } => {
                         self.local_decls[local].mutability = mutability;
                         self.local_decls[local].is_user_variable =
                             if let Some(kind) = self_binding {

@@ -54,7 +54,6 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         }
         wbcx.visit_body(body);
         wbcx.visit_upvar_capture_map();
-        wbcx.visit_upvar_list_map();
         wbcx.visit_closures();
         wbcx.visit_liberated_fn_sigs();
         wbcx.visit_fru_field_types();
@@ -74,6 +73,11 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         );
         wbcx.tables.used_trait_imports = used_trait_imports;
 
+        wbcx.tables.upvar_list = mem::replace(
+            &mut self.tables.borrow_mut().upvar_list,
+            Default::default(),
+        );
+
         wbcx.tables.tainted_by_errors = self.is_tainted_by_errors();
 
         debug!(
@@ -81,7 +85,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             item_def_id, wbcx.tables
         );
 
-        self.tcx.alloc_tables(wbcx.tables)
+        self.tcx.arena.alloc(wbcx.tables)
     }
 }
 
@@ -307,16 +311,6 @@ impl<'cx, 'gcx, 'tcx> Visitor<'gcx> for WritebackCx<'cx, 'gcx, 'tcx> {
         let ty = self.resolve(&ty, &hir_ty.span);
         self.write_ty_to_tables(hir_ty.hir_id, ty);
     }
-
-    fn visit_argument_source(&mut self, s: &'gcx hir::ArgSource) {
-        match s {
-            // Don't visit the pattern in `ArgSource::AsyncFn`, it contains a pattern which has
-            // a `NodeId` w/out a type, as it is only used for getting the name of the original
-            // pattern for diagnostics where only an `hir::Arg` is present.
-            hir::ArgSource::AsyncFn(..) => {},
-            _ => intravisit::walk_argument_source(self, s),
-        }
-    }
 }
 
 impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
@@ -340,21 +334,6 @@ impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
             self.tables
                 .upvar_capture_map
                 .insert(*upvar_id, new_upvar_capture);
-        }
-    }
-
-    /// Runs through the function context's upvar list map and adds the same to
-    /// the TypeckTables. upvarlist is a hashmap of the list of upvars referred
-    /// to in a closure..
-    fn visit_upvar_list_map(&mut self) {
-        for (closure_def_id, upvar_list) in self.fcx.tables.borrow().upvar_list.iter() {
-            debug!(
-                "UpvarIDs captured by closure {:?} are: {:?}",
-                closure_def_id, upvar_list
-            );
-            self.tables
-                .upvar_list
-                .insert(*closure_def_id, upvar_list.to_vec());
         }
     }
 
@@ -471,38 +450,38 @@ impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
             let generics = self.tcx().generics_of(def_id);
 
             let definition_ty = if generics.parent.is_some() {
-                // impl trait
+                // `impl Trait`
                 self.fcx.infer_opaque_definition_from_instantiation(
                     def_id,
                     opaque_defn,
                     instantiated_ty,
                 )
             } else {
-                // prevent
+                // Prevent:
                 // * `fn foo<T>() -> Foo<T>`
                 // * `fn foo<T: Bound + Other>() -> Foo<T>`
-                // from being defining
+                // from being defining.
 
                 // Also replace all generic params with the ones from the existential type
-                // definition so
+                // definition so that
                 // ```rust
                 // existential type Foo<T>: 'static;
                 // fn foo<U>() -> Foo<U> { .. }
                 // ```
-                // figures out the concrete type with `U`, but the stored type is with `T`
+                // figures out the concrete type with `U`, but the stored type is with `T`.
                 instantiated_ty.fold_with(&mut BottomUpFolder {
                     tcx: self.tcx().global_tcx(),
                     ty_op: |ty| {
                         trace!("checking type {:?}", ty);
-                        // find a type parameter
+                        // Find a type parameter.
                         if let ty::Param(..) = ty.sty {
-                            // look it up in the substitution list
+                            // Look it up in the substitution list.
                             assert_eq!(opaque_defn.substs.len(), generics.params.len());
                             for (subst, param) in opaque_defn.substs.iter().zip(&generics.params) {
                                 if let UnpackedKind::Type(subst) = subst.unpack() {
                                     if subst == ty {
-                                        // found it in the substitution list, replace with the
-                                        // parameter from the existential type
+                                        // Found it in the substitution list; replace with the
+                                        // parameter from the existential type.
                                         return self.tcx()
                                             .global_tcx()
                                             .mk_ty_param(param.index, param.name);
@@ -526,16 +505,15 @@ impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
                     },
                     lt_op: |region| {
                         match region {
-                            // Skip static and bound regions: they don't
-                            // require substitution.
+                            // Skip static and bound regions: they don't require substitution.
                             ty::ReStatic | ty::ReLateBound(..) => region,
                             _ => {
                                 trace!("checking {:?}", region);
                                 for (subst, p) in opaque_defn.substs.iter().zip(&generics.params) {
                                     if let UnpackedKind::Lifetime(subst) = subst.unpack() {
                                         if subst == region {
-                                            // found it in the substitution list, replace with the
-                                            // parameter from the existential type
+                                            // Found it in the substitution list; replace with the
+                                            // parameter from the existential type.
                                             let reg = ty::EarlyBoundRegion {
                                                 def_id: p.def_id,
                                                 index: p.index,
@@ -607,8 +585,8 @@ impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
 
             if let ty::Opaque(defin_ty_def_id, _substs) = definition_ty.sty {
                 if def_id == defin_ty_def_id {
-                    // Concrete type resolved to the existential type itself
-                    // Force a cycle error
+                    // Concrete type resolved to the existential type itself.
+                    // Force a cycle error.
                     // FIXME(oli-obk): we could just not insert it into `concrete_existential_types`
                     // which simply would make this use not a defining use.
                     self.tcx().at(span).type_of(defin_ty_def_id);

@@ -1,10 +1,10 @@
-use crate::ast;
 use crate::ast::{
-    BlockCheckMode, BinOpKind, Expr, ExprKind, Item, ItemKind, Pat, PatKind, PathSegment, QSelf,
-    Ty, TyKind, VariantData,
+    self, Arg, BinOpKind, BindingMode, BlockCheckMode, Expr, ExprKind, Ident, Item, ItemKind,
+    Mutability, Pat, PatKind, PathSegment, QSelf, Ty, TyKind, VariantData,
 };
-use crate::parse::{SeqSep, token, PResult, Parser};
+use crate::parse::{SeqSep, PResult, Parser};
 use crate::parse::parser::{BlockMode, PathStyle, SemiColonMode, TokenType, TokenExpectType};
+use crate::parse::token::{self, TokenKind};
 use crate::print::pprust;
 use crate::ptr::P;
 use crate::source_map::Spanned;
@@ -12,8 +12,24 @@ use crate::symbol::{kw, sym};
 use crate::ThinVec;
 use crate::util::parser::AssocOp;
 use errors::{Applicability, DiagnosticBuilder, DiagnosticId};
+use rustc_data_structures::fx::FxHashSet;
 use syntax_pos::{Span, DUMMY_SP, MultiSpan};
 use log::{debug, trace};
+
+/// Creates a placeholder argument.
+crate fn dummy_arg(ident: Ident) -> Arg {
+    let pat = P(Pat {
+        id: ast::DUMMY_NODE_ID,
+        node: PatKind::Ident(BindingMode::ByValue(Mutability::Immutable), ident, None),
+        span: ident.span,
+    });
+    let ty = Ty {
+        node: TyKind::Err,
+        span: ident.span,
+        id: ast::DUMMY_NODE_ID
+    };
+    Arg { ty: P(ty), pat: pat, id: ast::DUMMY_NODE_ID }
+}
 
 pub enum Error {
     FileNotFoundForModule {
@@ -186,12 +202,12 @@ impl<'a> Parser<'a> {
             self.span,
             &format!("expected identifier, found {}", self.this_token_descr()),
         );
-        if let token::Ident(ident, false) = &self.token {
-            if ident.is_raw_guess() {
+        if let token::Ident(name, false) = self.token.kind {
+            if Ident::new(name, self.span).is_raw_guess() {
                 err.span_suggestion(
                     self.span,
                     "you can escape reserved keywords to use them as identifiers",
-                    format!("r#{}", ident),
+                    format!("r#{}", name),
                     Applicability::MaybeIncorrect,
                 );
             }
@@ -214,8 +230,8 @@ impl<'a> Parser<'a> {
 
     pub fn expected_one_of_not_found(
         &mut self,
-        edible: &[token::Token],
-        inedible: &[token::Token],
+        edible: &[TokenKind],
+        inedible: &[TokenKind],
     ) -> PResult<'a, bool /* recovered */> {
         fn tokens_to_string(tokens: &[TokenType]) -> String {
             let mut i = tokens.iter();
@@ -279,7 +295,7 @@ impl<'a> Parser<'a> {
                 Applicability::MaybeIncorrect,
             );
         }
-        let sp = if self.token == token::Token::Eof {
+        let sp = if self.token == token::Eof {
             // This is EOF, don't want to point at the following char, but rather the last token
             self.prev_span
         } else {
@@ -353,7 +369,7 @@ impl<'a> Parser<'a> {
 
     /// Eats and discards tokens until one of `kets` is encountered. Respects token trees,
     /// passes through any errors encountered. Used for error recovery.
-    crate fn eat_to_tokens(&mut self, kets: &[&token::Token]) {
+    crate fn eat_to_tokens(&mut self, kets: &[&TokenKind]) {
         let handler = self.diagnostic();
 
         if let Err(ref mut err) = self.parse_seq_to_before_tokens(
@@ -373,7 +389,7 @@ impl<'a> Parser<'a> {
     /// let _ = vec![1, 2, 3].into_iter().collect::<Vec<usize>>>>();
     ///                                                        ^^ help: remove extra angle brackets
     /// ```
-    crate fn check_trailing_angle_brackets(&mut self, segment: &PathSegment, end: token::Token) {
+    crate fn check_trailing_angle_brackets(&mut self, segment: &PathSegment, end: TokenKind) {
         // This function is intended to be invoked after parsing a path segment where there are two
         // cases:
         //
@@ -711,13 +727,13 @@ impl<'a> Parser<'a> {
     /// closing delimiter.
     pub fn unexpected_try_recover(
         &mut self,
-        t: &token::Token,
+        t: &TokenKind,
     ) -> PResult<'a, bool /* recovered */> {
         let token_str = pprust::token_to_string(t);
         let this_token_str = self.this_token_descr();
-        let (prev_sp, sp) = match (&self.token, self.subparser_name) {
+        let (prev_sp, sp) = match (&self.token.kind, self.subparser_name) {
             // Point at the end of the macro call when reaching end of macro arguments.
-            (token::Token::Eof, Some(_)) => {
+            (token::Eof, Some(_)) => {
                 let sp = self.sess.source_map().next_point(self.span);
                 (sp, sp)
             }
@@ -725,14 +741,14 @@ impl<'a> Parser<'a> {
             // This happens when the parser finds an empty TokenStream.
             _ if self.prev_span == DUMMY_SP => (self.span, self.span),
             // EOF, don't want to point at the following char, but rather the last token.
-            (token::Token::Eof, None) => (self.prev_span, self.span),
+            (token::Eof, None) => (self.prev_span, self.span),
             _ => (self.sess.source_map().next_point(self.prev_span), self.span),
         };
         let msg = format!(
             "expected `{}`, found {}",
             token_str,
-            match (&self.token, self.subparser_name) {
-                (token::Token::Eof, Some(origin)) => format!("end of {}", origin),
+            match (&self.token.kind, self.subparser_name) {
+                (token::Eof, Some(origin)) => format!("end of {}", origin),
                 _ => this_token_str,
             },
         );
@@ -858,8 +874,8 @@ impl<'a> Parser<'a> {
                     Applicability::MaybeIncorrect,
                 );
             } else {
-                err.note("type ascription is a nightly-only feature that lets \
-                          you annotate an expression with a type: `<expr>: <type>`")
+                err.note("#![feature(type_ascription)] lets you annotate an \
+                          expression with a type: `<expr>: <type>`")
                     .span_note(
                         lhs_span,
                         "this expression expects an ascribed type after the colon",
@@ -888,7 +904,7 @@ impl<'a> Parser<'a> {
 
     crate fn recover_closing_delimiter(
         &mut self,
-        tokens: &[token::Token],
+        tokens: &[TokenKind],
         mut err: DiagnosticBuilder<'a>,
     ) -> PResult<'a, bool> {
         let mut pos = None;
@@ -974,7 +990,7 @@ impl<'a> Parser<'a> {
                break_on_semi, break_on_block);
         loop {
             debug!("recover_stmt_ loop {:?}", self.token);
-            match self.token {
+            match self.token.kind {
                 token::OpenDelim(token::DelimToken::Brace) => {
                     brace_depth += 1;
                     self.bump();
@@ -1059,7 +1075,7 @@ impl<'a> Parser<'a> {
     }
 
     crate fn eat_incorrect_doc_comment(&mut self, applied_to: &str) {
-        if let token::DocComment(_) = self.token {
+        if let token::DocComment(_) = self.token.kind {
             let mut err = self.diagnostic().struct_span_err(
                 self.span,
                 &format!("documentation comments cannot be applied to {}", applied_to),
@@ -1092,12 +1108,12 @@ impl<'a> Parser<'a> {
         pat: P<ast::Pat>,
         require_name: bool,
         is_trait_item: bool,
-    ) {
+    ) -> Option<Ident> {
         // If we find a pattern followed by an identifier, it could be an (incorrect)
         // C-style parameter declaration.
         if self.check_ident() && self.look_ahead(1, |t| {
             *t == token::Comma || *t == token::CloseDelim(token::Paren)
-        }) {
+        }) { // `fn foo(String s) {}`
             let ident = self.parse_ident().unwrap();
             let span = pat.span.with_hi(ident.span.hi());
 
@@ -1107,18 +1123,30 @@ impl<'a> Parser<'a> {
                 String::from("<identifier>: <type>"),
                 Applicability::HasPlaceholders,
             );
-        } else if require_name && is_trait_item {
-            if let PatKind::Ident(_, ident, _) = pat.node {
+            return Some(ident);
+        } else if let PatKind::Ident(_, ident, _) = pat.node {
+            if require_name && (
+                is_trait_item ||
+                self.token == token::Comma ||
+                self.token == token::CloseDelim(token::Paren)
+            ) { // `fn foo(a, b) {}` or `fn foo(usize, usize) {}`
                 err.span_suggestion(
                     pat.span,
-                    "explicitly ignore parameter",
+                    "if this was a parameter name, give it a type",
+                    format!("{}: TypeName", ident),
+                    Applicability::HasPlaceholders,
+                );
+                err.span_suggestion(
+                    pat.span,
+                    "if this is a type, explicitly ignore the parameter name",
                     format!("_: {}", ident),
                     Applicability::MachineApplicable,
                 );
+                err.note("anonymous parameters are removed in the 2018 edition (see RFC 1685)");
+                return Some(ident);
             }
-
-            err.note("anonymous parameters are removed in the 2018 edition (see RFC 1685)");
         }
+        None
     }
 
     crate fn recover_arg_parse(&mut self) -> PResult<'a, (P<ast::Pat>, P<ast::Ty>)> {
@@ -1187,8 +1215,8 @@ impl<'a> Parser<'a> {
     }
 
     crate fn expected_expression_found(&self) -> DiagnosticBuilder<'a> {
-        let (span, msg) = match (&self.token, self.subparser_name) {
-            (&token::Token::Eof, Some(origin)) => {
+        let (span, msg) = match (&self.token.kind, self.subparser_name) {
+            (&token::Eof, Some(origin)) => {
                 let sp = self.sess.source_map().next_point(self.span);
                 (sp, format!("expected expression, found end of {}", origin))
             }
@@ -1204,5 +1232,32 @@ impl<'a> Parser<'a> {
         }
         err.span_label(span, "expected expression");
         err
+    }
+
+    /// Replace duplicated recovered arguments with `_` pattern to avoid unecessary errors.
+    ///
+    /// This is necessary because at this point we don't know whether we parsed a function with
+    /// anonymous arguments or a function with names but no types. In order to minimize
+    /// unecessary errors, we assume the arguments are in the shape of `fn foo(a, b, c)` where
+    /// the arguments are *names* (so we don't emit errors about not being able to find `b` in
+    /// the local scope), but if we find the same name multiple times, like in `fn foo(i8, i8)`,
+    /// we deduplicate them to not complain about duplicated argument names.
+    crate fn deduplicate_recovered_arg_names(&self, fn_inputs: &mut Vec<Arg>) {
+        let mut seen_inputs = FxHashSet::default();
+        for input in fn_inputs.iter_mut() {
+            let opt_ident = if let (PatKind::Ident(_, ident, _), TyKind::Err) = (
+                &input.pat.node, &input.ty.node,
+            ) {
+                Some(*ident)
+            } else {
+                None
+            };
+            if let Some(ident) = opt_ident {
+                if seen_inputs.contains(&ident) {
+                    input.pat.node = PatKind::Wild;
+                }
+                seen_inputs.insert(ident);
+            }
+        }
     }
 }

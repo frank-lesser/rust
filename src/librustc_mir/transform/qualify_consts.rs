@@ -316,8 +316,9 @@ impl Qualif for HasMutInterior {
                     } else if let ty::Array(_, len) = ty.sty {
                         // FIXME(eddyb) the `cx.mode == Mode::Fn` condition
                         // seems unnecessary, given that this is merely a ZST.
-                        if !(len.unwrap_usize(cx.tcx) == 0 && cx.mode == Mode::Fn) {
-                            return true;
+                        match len.assert_usize(cx.tcx) {
+                            Some(0) if cx.mode == Mode::Fn => {},
+                            _ => return true,
                         }
                     } else {
                         return true;
@@ -1303,7 +1304,9 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                 }
             }
 
-            if self.mode == Mode::Fn {
+            // No need to do anything in constants and statics, as everything is "constant" anyway
+            // so promotion would be useless.
+            if self.mode != Mode::Static && self.mode != Mode::Const {
                 let constant_args = callee_def_id.and_then(|id| {
                     args_required_const(self.tcx, id)
                 }).unwrap_or_default();

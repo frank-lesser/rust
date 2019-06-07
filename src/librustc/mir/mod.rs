@@ -913,6 +913,16 @@ impl<'tcx> LocalDecl<'tcx> {
         }
     }
 
+    /// Returns `true` if this is a reference to a variable bound in a `match`
+    /// expression that is used to access said variable for the guard of the
+    /// match arm.
+    pub fn is_ref_for_guard(&self) -> bool {
+        match self.is_user_variable {
+            Some(ClearCrossCrate::Set(BindingForm::RefForGuard)) => true,
+            _ => false,
+        }
+    }
+
     /// Returns `true` is the local is from a compiler desugaring, e.g.,
     /// `__next` from a `for` loop.
     #[inline]
@@ -2562,8 +2572,8 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                             let mut struct_fmt = fmt.debug_struct(&name);
 
                             if let Some(upvars) = tcx.upvars(def_id) {
-                                for (upvar, place) in upvars.iter().zip(places) {
-                                    let var_name = tcx.hir().name_by_hir_id(upvar.var_id());
+                                for (&var_id, place) in upvars.keys().zip(places) {
+                                    let var_name = tcx.hir().name_by_hir_id(var_id);
                                     struct_fmt.field(&var_name.as_str(), place);
                                 }
                             }
@@ -2581,8 +2591,8 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                             let mut struct_fmt = fmt.debug_struct(&name);
 
                             if let Some(upvars) = tcx.upvars(def_id) {
-                                for (upvar, place) in upvars.iter().zip(places) {
-                                    let var_name = tcx.hir().name_by_hir_id(upvar.var_id());
+                                for (&var_id, place) in upvars.keys().zip(places) {
+                                    let var_name = tcx.hir().name_by_hir_id(var_id);
                                     struct_fmt.field(&var_name.as_str(), place);
                                 }
                             }
