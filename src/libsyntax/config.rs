@@ -121,7 +121,7 @@ impl<'a> StripUnconfigured<'a> {
             let mut expanded_attrs = Vec::with_capacity(1);
 
             while !parser.check(&token::CloseDelim(token::Paren)) {
-                let lo = parser.span.lo();
+                let lo = parser.token.span.lo();
                 let (path, tokens) = parser.parse_meta_item_unrestricted()?;
                 expanded_attrs.push((path, tokens, parser.prev_span.with_lo(lo)));
                 parser.expect_one_of(&[token::Comma], &[token::CloseDelim(token::Paren)])?;
@@ -240,6 +240,10 @@ impl<'a> StripUnconfigured<'a> {
         items.flat_map_in_place(|item| self.configure(item));
     }
 
+    pub fn configure_generic_params(&mut self, params: &mut Vec<ast::GenericParam>) {
+        params.flat_map_in_place(|param| self.configure(param));
+    }
+
     fn configure_variant_data(&mut self, vdata: &mut ast::VariantData) {
         match vdata {
             ast::VariantData::Struct(fields, ..) | ast::VariantData::Tuple(fields, _) =>
@@ -298,20 +302,8 @@ impl<'a> StripUnconfigured<'a> {
         }
     }
 
-    /// Denies `#[cfg]` on generic parameters until we decide what to do with it.
-    /// See issue #51279.
-    pub fn disallow_cfg_on_generic_param(&mut self, param: &ast::GenericParam) {
-        for attr in param.attrs() {
-            let offending_attr = if attr.check_name(sym::cfg) {
-                "cfg"
-            } else if attr.check_name(sym::cfg_attr) {
-                "cfg_attr"
-            } else {
-                continue;
-            };
-            let msg = format!("#[{}] cannot be applied on a generic parameter", offending_attr);
-            self.sess.span_diagnostic.span_err(attr.span, &msg);
-        }
+    pub fn configure_fn_decl(&mut self, fn_decl: &mut ast::FnDecl) {
+        fn_decl.inputs.flat_map_in_place(|arg| self.configure(arg));
     }
 }
 
@@ -363,6 +355,11 @@ impl<'a> MutVisitor for StripUnconfigured<'a> {
     fn visit_pat(&mut self, pat: &mut P<ast::Pat>) {
         self.configure_pat(pat);
         noop_visit_pat(pat, self)
+    }
+
+    fn visit_fn_decl(&mut self, mut fn_decl: &mut P<ast::FnDecl>) {
+        self.configure_fn_decl(&mut fn_decl);
+        noop_visit_fn_decl(fn_decl, self);
     }
 }
 

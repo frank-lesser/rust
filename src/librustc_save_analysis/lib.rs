@@ -1,8 +1,8 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![feature(custom_attribute)]
 #![feature(nll)]
 #![deny(rust_2018_idioms)]
 #![deny(internal)]
+#![deny(unused_lifetimes)]
 #![allow(unused_attributes)]
 
 #![recursion_limit="256"]
@@ -51,8 +51,8 @@ use rls_data::config::Config;
 use log::{debug, error, info};
 
 
-pub struct SaveContext<'l, 'tcx: 'l> {
-    tcx: TyCtxt<'l, 'tcx, 'tcx>,
+pub struct SaveContext<'l, 'tcx> {
+    tcx: TyCtxt<'tcx>,
     tables: &'l ty::TypeckTables<'tcx>,
     access_levels: &'l AccessLevels,
     span_utils: SpanUtils<'tcx>,
@@ -67,7 +67,7 @@ pub enum Data {
     RelationData(Relation, Impl),
 }
 
-impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
+impl<'l, 'tcx> SaveContext<'l, 'tcx> {
     fn span_from_span(&self, span: Span) -> SpanData {
         use rls_span::{Column, Row};
 
@@ -513,7 +513,8 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
     }
 
     pub fn get_expr_data(&self, expr: &ast::Expr) -> Option<Data> {
-        let hir_node = self.tcx.hir().expect_expr(expr.id);
+        let expr_hir_id = self.tcx.hir().node_to_hir_id(expr.id);
+        let hir_node = self.tcx.hir().expect_expr(expr_hir_id);
         let ty = self.tables.expr_ty_adjusted_opt(&hir_node);
         if ty.is_none() || ty.unwrap().sty == ty::Error {
             return None;
@@ -606,7 +607,8 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
     }
 
     pub fn get_path_res(&self, id: NodeId) -> Res {
-        match self.tcx.hir().get(id) {
+        let hir_id = self.tcx.hir().node_to_hir_id(id);
+        match self.tcx.hir().get(hir_id) {
             Node::TraitRef(tr) => tr.path.res,
 
             Node::Item(&hir::Item {
@@ -627,7 +629,6 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                 node: hir::ExprKind::Struct(ref qpath, ..),
                 ..
             }) => {
-                let hir_id = self.tcx.hir().node_to_hir_id(id);
                 self.tables.qpath_res(qpath, hir_id)
             }
 
@@ -651,7 +652,6 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                 node: hir::TyKind::Path(ref qpath),
                 ..
             }) => {
-                let hir_id = self.tcx.hir().node_to_hir_id(id);
                 self.tables.qpath_res(qpath, hir_id)
             }
 
@@ -960,8 +960,8 @@ impl<'l> PathCollector<'l> {
     }
 }
 
-impl<'l, 'a: 'l> Visitor<'a> for PathCollector<'l> {
-    fn visit_pat(&mut self, p: &'a ast::Pat) {
+impl<'l> Visitor<'l> for PathCollector<'l> {
+    fn visit_pat(&mut self, p: &'l ast::Pat) {
         match p.node {
             PatKind::Struct(ref path, ..) => {
                 self.collected_paths.push((p.id, path));
@@ -1017,7 +1017,7 @@ impl<'a> DumpHandler<'a> {
         }
     }
 
-    fn output_file(&self, ctx: &SaveContext<'_, '_>) -> File {
+    fn output_file(&self, ctx: &SaveContext<'_, '_>) -> (File, PathBuf) {
         let sess = &ctx.tcx.sess;
         let file_name = match ctx.config.output_file {
             Some(ref s) => PathBuf::from(s),
@@ -1055,7 +1055,7 @@ impl<'a> DumpHandler<'a> {
             |e| sess.fatal(&format!("Could not open {}: {}", file_name.display(), e)),
         );
 
-        output_file
+        (output_file, file_name)
     }
 }
 
@@ -1067,13 +1067,23 @@ impl<'a> SaveHandler for DumpHandler<'a> {
         cratename: &str,
         input: &'l Input,
     ) {
-        let output = &mut self.output_file(&save_ctxt);
-        let mut dumper = JsonDumper::new(output, save_ctxt.config.clone());
-        let mut visitor = DumpVisitor::new(save_ctxt, &mut dumper);
+        let sess = &save_ctxt.tcx.sess;
+        let file_name = {
+            let (mut output, file_name) = self.output_file(&save_ctxt);
+            let mut dumper = JsonDumper::new(&mut output, save_ctxt.config.clone());
+            let mut visitor = DumpVisitor::new(save_ctxt, &mut dumper);
 
-        visitor.dump_crate_info(cratename, krate);
-        visitor.dump_compilation_options(input, cratename);
-        visit::walk_crate(&mut visitor, krate);
+            visitor.dump_crate_info(cratename, krate);
+            visitor.dump_compilation_options(input, cratename);
+            visit::walk_crate(&mut visitor, krate);
+
+            file_name
+        };
+
+        if sess.opts.debugging_opts.emit_artifact_notifications {
+            sess.parse_sess.span_diagnostic
+                .emit_artifact_notification(&file_name, "save-analysis");
+        }
     }
 }
 
@@ -1105,7 +1115,7 @@ impl<'b> SaveHandler for CallbackHandler<'b> {
 }
 
 pub fn process_crate<'l, 'tcx, H: SaveHandler>(
-    tcx: TyCtxt<'l, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     krate: &ast::Crate,
     cratename: &str,
     input: &'l Input,

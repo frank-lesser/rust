@@ -140,7 +140,7 @@ pub struct ObligationCause<'tcx> {
 }
 
 impl<'tcx> ObligationCause<'tcx> {
-    pub fn span<'a, 'gcx>(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Span {
+    pub fn span(&self, tcx: TyCtxt<'tcx>) -> Span {
         match self.code {
             ObligationCauseCode::CompareImplMethodObligation { .. } |
             ObligationCauseCode::MainFunctionType |
@@ -188,7 +188,7 @@ pub enum ObligationCauseCode<'tcx> {
     /// S { ... } must be Sized
     StructInitializerSized,
     /// Type of each variable must be Sized
-    VariableType(ast::NodeId),
+    VariableType(hir::HirId),
     /// Argument type must be Sized
     SizedArgumentType,
     /// Return type must be Sized
@@ -363,9 +363,9 @@ impl<'tcx> DomainGoal<'tcx> {
 }
 
 impl<'tcx> GoalKind<'tcx> {
-    pub fn from_poly_domain_goal<'a, 'gcx>(
+    pub fn from_poly_domain_goal(
         domain_goal: PolyDomainGoal<'tcx>,
-        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+        tcx: TyCtxt<'tcx>,
     ) -> GoalKind<'tcx> {
         match domain_goal.no_bound_vars() {
             Some(p) => p.into_goal(),
@@ -643,8 +643,8 @@ pub fn predicates_for_generics<'tcx>(cause: ObligationCause<'tcx>,
 /// `bound` or is not known to meet bound (note that this is
 /// conservative towards *no impl*, which is the opposite of the
 /// `evaluate` methods).
-pub fn type_known_to_meet_bound_modulo_regions<'a, 'gcx, 'tcx>(
-    infcx: &InferCtxt<'a, 'gcx, 'tcx>,
+pub fn type_known_to_meet_bound_modulo_regions<'a, 'tcx>(
+    infcx: &InferCtxt<'a, 'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     ty: Ty<'tcx>,
     def_id: DefId,
@@ -710,13 +710,13 @@ pub fn type_known_to_meet_bound_modulo_regions<'a, 'gcx, 'tcx>(
     }
 }
 
-fn do_normalize_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                     region_context: DefId,
-                                     cause: ObligationCause<'tcx>,
-                                     elaborated_env: ty::ParamEnv<'tcx>,
-                                     predicates: Vec<ty::Predicate<'tcx>>)
-                                     -> Result<Vec<ty::Predicate<'tcx>>, ErrorReported>
-{
+fn do_normalize_predicates<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    region_context: DefId,
+    cause: ObligationCause<'tcx>,
+    elaborated_env: ty::ParamEnv<'tcx>,
+    predicates: Vec<ty::Predicate<'tcx>>,
+) -> Result<Vec<ty::Predicate<'tcx>>, ErrorReported> {
     debug!(
         "do_normalize_predicates(predicates={:?}, region_context={:?}, cause={:?})",
         predicates,
@@ -795,12 +795,12 @@ fn do_normalize_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
 // FIXME: this is gonna need to be removed ...
 /// Normalizes the parameter environment, reporting errors if they occur.
-pub fn normalize_param_env_or_error<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                              region_context: DefId,
-                                              unnormalized_env: ty::ParamEnv<'tcx>,
-                                              cause: ObligationCause<'tcx>)
-                                              -> ty::ParamEnv<'tcx>
-{
+pub fn normalize_param_env_or_error<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    region_context: DefId,
+    unnormalized_env: ty::ParamEnv<'tcx>,
+    cause: ObligationCause<'tcx>,
+) -> ty::ParamEnv<'tcx> {
     // I'm not wild about reporting errors here; I'd prefer to
     // have the errors get reported at a defined place (e.g.,
     // during typeck). Instead I have all parameter
@@ -904,14 +904,15 @@ pub fn normalize_param_env_or_error<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     )
 }
 
-pub fn fully_normalize<'a, 'gcx, 'tcx, T>(
-    infcx: &InferCtxt<'a, 'gcx, 'tcx>,
+pub fn fully_normalize<'a, 'tcx, T>(
+    infcx: &InferCtxt<'a, 'tcx>,
     mut fulfill_cx: FulfillmentContext<'tcx>,
     cause: ObligationCause<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
-    value: &T)
-    -> Result<T, Vec<FulfillmentError<'tcx>>>
-    where T : TypeFoldable<'tcx>
+    value: &T,
+) -> Result<T, Vec<FulfillmentError<'tcx>>>
+where
+    T: TypeFoldable<'tcx>,
 {
     debug!("fully_normalize_with_fulfillcx(value={:?})", value);
     let selcx = &mut SelectionContext::new(infcx);
@@ -936,10 +937,10 @@ pub fn fully_normalize<'a, 'gcx, 'tcx, T>(
 /// environment. If this returns false, then either normalize
 /// encountered an error or one of the predicates did not hold. Used
 /// when creating vtables to check for unsatisfiable methods.
-fn normalize_and_test_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                           predicates: Vec<ty::Predicate<'tcx>>)
-                                           -> bool
-{
+fn normalize_and_test_predicates<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    predicates: Vec<ty::Predicate<'tcx>>,
+) -> bool {
     debug!("normalize_and_test_predicates(predicates={:?})",
            predicates);
 
@@ -965,10 +966,10 @@ fn normalize_and_test_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     result
 }
 
-fn substitute_normalize_and_test_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                                      key: (DefId, SubstsRef<'tcx>))
-                                                      -> bool
-{
+fn substitute_normalize_and_test_predicates<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    key: (DefId, SubstsRef<'tcx>),
+) -> bool {
     debug!("substitute_normalize_and_test_predicates(key={:?})",
            key);
 
@@ -983,11 +984,10 @@ fn substitute_normalize_and_test_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx
 /// Given a trait `trait_ref`, iterates the vtable entries
 /// that come from `trait_ref`, including its supertraits.
 #[inline] // FIXME(#35870): avoid closures being unexported due to `impl Trait`.
-fn vtable_methods<'a, 'tcx>(
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
-    trait_ref: ty::PolyTraitRef<'tcx>)
-    -> &'tcx [Option<(DefId, SubstsRef<'tcx>)>]
-{
+fn vtable_methods<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    trait_ref: ty::PolyTraitRef<'tcx>,
+) -> &'tcx [Option<(DefId, SubstsRef<'tcx>)>] {
     debug!("vtable_methods({:?})", trait_ref);
 
     tcx.arena.alloc_from_iter(
@@ -1186,12 +1186,12 @@ pub trait ExClauseFold<'tcx>
 where
     Self: chalk_engine::context::Context + Clone,
 {
-    fn fold_ex_clause_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(
+    fn fold_ex_clause_with<F: TypeFolder<'tcx>>(
         ex_clause: &chalk_engine::ExClause<Self>,
         folder: &mut F,
     ) -> chalk_engine::ExClause<Self>;
 
-    fn visit_ex_clause_with<'gcx: 'tcx, V: TypeVisitor<'tcx>>(
+    fn visit_ex_clause_with<V: TypeVisitor<'tcx>>(
         ex_clause: &chalk_engine::ExClause<Self>,
         visitor: &mut V,
     ) -> bool;
@@ -1205,18 +1205,18 @@ where
     type LiftedDelayedLiteral: Debug + 'tcx;
     type LiftedLiteral: Debug + 'tcx;
 
-    fn lift_ex_clause_to_tcx<'a, 'gcx>(
+    fn lift_ex_clause_to_tcx(
         ex_clause: &chalk_engine::ExClause<Self>,
-        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+        tcx: TyCtxt<'tcx>,
     ) -> Option<Self::LiftedExClause>;
 
-    fn lift_delayed_literal_to_tcx<'a, 'gcx>(
+    fn lift_delayed_literal_to_tcx(
         ex_clause: &chalk_engine::DelayedLiteral<Self>,
-        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+        tcx: TyCtxt<'tcx>,
     ) -> Option<Self::LiftedDelayedLiteral>;
 
-    fn lift_literal_to_tcx<'a, 'gcx>(
+    fn lift_literal_to_tcx(
         ex_clause: &chalk_engine::Literal<Self>,
-        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+        tcx: TyCtxt<'tcx>,
     ) -> Option<Self::LiftedLiteral>;
 }

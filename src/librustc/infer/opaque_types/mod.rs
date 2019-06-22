@@ -73,7 +73,7 @@ pub struct OpaqueTypeDecl<'tcx> {
     pub origin: hir::ExistTyOrigin,
 }
 
-impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     /// Replaces all opaque types in `value` with fresh inference variables
     /// and creates appropriate obligations. For example, given the input:
     ///
@@ -307,7 +307,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
 
             let required_region_bounds = tcx.required_region_bounds(
                 opaque_type,
-                bounds.predicates.clone(),
+                bounds.predicates,
             );
             debug_assert!(!required_region_bounds.is_empty());
 
@@ -430,8 +430,8 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         &self,
         def_id: DefId,
         opaque_defn: &OpaqueTypeDecl<'tcx>,
-        instantiated_ty: Ty<'gcx>,
-    ) -> Ty<'gcx> {
+        instantiated_ty: Ty<'tcx>,
+    ) -> Ty<'tcx> {
         debug!(
             "infer_opaque_definition_from_instantiation(def_id={:?}, instantiated_ty={:?})",
             def_id, instantiated_ty
@@ -446,7 +446,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         // `impl Trait` return type, resulting in the parameters
         // shifting.
         let id_substs = InternalSubsts::identity_for_item(gcx, def_id);
-        let map: FxHashMap<Kind<'tcx>, Kind<'gcx>> = opaque_defn
+        let map: FxHashMap<Kind<'tcx>, Kind<'tcx>> = opaque_defn
             .substs
             .iter()
             .enumerate()
@@ -469,11 +469,6 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             definition_ty
         );
 
-        // We can unwrap here because our reverse mapper always
-        // produces things with 'gcx lifetime, though the type folder
-        // obscures that.
-        let definition_ty = gcx.lift(&definition_ty).unwrap();
-
         definition_ty
     }
 }
@@ -491,14 +486,13 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
 //
 // We ignore any type parameters because impl trait values are assumed to
 // capture all the in-scope type parameters.
-struct OpaqueTypeOutlivesVisitor<'a, 'gcx, 'tcx> {
-    infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
+struct OpaqueTypeOutlivesVisitor<'a, 'tcx> {
+    infcx: &'a InferCtxt<'a, 'tcx>,
     least_region: ty::Region<'tcx>,
     span: Span,
 }
 
-impl<'tcx> TypeVisitor<'tcx> for OpaqueTypeOutlivesVisitor<'_, '_, 'tcx>
-{
+impl<'tcx> TypeVisitor<'tcx> for OpaqueTypeOutlivesVisitor<'_, 'tcx> {
     fn visit_binder<T: TypeFoldable<'tcx>>(&mut self, t: &ty::Binder<T>) -> bool {
         t.skip_binder().visit_with(self);
         false // keep visiting
@@ -552,27 +546,27 @@ impl<'tcx> TypeVisitor<'tcx> for OpaqueTypeOutlivesVisitor<'_, '_, 'tcx>
     }
 }
 
-struct ReverseMapper<'cx, 'gcx: 'tcx, 'tcx: 'cx> {
-    tcx: TyCtxt<'cx, 'gcx, 'tcx>,
+struct ReverseMapper<'tcx> {
+    tcx: TyCtxt<'tcx>,
 
     /// If errors have already been reported in this fn, we suppress
     /// our own errors because they are sometimes derivative.
     tainted_by_errors: bool,
 
     opaque_type_def_id: DefId,
-    map: FxHashMap<Kind<'tcx>, Kind<'gcx>>,
+    map: FxHashMap<Kind<'tcx>, Kind<'tcx>>,
     map_missing_regions_to_empty: bool,
 
     /// initially `Some`, set to `None` once error has been reported
     hidden_ty: Option<Ty<'tcx>>,
 }
 
-impl<'cx, 'gcx, 'tcx> ReverseMapper<'cx, 'gcx, 'tcx> {
+impl ReverseMapper<'tcx> {
     fn new(
-        tcx: TyCtxt<'cx, 'gcx, 'tcx>,
+        tcx: TyCtxt<'tcx>,
         tainted_by_errors: bool,
         opaque_type_def_id: DefId,
-        map: FxHashMap<Kind<'tcx>, Kind<'gcx>>,
+        map: FxHashMap<Kind<'tcx>, Kind<'tcx>>,
         hidden_ty: Ty<'tcx>,
     ) -> Self {
         Self {
@@ -599,8 +593,8 @@ impl<'cx, 'gcx, 'tcx> ReverseMapper<'cx, 'gcx, 'tcx> {
     }
 }
 
-impl<'cx, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for ReverseMapper<'cx, 'gcx, 'tcx> {
-    fn tcx(&self) -> TyCtxt<'_, 'gcx, 'tcx> {
+impl TypeFolder<'tcx> for ReverseMapper<'tcx> {
+    fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 
@@ -724,8 +718,8 @@ impl<'cx, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for ReverseMapper<'cx, 'gcx, 'tcx> 
     }
 }
 
-struct Instantiator<'a, 'gcx: 'tcx, 'tcx: 'a> {
-    infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
+struct Instantiator<'a, 'tcx> {
+    infcx: &'a InferCtxt<'a, 'tcx>,
     parent_def_id: DefId,
     body_id: hir::HirId,
     param_env: ty::ParamEnv<'tcx>,
@@ -733,7 +727,7 @@ struct Instantiator<'a, 'gcx: 'tcx, 'tcx: 'a> {
     obligations: Vec<PredicateObligation<'tcx>>,
 }
 
-impl<'a, 'gcx, 'tcx> Instantiator<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> Instantiator<'a, 'tcx> {
     fn instantiate_opaque_types_in_map<T: TypeFoldable<'tcx>>(&mut self, value: &T) -> T {
         debug!("instantiate_opaque_types_in_map(value={:?})", value);
         let tcx = self.infcx.tcx;
@@ -820,7 +814,7 @@ impl<'a, 'gcx, 'tcx> Instantiator<'a, 'gcx, 'tcx> {
                             },
                             _ => bug!(
                                 "expected (impl) item, found {}",
-                                tcx.hir().hir_to_string(opaque_hir_id),
+                                tcx.hir().node_to_string(opaque_hir_id),
                             ),
                         };
                         if in_definition_scope {
@@ -944,15 +938,15 @@ impl<'a, 'gcx, 'tcx> Instantiator<'a, 'gcx, 'tcx> {
 /// and `opaque_hir_id` is the `HirId` of the definition of the existential type `Baz`.
 /// For the above example, this function returns `true` for `f1` and `false` for `f2`.
 pub fn may_define_existential_type(
-    tcx: TyCtxt<'_, '_, '_>,
+    tcx: TyCtxt<'_>,
     def_id: DefId,
     opaque_hir_id: hir::HirId,
 ) -> bool {
     let mut hir_id = tcx.hir().as_local_hir_id(def_id).unwrap();
     trace!(
         "may_define_existential_type(def={:?}, opaque_node={:?})",
-        tcx.hir().get_by_hir_id(hir_id),
-        tcx.hir().get_by_hir_id(opaque_hir_id)
+        tcx.hir().get(hir_id),
+        tcx.hir().get(opaque_hir_id)
     );
 
     // Named existential types can be defined by any siblings or children of siblings.

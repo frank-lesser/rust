@@ -136,7 +136,7 @@ impl TargetDataLayout {
                     }
                     if bits >= i128_align_src && bits <= 128 {
                         // Default alignment for i128 is decided by taking the alignment of
-                        // largest-sized i{64...128}.
+                        // largest-sized i{64..=128}.
                         i128_align_src = bits;
                         dl.i128_align = a;
                     }
@@ -583,7 +583,7 @@ pub enum Primitive {
     Pointer
 }
 
-impl<'a, 'tcx> Primitive {
+impl Primitive {
     pub fn size<C: HasDataLayout>(self, cx: &C) -> Size {
         let dl = cx.data_layout();
 

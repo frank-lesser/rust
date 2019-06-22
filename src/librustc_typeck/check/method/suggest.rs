@@ -24,7 +24,7 @@ use std::cmp::Ordering;
 use super::{MethodError, NoMatchData, CandidateSource};
 use super::probe::Mode;
 
-impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn is_fn_ty(&self, ty: Ty<'tcx>, span: Span) -> bool {
         let tcx = self.tcx;
         match ty.sty {
@@ -69,7 +69,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         item_name: ast::Ident,
         source: SelfSource<'b>,
         error: MethodError<'tcx>,
-        args: Option<&'gcx [hir::Expr]>,
+        args: Option<&'tcx [hir::Expr]>,
     ) {
         let orig_span = span;
         let mut span = span;
@@ -264,11 +264,11 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                 // local binding
                                 if let &QPath::Resolved(_, ref path) = &qpath {
                                     if let hir::def::Res::Local(hir_id) = path.res {
-                                        let span = tcx.hir().span_by_hir_id(hir_id);
+                                        let span = tcx.hir().span(hir_id);
                                         let snippet = tcx.sess.source_map().span_to_snippet(span);
                                         let filename = tcx.sess.source_map().span_to_filename(span);
 
-                                        let parent_node = self.tcx.hir().get_by_hir_id(
+                                        let parent_node = self.tcx.hir().get(
                                             self.tcx.hir().get_parent_node_by_hir_id(hir_id),
                                         );
                                         let msg = format!(
@@ -370,7 +370,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         });
 
                     if let Some((field, field_ty)) = field_receiver {
-                        let scope = self.tcx.hir().get_module_parent_by_hir_id(self.body_id);
+                        let scope = self.tcx.hir().get_module_parent(self.body_id);
                         let is_accessible = field.vis.is_accessible_from(scope, self.tcx);
 
                         if is_accessible {
@@ -389,7 +389,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                     Applicability::MachineApplicable,
                                 );
                             } else {
-                                let call_expr = self.tcx.hir().expect_expr_by_hir_id(
+                                let call_expr = self.tcx.hir().expect_expr(
                                     self.tcx.hir().get_parent_node_by_hir_id(expr.hir_id),
                                 );
 
@@ -564,7 +564,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                               err: &mut DiagnosticBuilder<'_>,
                               mut msg: String,
                               candidates: Vec<DefId>) {
-        let module_did = self.tcx.hir().get_module_parent_by_hir_id(self.body_id);
+        let module_did = self.tcx.hir().get_module_parent(self.body_id);
         let module_id = self.tcx.hir().as_local_hir_id(module_did).unwrap();
         let krate = self.tcx.hir().krate();
         let (span, found_use) = UsePlacementFinder::check(self.tcx, krate, module_id);
@@ -775,19 +775,19 @@ impl Ord for TraitInfo {
 }
 
 /// Retrieves all traits in this crate and any dependent crates.
-pub fn all_traits<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Vec<TraitInfo> {
+pub fn all_traits<'tcx>(tcx: TyCtxt<'tcx>) -> Vec<TraitInfo> {
     tcx.all_traits(LOCAL_CRATE).iter().map(|&def_id| TraitInfo { def_id }).collect()
 }
 
 /// Computes all traits in this crate and any dependent crates.
-fn compute_all_traits<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Vec<DefId> {
+fn compute_all_traits<'tcx>(tcx: TyCtxt<'tcx>) -> Vec<DefId> {
     use hir::itemlikevisit;
 
     let mut traits = vec![];
 
     // Crate-local:
 
-    struct Visitor<'a, 'tcx: 'a> {
+    struct Visitor<'a, 'tcx> {
         map: &'a hir_map::Map<'tcx>,
         traits: &'a mut Vec<DefId>,
     }
@@ -817,10 +817,12 @@ fn compute_all_traits<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Vec<DefId>
     // Cross-crate:
 
     let mut external_mods = FxHashSet::default();
-    fn handle_external_res(tcx: TyCtxt<'_, '_, '_>,
-                           traits: &mut Vec<DefId>,
-                           external_mods: &mut FxHashSet<DefId>,
-                           res: Res) {
+    fn handle_external_res(
+        tcx: TyCtxt<'_>,
+        traits: &mut Vec<DefId>,
+        external_mods: &mut FxHashSet<DefId>,
+        res: Res,
+    ) {
         match res {
             Res::Def(DefKind::Trait, def_id) |
             Res::Def(DefKind::TraitAlias, def_id) => {
@@ -855,16 +857,16 @@ pub fn provide(providers: &mut ty::query::Providers<'_>) {
     }
 }
 
-struct UsePlacementFinder<'a, 'tcx: 'a, 'gcx: 'tcx> {
+struct UsePlacementFinder<'tcx> {
     target_module: hir::HirId,
     span: Option<Span>,
     found_use: bool,
-    tcx: TyCtxt<'a, 'gcx, 'tcx>
+    tcx: TyCtxt<'tcx>,
 }
 
-impl<'a, 'tcx, 'gcx> UsePlacementFinder<'a, 'tcx, 'gcx> {
+impl UsePlacementFinder<'tcx> {
     fn check(
-        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+        tcx: TyCtxt<'tcx>,
         krate: &'tcx hir::Crate,
         target_module: hir::HirId,
     ) -> (Option<Span>, bool) {
@@ -879,7 +881,7 @@ impl<'a, 'tcx, 'gcx> UsePlacementFinder<'a, 'tcx, 'gcx> {
     }
 }
 
-impl<'a, 'tcx, 'gcx> hir::intravisit::Visitor<'tcx> for UsePlacementFinder<'a, 'tcx, 'gcx> {
+impl hir::intravisit::Visitor<'tcx> for UsePlacementFinder<'tcx> {
     fn visit_mod(
         &mut self,
         module: &'tcx hir::Mod,
@@ -895,7 +897,7 @@ impl<'a, 'tcx, 'gcx> hir::intravisit::Visitor<'tcx> for UsePlacementFinder<'a, '
         }
         // Find a `use` statement.
         for item_id in &module.item_ids {
-            let item = self.tcx.hir().expect_item_by_hir_id(item_id.id);
+            let item = self.tcx.hir().expect_item(item_id.id);
             match item.node {
                 hir::ItemKind::Use(..) => {
                     // Don't suggest placing a `use` before the prelude

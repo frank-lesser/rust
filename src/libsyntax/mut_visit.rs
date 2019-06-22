@@ -568,8 +568,9 @@ pub fn noop_visit_meta_item<T: MutVisitor>(mi: &mut MetaItem, vis: &mut T) {
     vis.visit_span(span);
 }
 
-pub fn noop_visit_arg<T: MutVisitor>(Arg { id, pat, ty }: &mut Arg, vis: &mut T) {
+pub fn noop_visit_arg<T: MutVisitor>(Arg { attrs, id, pat, ty }: &mut Arg, vis: &mut T) {
     vis.visit_id(id);
+    visit_thin_attrs(attrs, vis);
     vis.visit_pat(pat);
     vis.visit_ty(ty);
 }
@@ -749,8 +750,7 @@ pub fn noop_visit_generics<T: MutVisitor>(generics: &mut Generics, vis: &mut T) 
 }
 
 pub fn noop_visit_where_clause<T: MutVisitor>(wc: &mut WhereClause, vis: &mut T) {
-    let WhereClause { id, predicates, span } = wc;
-    vis.visit_id(id);
+    let WhereClause { predicates, span } = wc;
     visit_vec(predicates, |predicate| vis.visit_where_predicate(predicate));
     vis.visit_span(span);
 }
@@ -1101,7 +1101,6 @@ pub fn noop_visit_expr<T: MutVisitor>(Expr { node, id, span, attrs }: &mut Expr,
             vis.visit_expr(rhs);
         }
         ExprKind::Unary(_unop, ohs) => vis.visit_expr(ohs),
-        ExprKind::Lit(_lit) => {}
         ExprKind::Cast(expr, ty) => {
             vis.visit_expr(expr);
             vis.visit_ty(ty);
@@ -1225,7 +1224,7 @@ pub fn noop_visit_expr<T: MutVisitor>(Expr { node, id, span, attrs }: &mut Expr,
         }
         ExprKind::Try(expr) => vis.visit_expr(expr),
         ExprKind::TryBlock(body) => vis.visit_block(body),
-        ExprKind::Err => {}
+        ExprKind::Lit(_) | ExprKind::Err => {}
     }
     vis.visit_id(id);
     vis.visit_span(span);

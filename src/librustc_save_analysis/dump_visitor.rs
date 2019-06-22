@@ -75,9 +75,9 @@ macro_rules! access_from_vis {
     };
 }
 
-pub struct DumpVisitor<'l, 'tcx: 'l, 'll, O: DumpOutput> {
+pub struct DumpVisitor<'l, 'tcx, 'll, O: DumpOutput> {
     save_ctxt: SaveContext<'l, 'tcx>,
-    tcx: TyCtxt<'l, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     dumper: &'ll mut JsonDumper<O>,
 
     span: SpanUtils<'l>,
@@ -92,7 +92,7 @@ pub struct DumpVisitor<'l, 'tcx: 'l, 'll, O: DumpOutput> {
     // macro_calls: FxHashSet<Span>,
 }
 
-impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
+impl<'l, 'tcx, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
     pub fn new(
         save_ctxt: SaveContext<'l, 'tcx>,
         dumper: &'ll mut JsonDumper<O>,
@@ -1311,7 +1311,7 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> DumpVisitor<'l, 'tcx, 'll, O> {
     }
 }
 
-impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> Visitor<'l> for DumpVisitor<'l, 'tcx, 'll, O> {
+impl<'l, 'tcx, 'll, O: DumpOutput + 'll> Visitor<'l> for DumpVisitor<'l, 'tcx, 'll, O> {
     fn visit_mod(&mut self, m: &'l ast::Mod, span: Span, attrs: &[ast::Attribute], id: NodeId) {
         // Since we handle explicit modules ourselves in visit_item, this should
         // only get called for the root module of a crate.
@@ -1531,7 +1531,8 @@ impl<'l, 'tcx: 'l, 'll, O: DumpOutput + 'll> Visitor<'l> for DumpVisitor<'l, 'tc
         self.process_macro_use(ex.span);
         match ex.node {
             ast::ExprKind::Struct(ref path, ref fields, ref base) => {
-                let hir_expr = self.save_ctxt.tcx.hir().expect_expr(ex.id);
+                let expr_hir_id = self.save_ctxt.tcx.hir().node_to_hir_id(ex.id);
+                let hir_expr = self.save_ctxt.tcx.hir().expect_expr(expr_hir_id);
                 let adt = match self.save_ctxt.tables.expr_ty_opt(&hir_expr) {
                     Some(ty) if ty.ty_adt_def().is_some() => ty.ty_adt_def().unwrap(),
                     _ => {

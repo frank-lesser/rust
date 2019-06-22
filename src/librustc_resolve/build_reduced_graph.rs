@@ -305,7 +305,7 @@ impl<'a> Resolver<'a> {
                 }
 
                 // Empty groups `a::b::{}` are turned into synthetic `self` imports
-                // `a::b::c::{self as __dummy}`, so that their prefixes are correctly
+                // `a::b::c::{self as _}`, so that their prefixes are correctly
                 // resolved and checked for privacy/stability/etc.
                 if items.is_empty() && !empty_for_self(&prefix) {
                     let new_span = prefix[prefix.len() - 1].ident.span;
@@ -314,7 +314,7 @@ impl<'a> Resolver<'a> {
                             Ident::new(kw::SelfLower, new_span)
                         ),
                         kind: ast::UseTreeKind::Simple(
-                            Some(Ident::from_str_and_span("__dummy", new_span).gensym()),
+                            Some(Ident::new(kw::Underscore, new_span)),
                             ast::DUMMY_NODE_ID,
                             ast::DUMMY_NODE_ID,
                         ),
@@ -772,9 +772,8 @@ impl<'a> Resolver<'a> {
     pub fn get_macro(&mut self, res: Res) -> Lrc<SyntaxExtension> {
         let def_id = match res {
             Res::Def(DefKind::Macro(..), def_id) => def_id,
-            Res::NonMacroAttr(attr_kind) => return Lrc::new(SyntaxExtension::NonMacroAttr {
-                mark_used: attr_kind == NonMacroAttrKind::Tool,
-            }),
+            Res::NonMacroAttr(attr_kind) =>
+                return self.non_macro_attr(attr_kind == NonMacroAttrKind::Tool),
             _ => panic!("expected `DefKind::Macro` or `Res::NonMacroAttr`"),
         };
         if let Some(ext) = self.macro_map.get(&def_id) {
@@ -930,7 +929,7 @@ impl<'a> Resolver<'a> {
     }
 }
 
-pub struct BuildReducedGraphVisitor<'a, 'b: 'a> {
+pub struct BuildReducedGraphVisitor<'a, 'b> {
     pub resolver: &'a mut Resolver<'b>,
     pub current_legacy_scope: LegacyScope<'b>,
     pub expansion: Mark,

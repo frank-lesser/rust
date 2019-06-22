@@ -1,4 +1,4 @@
-use crate::parse::token::{self, TokenKind, BinOpToken};
+use crate::parse::token::{self, Token, BinOpToken};
 use crate::symbol::kw;
 use crate::ast::{self, BinOpKind};
 
@@ -69,9 +69,9 @@ pub enum Fixity {
 
 impl AssocOp {
     /// Creates a new AssocOP from a token
-    pub fn from_token(t: &TokenKind) -> Option<AssocOp> {
+    pub fn from_token(t: &Token) -> Option<AssocOp> {
         use AssocOp::*;
-        match *t {
+        match t.kind {
             token::BinOpEq(k) => Some(AssignOp(k)),
             token::Eq => Some(Assign),
             token::BinOp(BinOpToken::Star) => Some(Multiply),
@@ -234,7 +234,7 @@ pub const PREC_RESET: i8 = -100;
 pub const PREC_CLOSURE: i8 = -40;
 pub const PREC_JUMP: i8 = -30;
 pub const PREC_RANGE: i8 = -10;
-// The range 2 ... 14 is reserved for AssocOp binary operator precedences.
+// The range 2..=14 is reserved for AssocOp binary operator precedences.
 pub const PREC_PREFIX: i8 = 50;
 pub const PREC_POSTFIX: i8 = 60;
 pub const PREC_PAREN: i8 = 99;

@@ -1658,6 +1658,23 @@ fn test_range_nth() {
 }
 
 #[test]
+fn test_range_nth_back() {
+    assert_eq!((10..15).nth_back(0), Some(14));
+    assert_eq!((10..15).nth_back(1), Some(13));
+    assert_eq!((10..15).nth_back(4), Some(10));
+    assert_eq!((10..15).nth_back(5), None);
+    assert_eq!((-120..80_i8).nth_back(199), Some(-120));
+
+    let mut r = 10..20;
+    assert_eq!(r.nth_back(2), Some(17));
+    assert_eq!(r, 10..17);
+    assert_eq!(r.nth_back(2), Some(14));
+    assert_eq!(r, 10..14);
+    assert_eq!(r.nth_back(10), None);
+    assert_eq!(r, 10..10);
+}
+
+#[test]
 fn test_range_from_nth() {
     assert_eq!((10..).nth(0), Some(10));
     assert_eq!((10..).nth(1), Some(11));
@@ -1710,6 +1727,26 @@ fn test_range_inclusive_nth() {
     assert_eq!(r.is_empty(), false);
     assert_eq!(ExactSizeIterator::is_empty(&r), false);
     assert_eq!(r.nth(10), None);
+    assert_eq!(r.is_empty(), true);
+    assert_eq!(ExactSizeIterator::is_empty(&r), true);
+}
+
+#[test]
+fn test_range_inclusive_nth_back() {
+    assert_eq!((10..=15).nth_back(0), Some(15));
+    assert_eq!((10..=15).nth_back(1), Some(14));
+    assert_eq!((10..=15).nth_back(5), Some(10));
+    assert_eq!((10..=15).nth_back(6), None);
+    assert_eq!((-120..=80_i8).nth_back(200), Some(-120));
+
+    let mut r = 10_u8..=20;
+    assert_eq!(r.nth_back(2), Some(18));
+    assert_eq!(r, 10..=17);
+    assert_eq!(r.nth_back(2), Some(15));
+    assert_eq!(r, 10..=14);
+    assert_eq!(r.is_empty(), false);
+    assert_eq!(ExactSizeIterator::is_empty(&r), false);
+    assert_eq!(r.nth_back(10), None);
     assert_eq!(r.is_empty(), true);
     assert_eq!(ExactSizeIterator::is_empty(&r), true);
 }
@@ -2294,6 +2331,40 @@ fn test_skip_try_folds() {
     assert_eq!(iter.next(), Some(20));
     assert_eq!(iter.try_rfold(0, i8::checked_add), None);
     assert_eq!(iter.next_back(), Some(24));
+}
+
+#[test]
+fn test_skip_nth_back() {
+    let xs = [0, 1, 2, 3, 4, 5];
+    let mut it = xs.iter().skip(2);
+    assert_eq!(it.nth_back(0), Some(&5));
+    assert_eq!(it.nth_back(1), Some(&3));
+    assert_eq!(it.nth_back(0), Some(&2));
+    assert_eq!(it.nth_back(0), None);
+
+    let ys = [2, 3, 4, 5];
+    let mut ity = ys.iter();
+    let mut it = xs.iter().skip(2);
+    assert_eq!(it.nth_back(1), ity.nth_back(1));
+    assert_eq!(it.clone().nth(0), ity.clone().nth(0));
+    assert_eq!(it.nth_back(0), ity.nth_back(0));
+    assert_eq!(it.clone().nth(0), ity.clone().nth(0));
+    assert_eq!(it.nth_back(0), ity.nth_back(0));
+    assert_eq!(it.clone().nth(0), ity.clone().nth(0));
+    assert_eq!(it.nth_back(0), ity.nth_back(0));
+    assert_eq!(it.clone().nth(0), ity.clone().nth(0));
+
+    let mut it = xs.iter().skip(2);
+    assert_eq!(it.nth_back(4), None);
+    assert_eq!(it.nth_back(0), None);
+
+    let mut it = xs.iter();
+    it.by_ref().skip(2).nth_back(3);
+    assert_eq!(it.next_back(), Some(&1));
+
+    let mut it = xs.iter();
+    it.by_ref().skip(2).nth_back(10);
+    assert_eq!(it.next_back(), Some(&1));
 }
 
 #[test]

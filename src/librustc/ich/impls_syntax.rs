@@ -170,14 +170,14 @@ impl_stable_hash_for!(struct ::syntax::ast::Lit {
 
 impl_stable_hash_for!(enum ::syntax::ast::LitKind {
     Str(value, style),
-    Err(value),
     ByteStr(value),
     Byte(value),
     Char(value),
     Int(value, lit_int_type),
     Float(value, float_ty),
     FloatUnsuffixed(value),
-    Bool(value)
+    Bool(value),
+    Err(value)
 });
 
 impl_stable_hash_for_spanned!(::syntax::ast::LitKind);
@@ -391,10 +391,17 @@ impl_stable_hash_for!(enum ::syntax::ast::MetaItemKind {
     NameValue(lit)
 });
 
+impl_stable_hash_for!(enum ::syntax_pos::hygiene::Transparency {
+    Transparent,
+    SemiTransparent,
+    Opaque,
+});
+
 impl_stable_hash_for!(struct ::syntax_pos::hygiene::ExpnInfo {
     call_site,
-    def_site,
     format,
+    def_site,
+    default_transparency,
     allow_internal_unstable,
     allow_internal_unsafe,
     local_inner_macros,
@@ -506,12 +513,12 @@ fn stable_non_narrow_char(swc: ::syntax_pos::NonNarrowChar,
     (pos.0 - source_file_start.0, width as u32)
 }
 
-
-
-impl<'gcx> HashStable<StableHashingContext<'gcx>> for feature_gate::Features {
-    fn hash_stable<W: StableHasherResult>(&self,
-                                          hcx: &mut StableHashingContext<'gcx>,
-                                          hasher: &mut StableHasher<W>) {
+impl<'tcx> HashStable<StableHashingContext<'tcx>> for feature_gate::Features {
+    fn hash_stable<W: StableHasherResult>(
+        &self,
+        hcx: &mut StableHashingContext<'tcx>,
+        hasher: &mut StableHasher<W>,
+    ) {
         // Unfortunately we cannot exhaustively list fields here, since the
         // struct is macro generated.
         self.declared_lang_features.hash_stable(hcx, hasher);

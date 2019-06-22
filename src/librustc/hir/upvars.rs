@@ -14,8 +14,8 @@ pub fn provide(providers: &mut Providers<'_>) {
             return None;
         }
 
-        let node_id = tcx.hir().as_local_node_id(def_id).unwrap();
-        let body = tcx.hir().body(tcx.hir().maybe_body_owned_by(node_id)?);
+        let hir_id = tcx.hir().as_local_hir_id(def_id).unwrap();
+        let body = tcx.hir().body(tcx.hir().maybe_body_owned_by(hir_id)?);
 
         let mut local_collector = LocalCollector::default();
         local_collector.visit_body(body);
@@ -55,7 +55,7 @@ impl Visitor<'tcx> for LocalCollector {
 }
 
 struct CaptureCollector<'a, 'tcx> {
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     locals: &'a FxHashSet<HirId>,
     upvars: FxIndexMap<HirId, hir::Upvar>,
 }

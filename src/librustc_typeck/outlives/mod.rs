@@ -20,8 +20,8 @@ pub fn provide(providers: &mut Providers<'_>) {
     };
 }
 
-fn inferred_outlives_of<'a, 'tcx>(
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+fn inferred_outlives_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
     item_def_id: DefId,
 ) -> &'tcx [ty::Predicate<'tcx>] {
     let id = tcx
@@ -29,7 +29,7 @@ fn inferred_outlives_of<'a, 'tcx>(
         .as_local_hir_id(item_def_id)
         .expect("expected local def-id");
 
-    match tcx.hir().get_by_hir_id(id) {
+    match tcx.hir().get(id) {
         Node::Item(item) => match item.node {
             hir::ItemKind::Struct(..) | hir::ItemKind::Enum(..) | hir::ItemKind::Union(..) => {
                 let crate_map = tcx.inferred_outlives_crate(LOCAL_CRATE);
@@ -71,7 +71,7 @@ fn inferred_outlives_of<'a, 'tcx>(
 }
 
 fn inferred_outlives_crate<'tcx>(
-    tcx: TyCtxt<'_, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     crate_num: CrateNum,
 ) -> &'tcx CratePredicatesMap<'tcx> {
     assert_eq!(crate_num, LOCAL_CRATE);

@@ -11,6 +11,12 @@ steps:
 - checkout: self
   fetchDepth: 2
 
+# Spawn a background process to collect CPU usage statistics which we'll upload
+# at the end of the build. See the comments in the script here for more
+# information.
+- bash: python src/ci/cpu-usage-over-time.py &> cpu-usage.csv &
+  displayName: "Collect CPU-usage statistics in the background"
+
 - bash: printenv | sort
   displayName: Show environment variables
 
@@ -31,7 +37,8 @@ steps:
     set -e
     brew update
     brew install xz
-    brew install swig
+    brew install swig@3
+    brew link --force swig@3
   displayName: Install build dependencies (OSX)
   condition: and(succeeded(), eq(variables['Agent.OS'], 'Darwin'), eq(variables['SCRIPT'],'./x.py dist'))
 
@@ -74,8 +81,9 @@ steps:
 # images, etc.
 - bash: |
     set -e
+    source src/ci/shared.sh
     sudo apt-get install -y python3-setuptools
-    pip3 install awscli --upgrade --user
+    retry pip3 install awscli --upgrade --user
     echo "##vso[task.prependpath]$HOME/.local/bin"
   displayName: Install awscli (Linux)
   condition: and(succeeded(), eq(variables['Agent.OS'], 'Linux'))
@@ -117,6 +125,7 @@ steps:
     CI: true
     SRC: .
     AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+    TOOLSTATE_REPO_ACCESS_TOKEN: $(TOOLSTATE_REPO_ACCESS_TOKEN)
   displayName: Run build
 
 # If we're a deploy builder, use the `aws` command to publish everything to our
@@ -141,3 +150,13 @@ steps:
     AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
   condition: and(succeeded(), or(eq(variables.DEPLOY, '1'), eq(variables.DEPLOY_ALT, '1')))
   displayName: Upload artifacts
+
+# Upload CPU usage statistics that we've been gathering this whole time. Always
+# execute this step in case we want to inspect failed builds, but don't let
+# errors here ever fail the build since this is just informational.
+- bash: aws s3 cp --acl public-read cpu-usage.csv s3://$DEPLOY_BUCKET/rustc-builds/$BUILD_SOURCEVERSION/cpu-$SYSTEM_JOBNAME.csv
+  env:
+    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+  condition: variables['AWS_SECRET_ACCESS_KEY']
+  continueOnError: true
+  displayName: Upload CPU usage statistics

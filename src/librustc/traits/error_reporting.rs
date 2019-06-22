@@ -38,7 +38,7 @@ use syntax::ast;
 use syntax::symbol::sym;
 use syntax_pos::{DUMMY_SP, Span, ExpnInfo, ExpnFormat};
 
-impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     pub fn report_fulfillment_errors(&self,
                                      errors: &[FulfillmentError<'tcx>],
                                      body_id: Option<hir::BodyId>,
@@ -353,7 +353,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             _ => {
                 // this is a "direct", user-specified, rather than derived,
                 // obligation.
-                flags.push(("direct".to_owned(), None));
+                flags.push((sym::direct, None));
             }
         }
 
@@ -365,27 +365,27 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             // Currently I'm leaving it for what I need for `try`.
             if self.tcx.trait_of_item(item) == Some(trait_ref.def_id) {
                 let method = self.tcx.item_name(item);
-                flags.push(("from_method".to_owned(), None));
-                flags.push(("from_method".to_owned(), Some(method.to_string())));
+                flags.push((sym::from_method, None));
+                flags.push((sym::from_method, Some(method.to_string())));
             }
         }
         if let Some(t) = self.get_parent_trait_ref(&obligation.cause.code) {
-            flags.push(("parent_trait".to_owned(), Some(t)));
+            flags.push((sym::parent_trait, Some(t)));
         }
 
         if let Some(k) = obligation.cause.span.compiler_desugaring_kind() {
-            flags.push(("from_desugaring".to_owned(), None));
-            flags.push(("from_desugaring".to_owned(), Some(k.name().to_string())));
+            flags.push((sym::from_desugaring, None));
+            flags.push((sym::from_desugaring, Some(k.name().to_string())));
         }
         let generics = self.tcx.generics_of(def_id);
         let self_ty = trait_ref.self_ty();
         // This is also included through the generics list as `Self`,
         // but the parser won't allow you to use it
-        flags.push(("_Self".to_owned(), Some(self_ty.to_string())));
+        flags.push((sym::_Self, Some(self_ty.to_string())));
         if let Some(def) = self_ty.ty_adt_def() {
             // We also want to be able to select self's original
             // signature with no type arguments resolved
-            flags.push(("_Self".to_owned(), Some(self.tcx.type_of(def.did).to_string())));
+            flags.push((sym::_Self, Some(self.tcx.type_of(def.did).to_string())));
         }
 
         for param in generics.params.iter() {
@@ -396,38 +396,38 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 },
                 GenericParamDefKind::Lifetime => continue,
             };
-            let name = param.name.to_string();
+            let name = param.name.as_symbol();
             flags.push((name, Some(value)));
         }
 
         if let Some(true) = self_ty.ty_adt_def().map(|def| def.did.is_local()) {
-            flags.push(("crate_local".to_owned(), None));
+            flags.push((sym::crate_local, None));
         }
 
         // Allow targeting all integers using `{integral}`, even if the exact type was resolved
         if self_ty.is_integral() {
-            flags.push(("_Self".to_owned(), Some("{integral}".to_owned())));
+            flags.push((sym::_Self, Some("{integral}".to_owned())));
         }
 
         if let ty::Array(aty, len) = self_ty.sty {
-            flags.push(("_Self".to_owned(), Some("[]".to_owned())));
-            flags.push(("_Self".to_owned(), Some(format!("[{}]", aty))));
+            flags.push((sym::_Self, Some("[]".to_owned())));
+            flags.push((sym::_Self, Some(format!("[{}]", aty))));
             if let Some(def) = aty.ty_adt_def() {
                 // We also want to be able to select the array's type's original
                 // signature with no type arguments resolved
                 flags.push((
-                    "_Self".to_owned(),
+                    sym::_Self,
                     Some(format!("[{}]", self.tcx.type_of(def.did).to_string())),
                 ));
                 let tcx = self.tcx;
                 if let Some(len) = len.assert_usize(tcx) {
                     flags.push((
-                        "_Self".to_owned(),
+                        sym::_Self,
                         Some(format!("[{}; {}]", self.tcx.type_of(def.did).to_string(), len)),
                     ));
                 } else {
                     flags.push((
-                        "_Self".to_owned(),
+                        sym::_Self,
                         Some(format!("[{}; _]", self.tcx.type_of(def.did).to_string())),
                     ));
                 }
@@ -937,9 +937,9 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         code: &ObligationCauseCode<'tcx>,
         err: &mut DiagnosticBuilder<'tcx>,
     ) {
-        if let &ObligationCauseCode::VariableType(node_id) = code {
-            let parent_node = self.tcx.hir().get_parent_node(node_id);
-            if let Some(Node::Local(ref local)) = self.tcx.hir().find(parent_node) {
+        if let &ObligationCauseCode::VariableType(hir_id) = code {
+            let parent_node = self.tcx.hir().get_parent_node_by_hir_id(hir_id);
+            if let Some(Node::Local(ref local)) = self.tcx.hir().find_by_hir_id(parent_node) {
                 if let Some(ref expr) = local.init {
                     if let hir::ExprKind::Index(_, _) = expr.node {
                         if let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(expr.span) {
@@ -1013,10 +1013,8 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         trait_ref: &ty::Binder<ty::TraitRef<'tcx>>,
     ) {
         let hir = self.tcx.hir();
-        let parent_node = hir.get_parent_node(
-            hir.hir_to_node_id(obligation.cause.body_id),
-        );
-        let node = hir.find(parent_node);
+        let parent_node = hir.get_parent_node_by_hir_id(obligation.cause.body_id);
+        let node = hir.find_by_hir_id(parent_node);
         if let Some(hir::Node::Item(hir::Item {
             node: hir::ItemKind::Fn(decl, _, _, body_id),
             ..
@@ -1052,10 +1050,10 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 (self.tcx.sess.source_map().def_span(span), self.tcx.hir().body(id).arguments.iter()
                     .map(|arg| {
                         if let hir::Pat {
-                            node: hir::PatKind::Tuple(args, _),
+                            node: hir::PatKind::Tuple(ref args, _),
                             span,
                             ..
-                        } = arg.pat.clone().into_inner() {
+                        } = *arg.pat {
                             ArgKind::Tuple(
                                 Some(span),
                                 args.iter().map(|pat| {
@@ -1098,7 +1096,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             }
             Node::Ctor(ref variant_data) => {
                 let span = variant_data.ctor_hir_id()
-                    .map(|hir_id| self.tcx.hir().span_by_hir_id(hir_id))
+                    .map(|hir_id| self.tcx.hir().span(hir_id))
                     .unwrap_or(DUMMY_SP);
                 let span = self.tcx.sess.source_map().def_span(span);
 
@@ -1242,15 +1240,14 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         err
     }
 
-    fn report_closure_arg_mismatch(&self,
-                           span: Span,
-                           found_span: Option<Span>,
-                           expected_ref: ty::PolyTraitRef<'tcx>,
-                           found: ty::PolyTraitRef<'tcx>)
-        -> DiagnosticBuilder<'tcx>
-    {
-        fn build_fn_sig_string<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                                               trait_ref: &ty::TraitRef<'tcx>) -> String {
+    fn report_closure_arg_mismatch(
+        &self,
+        span: Span,
+        found_span: Option<Span>,
+        expected_ref: ty::PolyTraitRef<'tcx>,
+        found: ty::PolyTraitRef<'tcx>,
+    ) -> DiagnosticBuilder<'tcx> {
+        fn build_fn_sig_string<'tcx>(tcx: TyCtxt<'tcx>, trait_ref: &ty::TraitRef<'tcx>) -> String {
             let inputs = trait_ref.substs.type_at(1);
             let sig = if let ty::Tuple(inputs) = inputs.sty {
                 tcx.mk_fn_sig(
@@ -1294,7 +1291,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
+impl<'tcx> TyCtxt<'tcx> {
     pub fn recursive_type_with_infinite_size_error(self,
                                                    type_def_id: DefId)
                                                    -> DiagnosticBuilder<'tcx>
@@ -1340,7 +1337,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     fn maybe_report_ambiguity(&self, obligation: &PredicateObligation<'tcx>,
                               body_id: Option<hir::BodyId>) {
         // Unable to successfully determine, probably means
@@ -1447,17 +1444,18 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
 
     /// Returns `true` if the trait predicate may apply for *some* assignment
     /// to the type parameters.
-    fn predicate_can_apply(&self,
-                           param_env: ty::ParamEnv<'tcx>,
-                           pred: ty::PolyTraitRef<'tcx>)
-                           -> bool {
-        struct ParamToVarFolder<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
-            infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
-            var_map: FxHashMap<Ty<'tcx>, Ty<'tcx>>
+    fn predicate_can_apply(
+        &self,
+        param_env: ty::ParamEnv<'tcx>,
+        pred: ty::PolyTraitRef<'tcx>,
+    ) -> bool {
+        struct ParamToVarFolder<'a, 'tcx> {
+            infcx: &'a InferCtxt<'a, 'tcx>,
+            var_map: FxHashMap<Ty<'tcx>, Ty<'tcx>>,
         }
 
-        impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for ParamToVarFolder<'a, 'gcx, 'tcx> {
-            fn tcx<'b>(&'b self) -> TyCtxt<'b, 'gcx, 'tcx> { self.infcx.tcx }
+        impl<'a, 'tcx> TypeFolder<'tcx> for ParamToVarFolder<'a, 'tcx> {
+            fn tcx<'b>(&'b self) -> TyCtxt<'tcx> { self.infcx.tcx }
 
             fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
                 if let ty::Param(ty::ParamTy {name, .. }) = ty.sty {

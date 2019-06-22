@@ -1,12 +1,17 @@
+//! Diagnostics creation and emission for `rustc`.
+//!
+//! This module contains the code for creating and emitting diagnostics.
+
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 
-#![feature(custom_attribute)]
+#![feature(crate_visibility_modifier)]
 #![allow(unused_attributes)]
 #![cfg_attr(unix, feature(libc))]
 #![feature(nll)]
 #![feature(optin_builtin_traits)]
 #![deny(rust_2018_idioms)]
 #![deny(internal)]
+#![deny(unused_lifetimes)]
 
 #[allow(unused_extern_crates)]
 extern crate serialize as rustc_serialize; // used by deriving

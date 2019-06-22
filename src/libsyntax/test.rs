@@ -280,15 +280,10 @@ fn generate_test_harness(sess: &ParseSess,
         test_runner
     };
 
-    mark.set_expn_info(ExpnInfo {
-        call_site: DUMMY_SP,
-        def_site: None,
-        format: MacroAttribute(sym::test_case),
-        allow_internal_unstable: Some(vec![sym::main, sym::test, sym::rustc_attrs].into()),
-        allow_internal_unsafe: false,
-        local_inner_macros: false,
-        edition: sess.edition,
-    });
+    mark.set_expn_info(ExpnInfo::with_unstable(
+        MacroAttribute(sym::test_case), DUMMY_SP, sess.edition,
+        &[sym::main, sym::test, sym::rustc_attrs],
+    ));
 
     TestHarnessGenerator {
         cx,
@@ -327,7 +322,7 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
     //        }
     let sp = ignored_span(cx, DUMMY_SP);
     let ecx = &cx.ext_cx;
-    let test_id = ecx.ident_of("test").gensym();
+    let test_id = Ident::with_empty_ctxt(sym::test);
 
     // test::test_main_static(...)
     let mut test_runner = cx.test_runner.clone().unwrap_or(
@@ -350,7 +345,7 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
     let test_extern_stmt = ecx.stmt_item(sp, ecx.item(sp,
         test_id,
         vec![],
-        ast::ItemKind::ExternCrate(Some(sym::test))
+        ast::ItemKind::ExternCrate(None)
     ));
 
     // pub fn main() { ... }

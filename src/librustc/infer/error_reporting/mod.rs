@@ -67,7 +67,7 @@ mod need_type_info;
 
 pub mod nice_region_error;
 
-impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
+impl<'tcx> TyCtxt<'tcx> {
     pub fn note_and_explain_region(
         self,
         region_scope_tree: &region::ScopeTree,
@@ -86,7 +86,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                     )
                 };
                 let span = scope.span(self, region_scope_tree);
-                let tag = match self.hir().find(scope.node_id(self, region_scope_tree)) {
+                let tag = match self.hir().find_by_hir_id(scope.hir_id(region_scope_tree)) {
                     Some(Node::Block(_)) => "block",
                     Some(Node::Expr(expr)) => match expr.node {
                         hir::ExprKind::Call(..) => "call",
@@ -191,7 +191,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         };
         let (prefix, span) = match *region {
             ty::ReEarlyBound(ref br) => {
-                let mut sp = cm.def_span(self.hir().span_by_hir_id(node));
+                let mut sp = cm.def_span(self.hir().span(node));
                 if let Some(param) = self.hir()
                     .get_generics(scope)
                     .and_then(|generics| generics.get_named(br.name))
@@ -204,7 +204,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 bound_region: ty::BoundRegion::BrNamed(_, name),
                 ..
             }) => {
-                let mut sp = cm.def_span(self.hir().span_by_hir_id(node));
+                let mut sp = cm.def_span(self.hir().span(node));
                 if let Some(param) = self.hir()
                     .get_generics(scope)
                     .and_then(|generics| generics.get_named(name))
@@ -216,11 +216,11 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             ty::ReFree(ref fr) => match fr.bound_region {
                 ty::BrAnon(idx) => (
                     format!("the anonymous lifetime #{} defined on", idx + 1),
-                    self.hir().span_by_hir_id(node),
+                    self.hir().span(node),
                 ),
                 _ => (
                     format!("the lifetime {} as defined on", region),
-                    cm.def_span(self.hir().span_by_hir_id(node)),
+                    cm.def_span(self.hir().span(node)),
                 ),
             },
             _ => bug!(),
@@ -282,7 +282,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     pub fn report_region_errors(
         &self,
         region_scope_tree: &region::ScopeTree,
@@ -445,13 +445,13 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         use ty::print::Printer;
         use ty::subst::Kind;
 
-        struct AbsolutePathPrinter<'a, 'gcx, 'tcx> {
-            tcx: TyCtxt<'a, 'gcx, 'tcx>,
+        struct AbsolutePathPrinter<'tcx> {
+            tcx: TyCtxt<'tcx>,
         }
 
         struct NonTrivialPath;
 
-        impl<'gcx, 'tcx> Printer<'gcx, 'tcx> for AbsolutePathPrinter<'_, 'gcx, 'tcx> {
+        impl<'tcx> Printer<'tcx> for AbsolutePathPrinter<'tcx> {
             type Error = NonTrivialPath;
 
             type Path = Vec<String>;
@@ -460,7 +460,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             type DynExistential = !;
             type Const = !;
 
-            fn tcx<'a>(&'a self) -> TyCtxt<'a, 'gcx, 'tcx> {
+            fn tcx<'a>(&'a self) -> TyCtxt<'tcx> {
                 self.tcx
             }
 
@@ -617,7 +617,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 }
                 hir::MatchSource::TryDesugar => {
                     if let Some(ty::error::ExpectedFound { expected, .. }) = exp_found {
-                        let discrim_expr = self.tcx.hir().expect_expr_by_hir_id(discrim_hir_id);
+                        let discrim_expr = self.tcx.hir().expect_expr(discrim_hir_id);
                         let discrim_ty = if let hir::ExprKind::Call(_, args) = &discrim_expr.node {
                             let arg_expr = args.first().expect("try desugaring call w/out arg");
                             self.in_progress_tables.and_then(|tables| {
@@ -1330,7 +1330,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                     if !param.is_self() {
                         let type_param = generics.type_param(param, self.tcx);
                         let hir = &self.tcx.hir();
-                        hir.as_local_node_id(type_param.def_id).map(|id| {
+                        hir.as_local_hir_id(type_param.def_id).map(|id| {
                             // Get the `hir::Param` to verify whether it already has any bounds.
                             // We do this to avoid suggesting code that ends up as `T: 'a'b`,
                             // instead we suggest `T: 'a + 'b` in that case.
@@ -1546,7 +1546,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     fn report_inference_failure(
         &self,
         var_origin: RegionVariableOrigin,
@@ -1583,7 +1583,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 format!(" for lifetime parameter `{}` in coherence check", name)
             }
             infer::UpvarRegion(ref upvar_id, _) => {
-                let var_name = self.tcx.hir().name_by_hir_id(upvar_id.var_path.hir_id);
+                let var_name = self.tcx.hir().name(upvar_id.var_path.hir_id);
                 format!(" for capture of `{}` by closure", var_name)
             }
             infer::NLL(..) => bug!("NLL variable found in lexical phase"),

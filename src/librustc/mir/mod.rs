@@ -9,6 +9,7 @@ use crate::hir::def_id::DefId;
 use crate::hir::{self, InlineAsm as HirInlineAsm};
 use crate::mir::interpret::{ConstValue, InterpError, Scalar};
 use crate::mir::visit::MirVisitable;
+use rustc_data_structures::bit_set::BitMatrix;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::graph::dominators::{dominators, Dominators};
 use rustc_data_structures::graph::{self, GraphPredecessors, GraphSuccessors};
@@ -1195,9 +1196,9 @@ pub enum TerminatorKind<'tcx> {
     FalseEdges {
         /// The target normal control flow will take
         real_target: BasicBlock,
-        /// The list of blocks control flow could conceptually take, but won't
-        /// in practice
-        imaginary_targets: Vec<BasicBlock>,
+        /// A block control flow could conceptually jump to, but won't in
+        /// practice
+        imaginary_target: BasicBlock,
     },
     /// A terminator for blocks that only take one path in reality, but where we
     /// reserve the right to unwind in borrowck, even if it won't happen in practice.
@@ -1239,8 +1240,8 @@ impl<'tcx> Terminator<'tcx> {
 }
 
 impl<'tcx> TerminatorKind<'tcx> {
-    pub fn if_<'a, 'gcx>(
-        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+    pub fn if_(
+        tcx: TyCtxt<'tcx>,
         cond: Operand<'tcx>,
         t: BasicBlock,
         f: BasicBlock,
@@ -1334,8 +1335,8 @@ impl<'tcx> TerminatorKind<'tcx> {
             SwitchInt { ref targets, .. } => None.into_iter().chain(&targets[..]),
             FalseEdges {
                 ref real_target,
-                ref imaginary_targets,
-            } => Some(real_target).into_iter().chain(&imaginary_targets[..]),
+                ref imaginary_target,
+            } => Some(real_target).into_iter().chain(slice::from_ref(imaginary_target)),
         }
     }
 
@@ -1421,10 +1422,10 @@ impl<'tcx> TerminatorKind<'tcx> {
             } => None.into_iter().chain(&mut targets[..]),
             FalseEdges {
                 ref mut real_target,
-                ref mut imaginary_targets,
+                ref mut imaginary_target,
             } => Some(real_target)
                 .into_iter()
-                .chain(&mut imaginary_targets[..]),
+                .chain(slice::from_mut(imaginary_target)),
         }
     }
 
@@ -1721,12 +1722,9 @@ impl<'tcx> TerminatorKind<'tcx> {
             Assert { cleanup: None, .. } => vec!["".into()],
             Assert { .. } => vec!["success".into(), "unwind".into()],
             FalseEdges {
-                ref imaginary_targets,
                 ..
             } => {
-                let mut l = vec!["real".into()];
-                l.resize(imaginary_targets.len() + 1, "imaginary".into());
-                l
+                vec!["real".into(), "imaginary".into()]
             }
             FalseUnwind {
                 unwind: Some(_), ..
@@ -2106,7 +2104,7 @@ impl<'tcx> Place<'tcx> {
 /// N.B., this particular impl strategy is not the most obvious. It was
 /// chosen because it makes a measurable difference to NLL
 /// performance, as this code (`borrow_conflicts_with_place`) is somewhat hot.
-pub enum Projections<'p, 'tcx: 'p> {
+pub enum Projections<'p, 'tcx> {
     Empty,
 
     List {
@@ -2145,7 +2143,7 @@ impl<'p, 'tcx> IntoIterator for &'p Projections<'p, 'tcx> {
 /// N.B., this is not a *true* Rust iterator -- the code above just
 /// manually invokes `next`. This is because we (sometimes) want to
 /// keep executing even after `None` has been returned.
-pub struct ProjectionsIter<'p, 'tcx: 'p> {
+pub struct ProjectionsIter<'p, 'tcx> {
     pub value: &'p Projections<'p, 'tcx>,
 }
 
@@ -2186,29 +2184,7 @@ impl<'tcx> Debug for Place<'tcx> {
         });
 
         self.iterate(|place_base, place_projections| {
-            match place_base {
-                PlaceBase::Local(id) => {
-                    write!(fmt, "{:?}", id)?;
-                }
-                PlaceBase::Static(box self::Static { ty, kind: StaticKind::Static(def_id) }) => {
-                    write!(
-                        fmt,
-                        "({}: {:?})",
-                        ty::tls::with(|tcx| tcx.def_path_str(*def_id)),
-                        ty
-                    )?;
-                },
-                PlaceBase::Static(
-                    box self::Static { ty, kind: StaticKind::Promoted(promoted) }
-                ) => {
-                    write!(
-                        fmt,
-                        "({:?}: {:?})",
-                        promoted,
-                        ty
-                    )?;
-                },
-            }
+            write!(fmt, "{:?}", place_base)?;
 
             for projection in place_projections {
                 match projection.elem {
@@ -2255,6 +2231,30 @@ impl<'tcx> Debug for Place<'tcx> {
 
             Ok(())
         })
+    }
+}
+
+impl Debug for PlaceBase<'_> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        match *self {
+            PlaceBase::Local(id) => write!(fmt, "{:?}", id),
+            PlaceBase::Static(box self::Static { ty, kind: StaticKind::Static(def_id) }) => {
+                write!(
+                    fmt,
+                    "({}: {:?})",
+                    ty::tls::with(|tcx| tcx.def_path_str(def_id)),
+                    ty
+                )
+            },
+            PlaceBase::Static(box self::Static { ty, kind: StaticKind::Promoted(promoted) }) => {
+                write!(
+                    fmt,
+                    "({:?}: {:?})",
+                    promoted,
+                    ty
+                )
+            },
+        }
     }
 }
 
@@ -2322,8 +2322,8 @@ impl<'tcx> Operand<'tcx> {
     /// Convenience helper to make a constant that refers to the fn
     /// with given `DefId` and substs. Since this is used to synthesize
     /// MIR, assumes `user_ty` is None.
-    pub fn function_handle<'a>(
-        tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    pub fn function_handle(
+        tcx: TyCtxt<'tcx>,
         def_id: DefId,
         substs: SubstsRef<'tcx>,
         span: Span,
@@ -2567,13 +2567,13 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                             let name = if tcx.sess.opts.debugging_opts.span_free_formats {
                                 format!("[closure@{:?}]", hir_id)
                             } else {
-                                format!("[closure@{:?}]", tcx.hir().span_by_hir_id(hir_id))
+                                format!("[closure@{:?}]", tcx.hir().span(hir_id))
                             };
                             let mut struct_fmt = fmt.debug_struct(&name);
 
                             if let Some(upvars) = tcx.upvars(def_id) {
                                 for (&var_id, place) in upvars.keys().zip(places) {
-                                    let var_name = tcx.hir().name_by_hir_id(var_id);
+                                    let var_name = tcx.hir().name(var_id);
                                     struct_fmt.field(&var_name.as_str(), place);
                                 }
                             }
@@ -2587,12 +2587,12 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                     AggregateKind::Generator(def_id, _, _) => ty::tls::with(|tcx| {
                         if let Some(hir_id) = tcx.hir().as_local_hir_id(def_id) {
                             let name = format!("[generator@{:?}]",
-                                               tcx.hir().span_by_hir_id(hir_id));
+                                               tcx.hir().span(hir_id));
                             let mut struct_fmt = fmt.debug_struct(&name);
 
                             if let Some(upvars) = tcx.upvars(def_id) {
                                 for (&var_id, place) in upvars.keys().zip(places) {
-                                    let var_name = tcx.hir().name_by_hir_id(var_id);
+                                    let var_name = tcx.hir().name(var_id);
                                     struct_fmt.field(&var_name.as_str(), place);
                                 }
                             }
@@ -2794,7 +2794,7 @@ impl UserTypeProjection {
 CloneTypeFoldableAndLiftImpls! { ProjectionKind, }
 
 impl<'tcx> TypeFoldable<'tcx> for UserTypeProjection {
-    fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
         use crate::mir::ProjectionElem::*;
 
         let base = self.base.fold_with(folder);
@@ -2916,7 +2916,7 @@ impl Location {
     }
 
     /// Returns `true` if `other` is earlier in the control flow graph than `self`.
-    pub fn is_predecessor_of<'tcx>(&self, other: Location, mir: &Body<'tcx>) -> bool {
+    pub fn is_predecessor_of<'tcx>(&self, other: Location, body: &Body<'tcx>) -> bool {
         // If we are in the same block as the other location and are an earlier statement
         // then we are a predecessor of `other`.
         if self.block == other.block && self.statement_index < other.statement_index {
@@ -2924,13 +2924,13 @@ impl Location {
         }
 
         // If we're in another block, then we want to check that block is a predecessor of `other`.
-        let mut queue: Vec<BasicBlock> = mir.predecessors_for(other.block).clone();
+        let mut queue: Vec<BasicBlock> = body.predecessors_for(other.block).clone();
         let mut visited = FxHashSet::default();
 
         while let Some(block) = queue.pop() {
             // If we haven't visited this block before, then make sure we visit it's predecessors.
             if visited.insert(block) {
-                queue.append(&mut mir.predecessors_for(block).clone());
+                queue.append(&mut body.predecessors_for(block).clone());
             } else {
                 continue;
             }
@@ -2997,6 +2997,11 @@ pub struct GeneratorLayout<'tcx> {
     /// be stored in multiple variants.
     pub variant_fields: IndexVec<VariantIdx, IndexVec<Field, GeneratorSavedLocal>>,
 
+    /// Which saved locals are storage-live at the same time. Locals that do not
+    /// have conflicts with each other are allowed to overlap in the computed
+    /// layout.
+    pub storage_conflicts: BitMatrix<GeneratorSavedLocal, GeneratorSavedLocal>,
+
     /// Names and scopes of all the stored generator locals.
     /// NOTE(tmandry) This is *strictly* a temporary hack for codegen
     /// debuginfo generation, and will be removed at some point.
@@ -3006,8 +3011,8 @@ pub struct GeneratorLayout<'tcx> {
 }
 
 #[derive(Clone, Debug, RustcEncodable, RustcDecodable, HashStable)]
-pub struct BorrowCheckResult<'gcx> {
-    pub closure_requirements: Option<ClosureRegionRequirements<'gcx>>,
+pub struct BorrowCheckResult<'tcx> {
+    pub closure_requirements: Option<ClosureRegionRequirements<'tcx>>,
     pub used_mut_upvars: SmallVec<[Field; 8]>,
 }
 
@@ -3062,7 +3067,7 @@ pub struct BorrowCheckResult<'gcx> {
 /// TyCtxt, and hence we cannot use `ReVar` (which is what we use
 /// internally within the rest of the NLL code).
 #[derive(Clone, Debug, RustcEncodable, RustcDecodable, HashStable)]
-pub struct ClosureRegionRequirements<'gcx> {
+pub struct ClosureRegionRequirements<'tcx> {
     /// The number of external regions defined on the closure. In our
     /// example above, it would be 3 -- one for `'static`, then `'1`
     /// and `'2`. This is just used for a sanity check later on, to
@@ -3072,7 +3077,7 @@ pub struct ClosureRegionRequirements<'gcx> {
 
     /// Requirements between the various free regions defined in
     /// indices.
-    pub outlives_requirements: Vec<ClosureOutlivesRequirement<'gcx>>,
+    pub outlives_requirements: Vec<ClosureOutlivesRequirement<'tcx>>,
 }
 
 /// Indicates an outlives constraint between a type or between two
@@ -3152,7 +3157,7 @@ pub enum ClosureOutlivesSubject<'tcx> {
 
 /*
  * TypeFoldable implementations for MIR types
- */
+*/
 
 CloneTypeFoldableAndLiftImpls! {
     BlockTailInfo,
@@ -3193,6 +3198,7 @@ BraceStructTypeFoldableImpl! {
     impl<'tcx> TypeFoldable<'tcx> for GeneratorLayout<'tcx> {
         field_tys,
         variant_fields,
+        storage_conflicts,
         __local_debuginfo_codegen_only_do_not_use,
     }
 }
@@ -3255,7 +3261,7 @@ EnumTypeFoldableImpl! {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for Terminator<'tcx> {
-    fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
         use crate::mir::TerminatorKind::*;
 
         let kind = match self.kind {
@@ -3349,10 +3355,10 @@ impl<'tcx> TypeFoldable<'tcx> for Terminator<'tcx> {
             Unreachable => Unreachable,
             FalseEdges {
                 real_target,
-                ref imaginary_targets,
+                imaginary_target,
             } => FalseEdges {
                 real_target,
-                imaginary_targets: imaginary_targets.clone(),
+                imaginary_target,
             },
             FalseUnwind {
                 real_target,
@@ -3423,7 +3429,7 @@ impl<'tcx> TypeFoldable<'tcx> for Terminator<'tcx> {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for Place<'tcx> {
-    fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
         match self {
             &Place::Projection(ref p) => Place::Projection(p.fold_with(folder)),
             _ => self.clone(),
@@ -3440,7 +3446,7 @@ impl<'tcx> TypeFoldable<'tcx> for Place<'tcx> {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for Rvalue<'tcx> {
-    fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
         use crate::mir::Rvalue::*;
         match *self {
             Use(ref op) => Use(op.fold_with(folder)),
@@ -3512,7 +3518,7 @@ impl<'tcx> TypeFoldable<'tcx> for Rvalue<'tcx> {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for Operand<'tcx> {
-    fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
         match *self {
             Operand::Copy(ref place) => Operand::Copy(place.fold_with(folder)),
             Operand::Move(ref place) => Operand::Move(place.fold_with(folder)),
@@ -3529,7 +3535,7 @@ impl<'tcx> TypeFoldable<'tcx> for Operand<'tcx> {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for Projection<'tcx> {
-    fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
         use crate::mir::ProjectionElem::*;
 
         let base = self.base.fold_with(folder);
@@ -3555,7 +3561,7 @@ impl<'tcx> TypeFoldable<'tcx> for Projection<'tcx> {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for Field {
-    fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, _: &mut F) -> Self {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, _: &mut F) -> Self {
         *self
     }
     fn super_visit_with<V: TypeVisitor<'tcx>>(&self, _: &mut V) -> bool {
@@ -3564,7 +3570,7 @@ impl<'tcx> TypeFoldable<'tcx> for Field {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for GeneratorSavedLocal {
-    fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, _: &mut F) -> Self {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, _: &mut F) -> Self {
         *self
     }
     fn super_visit_with<V: TypeVisitor<'tcx>>(&self, _: &mut V) -> bool {
@@ -3572,8 +3578,17 @@ impl<'tcx> TypeFoldable<'tcx> for GeneratorSavedLocal {
     }
 }
 
+impl<'tcx, R: Idx, C: Idx> TypeFoldable<'tcx> for BitMatrix<R, C> {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, _: &mut F) -> Self {
+        self.clone()
+    }
+    fn super_visit_with<V: TypeVisitor<'tcx>>(&self, _: &mut V) -> bool {
+        false
+    }
+}
+
 impl<'tcx> TypeFoldable<'tcx> for Constant<'tcx> {
-    fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
+    fn super_fold_with<F: TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
         Constant {
             span: self.span.clone(),
             ty: self.ty.fold_with(folder),

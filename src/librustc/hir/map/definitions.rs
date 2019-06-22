@@ -397,11 +397,6 @@ impl Definitions {
         self.node_to_hir_id[node_id]
     }
 
-    #[inline]
-    pub fn def_index_to_node_id(&self, def_index: DefIndex) -> ast::NodeId {
-        self.as_local_node_id(DefId::local(def_index)).unwrap()
-    }
-
     /// Retrieves the span of the given `DefId` if `DefId` is in the local crate, the span exists
     /// and it's not `DUMMY_SP`.
     #[inline]
@@ -582,9 +577,17 @@ impl DefPathData {
     }
 }
 
+/// Evaluates to the number of tokens passed to it.
+///
+/// Logarithmic counting: every one or two recursive expansions, the number of
+/// tokens to count is divided by two, instead of being reduced by one.
+/// Therefore, the recursion depth is the binary logarithm of the number of
+/// tokens to count, and the expanded tree is likewise very small.
 macro_rules! count {
-    () => (0usize);
-    ( $x:tt $($xs:tt)* ) => (1usize + count!($($xs)*));
+    ()                     => (0usize);
+    ($one:tt)              => (1usize);
+    ($($pairs:tt $_p:tt)*) => (count!($($pairs)*) << 1usize);
+    ($odd:tt $($rest:tt)*) => (count!($($rest)*) | 1usize);
 }
 
 // We define the GlobalMetaDataKind enum with this macro because we want to

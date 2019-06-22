@@ -8,10 +8,10 @@
 
 #![deny(rust_2018_idioms)]
 #![deny(internal)]
+#![deny(unused_lifetimes)]
 
 #![feature(const_fn)]
 #![feature(crate_visibility_modifier)]
-#![feature(custom_attribute)]
 #![feature(nll)]
 #![feature(non_exhaustive)]
 #![feature(optin_builtin_traits)]
@@ -505,10 +505,10 @@ impl Span {
         )
     }
 
-    pub fn from_inner_byte_pos(self, start: usize, end: usize) -> Span {
+    pub fn from_inner(self, inner: InnerSpan) -> Span {
         let span = self.data();
-        Span::new(span.lo + BytePos::from_usize(start),
-                  span.lo + BytePos::from_usize(end),
+        Span::new(span.lo + BytePos::from_usize(inner.start),
+                  span.lo + BytePos::from_usize(inner.end),
                   span.ctxt)
     }
 
@@ -859,6 +859,9 @@ impl ExternalSource {
     }
 }
 
+#[derive(Debug)]
+pub struct OffsetOverflowError;
+
 /// A single source in the `SourceMap`.
 #[derive(Clone)]
 pub struct SourceFile {
@@ -1040,7 +1043,7 @@ impl SourceFile {
                name_was_remapped: bool,
                unmapped_path: FileName,
                mut src: String,
-               start_pos: BytePos) -> SourceFile {
+               start_pos: BytePos) -> Result<SourceFile, OffsetOverflowError> {
         remove_bom(&mut src);
 
         let src_hash = {
@@ -1054,11 +1057,14 @@ impl SourceFile {
             hasher.finish()
         };
         let end_pos = start_pos.to_usize() + src.len();
+        if end_pos > u32::max_value() as usize {
+            return Err(OffsetOverflowError);
+        }
 
         let (lines, multibyte_chars, non_narrow_chars) =
             analyze_source_file::analyze_source_file(&src[..], start_pos);
 
-        SourceFile {
+        Ok(SourceFile {
             name,
             name_was_remapped,
             unmapped_path: Some(unmapped_path),
@@ -1072,7 +1078,7 @@ impl SourceFile {
             multibyte_chars,
             non_narrow_chars,
             name_hash,
-        }
+        })
     }
 
     /// Returns the `BytePos` of the beginning of the current line.
@@ -1394,6 +1400,18 @@ pub struct MalformedSourceMapPositions {
     pub source_len: usize,
     pub begin_pos: BytePos,
     pub end_pos: BytePos
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct InnerSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl InnerSpan {
+    pub fn new(start: usize, end: usize) -> InnerSpan {
+        InnerSpan { start, end }
+    }
 }
 
 // Given a slice of line start positions and a position, returns the index of

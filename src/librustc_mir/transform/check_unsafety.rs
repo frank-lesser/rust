@@ -18,27 +18,27 @@ use std::ops::Bound;
 
 use crate::util;
 
-pub struct UnsafetyChecker<'a, 'tcx: 'a> {
-    mir: &'a Body<'tcx>,
+pub struct UnsafetyChecker<'a, 'tcx> {
+    body: &'a Body<'tcx>,
     const_context: bool,
     min_const_fn: bool,
     source_scope_local_data: &'a IndexVec<SourceScope, SourceScopeLocalData>,
     violations: Vec<UnsafetyViolation>,
     source_info: SourceInfo,
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     /// Mark an `unsafe` block as used, so we don't lint it.
     used_unsafe: FxHashSet<hir::HirId>,
     inherited_blocks: Vec<(hir::HirId, bool)>,
 }
 
-impl<'a, 'gcx, 'tcx> UnsafetyChecker<'a, 'tcx> {
+impl<'a, 'tcx> UnsafetyChecker<'a, 'tcx> {
     fn new(
         const_context: bool,
         min_const_fn: bool,
-        mir: &'a Body<'tcx>,
+        body: &'a Body<'tcx>,
         source_scope_local_data: &'a IndexVec<SourceScope, SourceScopeLocalData>,
-        tcx: TyCtxt<'a, 'tcx, 'tcx>,
+        tcx: TyCtxt<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
     ) -> Self {
         // sanity check
@@ -46,13 +46,13 @@ impl<'a, 'gcx, 'tcx> UnsafetyChecker<'a, 'tcx> {
             assert!(const_context);
         }
         Self {
-            mir,
+            body,
             const_context,
             min_const_fn,
             source_scope_local_data,
             violations: vec![],
             source_info: SourceInfo {
-                span: mir.span,
+                span: body.span,
                 scope: OUTERMOST_SOURCE_SCOPE
             },
             tcx,
@@ -87,7 +87,7 @@ impl<'a, 'tcx> Visitor<'tcx> for UnsafetyChecker<'a, 'tcx> {
             }
 
             TerminatorKind::Call { ref func, .. } => {
-                let func_ty = func.ty(self.mir, self.tcx);
+                let func_ty = func.ty(self.body, self.tcx);
                 let sig = func_ty.fn_sig(self.tcx);
                 if let hir::Unsafety::Unsafe = sig.unsafety() {
                     self.require_unsafe("call to unsafe function",
@@ -159,7 +159,7 @@ impl<'a, 'tcx> Visitor<'tcx> for UnsafetyChecker<'a, 'tcx> {
             // pointers during const evaluation have no integral address, only an abstract one
             Rvalue::Cast(CastKind::Misc, ref operand, cast_ty)
             if self.const_context && self.tcx.features().const_raw_ptr_to_usize_cast => {
-                let operand_ty = operand.ty(self.mir, self.tcx);
+                let operand_ty = operand.ty(self.body, self.tcx);
                 let cast_in = CastTy::from_ty(operand_ty).expect("bad input type for cast");
                 let cast_out = CastTy::from_ty(cast_ty).expect("bad output type for cast");
                 match (cast_in, cast_out) {
@@ -182,7 +182,7 @@ impl<'a, 'tcx> Visitor<'tcx> for UnsafetyChecker<'a, 'tcx> {
             // result of a comparison of addresses would differ between runtime and compile-time.
             Rvalue::BinaryOp(_, ref lhs, _)
             if self.const_context && self.tcx.features().const_compare_raw_pointers => {
-                if let ty::RawPtr(_) | ty::FnPtr(..) = lhs.ty(self.mir, self.tcx).sty {
+                if let ty::RawPtr(_) | ty::FnPtr(..) = lhs.ty(self.body, self.tcx).sty {
                     self.register_violations(&[UnsafetyViolation {
                         source_info: self.source_info,
                         description: InternedString::intern("pointer operation"),
@@ -233,7 +233,7 @@ impl<'a, 'tcx> Visitor<'tcx> for UnsafetyChecker<'a, 'tcx> {
 
             for proj in place_projections {
                 if context.is_borrow() {
-                    if util::is_disaligned(self.tcx, self.mir, self.param_env, place) {
+                    if util::is_disaligned(self.tcx, self.body, self.param_env, place) {
                         let source_info = self.source_info;
                         let lint_root =
                             self.source_scope_local_data[source_info.scope].lint_root;
@@ -249,7 +249,7 @@ impl<'a, 'tcx> Visitor<'tcx> for UnsafetyChecker<'a, 'tcx> {
                     }
                 }
                 let is_borrow_of_interior_mut = context.is_borrow() && !proj.base
-                    .ty(self.mir, self.tcx)
+                    .ty(self.body, self.tcx)
                     .ty
                     .is_freeze(self.tcx, self.param_env, self.source_info.span);
                 // prevent
@@ -265,14 +265,14 @@ impl<'a, 'tcx> Visitor<'tcx> for UnsafetyChecker<'a, 'tcx> {
                 }
                 let old_source_info = self.source_info;
                 if let Place::Base(PlaceBase::Local(local)) = proj.base {
-                    if self.mir.local_decls[local].internal {
+                    if self.body.local_decls[local].internal {
                         // Internal locals are used in the `move_val_init` desugaring.
                         // We want to check unsafety against the source info of the
                         // desugaring, rather than the source info of the RHS.
-                        self.source_info = self.mir.local_decls[local].source_info;
+                        self.source_info = self.body.local_decls[local].source_info;
                     }
                 }
-                let base_ty = proj.base.ty(self.mir, self.tcx).ty;
+                let base_ty = proj.base.ty(self.body, self.tcx).ty;
                 match base_ty.sty {
                     ty::RawPtr(..) => {
                         self.require_unsafe("dereference of raw pointer",
@@ -412,7 +412,7 @@ impl<'a, 'tcx> UnsafetyChecker<'a, 'tcx> {
         }) = place {
             match *elem {
                 ProjectionElem::Field(..) => {
-                    let ty = base.ty(&self.mir.local_decls, self.tcx).ty;
+                    let ty = base.ty(&self.body.local_decls, self.tcx).ty;
                     match ty.sty {
                         ty::Adt(def, _) => match self.tcx.layout_scalar_valid_range(def.did) {
                             (Bound::Unbounded, Bound::Unbounded) => {},
@@ -480,14 +480,15 @@ impl<'a, 'tcx> hir::intravisit::Visitor<'tcx> for UnusedUnsafeVisitor<'a> {
     }
 }
 
-fn check_unused_unsafe<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                 def_id: DefId,
-                                 used_unsafe: &FxHashSet<hir::HirId>,
-                                 unsafe_blocks: &'a mut Vec<(hir::HirId, bool)>)
-{
+fn check_unused_unsafe<'a, 'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    used_unsafe: &FxHashSet<hir::HirId>,
+    unsafe_blocks: &'a mut Vec<(hir::HirId, bool)>,
+) {
     let body_id =
         tcx.hir().as_local_hir_id(def_id).and_then(|hir_id| {
-            tcx.hir().maybe_body_owned_by_by_hir_id(hir_id)
+            tcx.hir().maybe_body_owned_by(hir_id)
         });
 
     let body_id = match body_id {
@@ -505,16 +506,14 @@ fn check_unused_unsafe<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     hir::intravisit::Visitor::visit_body(&mut visitor, body);
 }
 
-fn unsafety_check_result<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId)
-                                   -> UnsafetyCheckResult
-{
+fn unsafety_check_result<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> UnsafetyCheckResult {
     debug!("unsafety_violations({:?})", def_id);
 
     // N.B., this borrow is valid because all the consumers of
     // `mir_built` force this.
-    let mir = &tcx.mir_built(def_id).borrow();
+    let body = &tcx.mir_built(def_id).borrow();
 
-    let source_scope_local_data = match mir.source_scope_local_data {
+    let source_scope_local_data = match body.source_scope_local_data {
         ClearCrossCrate::Set(ref data) => data,
         ClearCrossCrate::Clear => {
             debug!("unsafety_violations: {:?} - remote, skipping", def_id);
@@ -528,7 +527,7 @@ fn unsafety_check_result<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId)
     let param_env = tcx.param_env(def_id);
 
     let id = tcx.hir().as_local_hir_id(def_id).unwrap();
-    let (const_context, min_const_fn) = match tcx.hir().body_owner_kind_by_hir_id(id) {
+    let (const_context, min_const_fn) = match tcx.hir().body_owner_kind(id) {
         hir::BodyOwnerKind::Closure => (false, false),
         hir::BodyOwnerKind::Fn => (tcx.is_const_fn(def_id), tcx.is_min_const_fn(def_id)),
         hir::BodyOwnerKind::Const |
@@ -536,8 +535,8 @@ fn unsafety_check_result<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId)
     };
     let mut checker = UnsafetyChecker::new(
         const_context, min_const_fn,
-        mir, source_scope_local_data, tcx, param_env);
-    checker.visit_body(mir);
+        body, source_scope_local_data, tcx, param_env);
+    checker.visit_body(body);
 
     check_unused_unsafe(tcx, def_id, &checker.used_unsafe, &mut checker.inherited_blocks);
     UnsafetyCheckResult {
@@ -546,7 +545,7 @@ fn unsafety_check_result<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId)
     }
 }
 
-fn unsafe_derive_on_repr_packed<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) {
+fn unsafe_derive_on_repr_packed<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) {
     let lint_hir_id = tcx.hir().as_local_hir_id(def_id).unwrap_or_else(||
         bug!("checking unsafety for non-local def id {:?}", def_id));
 
@@ -566,9 +565,11 @@ fn unsafe_derive_on_repr_packed<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: D
 }
 
 /// Returns the `HirId` for an enclosing scope that is also `unsafe`.
-fn is_enclosed(tcx: TyCtxt<'_, '_, '_>,
-               used_unsafe: &FxHashSet<hir::HirId>,
-               id: hir::HirId) -> Option<(String, hir::HirId)> {
+fn is_enclosed(
+    tcx: TyCtxt<'_>,
+    used_unsafe: &FxHashSet<hir::HirId>,
+    id: hir::HirId,
+) -> Option<(String, hir::HirId)> {
     let parent_id = tcx.hir().get_parent_node_by_hir_id(id);
     if parent_id != id {
         if used_unsafe.contains(&parent_id) {
@@ -589,21 +590,19 @@ fn is_enclosed(tcx: TyCtxt<'_, '_, '_>,
     }
 }
 
-fn report_unused_unsafe(tcx: TyCtxt<'_, '_, '_>,
-                        used_unsafe: &FxHashSet<hir::HirId>,
-                        id: hir::HirId) {
-    let span = tcx.sess.source_map().def_span(tcx.hir().span_by_hir_id(id));
+fn report_unused_unsafe(tcx: TyCtxt<'_>, used_unsafe: &FxHashSet<hir::HirId>, id: hir::HirId) {
+    let span = tcx.sess.source_map().def_span(tcx.hir().span(id));
     let msg = "unnecessary `unsafe` block";
     let mut db = tcx.struct_span_lint_hir(UNUSED_UNSAFE, id, span, msg);
     db.span_label(span, msg);
     if let Some((kind, id)) = is_enclosed(tcx, used_unsafe, id) {
-        db.span_label(tcx.sess.source_map().def_span(tcx.hir().span_by_hir_id(id)),
+        db.span_label(tcx.sess.source_map().def_span(tcx.hir().span(id)),
                       format!("because it's nested under this `unsafe` {}", kind));
     }
     db.emit();
 }
 
-fn builtin_derive_def_id<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Option<DefId> {
+fn builtin_derive_def_id<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Option<DefId> {
     debug!("builtin_derive_def_id({:?})", def_id);
     if let Some(impl_def_id) = tcx.impl_of_method(def_id) {
         if tcx.has_attr(impl_def_id, sym::automatically_derived) {
@@ -619,7 +618,7 @@ fn builtin_derive_def_id<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -
     }
 }
 
-pub fn check_unsafety<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) {
+pub fn check_unsafety<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) {
     debug!("check_unsafety({:?})", def_id);
 
     // closures are handled by their parent fn.

@@ -362,7 +362,6 @@ impl Default for Generics {
         Generics {
             params: Vec::new(),
             where_clause: WhereClause {
-                id: DUMMY_NODE_ID,
                 predicates: Vec::new(),
                 span: DUMMY_SP,
             },
@@ -374,7 +373,6 @@ impl Default for Generics {
 /// A where-clause in a definition.
 #[derive(Clone, RustcEncodable, RustcDecodable, Debug)]
 pub struct WhereClause {
-    pub id: NodeId,
     pub predicates: Vec<WherePredicate>,
     pub span: Span,
 }
@@ -1181,7 +1179,7 @@ pub enum ExprKind {
     Field(P<Expr>, Ident),
     /// An indexing operation (e.g., `foo[2]`).
     Index(P<Expr>, P<Expr>),
-    /// A range (e.g., `1..2`, `1..`, `..2`, `1...2`, `1...`, `...2`).
+    /// A range (e.g., `1..2`, `1..`, `..2`, `1..=2`, `..=2`).
     Range(Option<P<Expr>>, Option<P<Expr>>, RangeLimits),
 
     /// Variable reference, possibly containing `::` and/or type
@@ -1368,7 +1366,7 @@ pub enum LitKind {
     FloatUnsuffixed(Symbol),
     /// A boolean literal.
     Bool(bool),
-    /// A recovered character literal that contains mutliple `char`s, most likely a typo.
+    /// Placeholder for a literal that wasn't well-formed in some way.
     Err(Symbol),
 }
 
@@ -1406,10 +1404,10 @@ impl LitKind {
             | LitKind::ByteStr(..)
             | LitKind::Byte(..)
             | LitKind::Char(..)
-            | LitKind::Err(..)
             | LitKind::Int(_, LitIntType::Unsuffixed)
             | LitKind::FloatUnsuffixed(..)
-            | LitKind::Bool(..) => true,
+            | LitKind::Bool(..)
+            | LitKind::Err(..) => true,
             // suffixed variants
             LitKind::Int(_, LitIntType::Signed(..))
             | LitKind::Int(_, LitIntType::Unsigned(..))
@@ -1770,6 +1768,7 @@ pub struct InlineAsm {
 /// E.g., `bar: usize` as in `fn foo(bar: usize)`.
 #[derive(Clone, RustcEncodable, RustcDecodable, Debug)]
 pub struct Arg {
+    pub attrs: ThinVec<Attribute>,
     pub ty: P<Ty>,
     pub pat: P<Pat>,
     pub id: NodeId,
@@ -1817,7 +1816,7 @@ impl Arg {
         }
     }
 
-    pub fn from_self(eself: ExplicitSelf, eself_ident: Ident) -> Arg {
+    pub fn from_self(attrs: ThinVec<Attribute>, eself: ExplicitSelf, eself_ident: Ident) -> Arg {
         let span = eself.span.to(eself_ident.span);
         let infer_ty = P(Ty {
             id: DUMMY_NODE_ID,
@@ -1825,6 +1824,7 @@ impl Arg {
             span,
         });
         let arg = |mutbl, ty| Arg {
+            attrs,
             pat: P(Pat {
                 id: DUMMY_NODE_ID,
                 node: PatKind::Ident(BindingMode::ByValue(mutbl), eself_ident, None),

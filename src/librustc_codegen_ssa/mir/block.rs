@@ -151,7 +151,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'a, 'tcx> {
 }
 
 /// Codegen implementations for some terminator variants.
-impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     /// Generates code for a `Resume` terminator.
     fn codegen_resume_terminator<'b>(
         &mut self,
@@ -223,10 +223,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
     }
 
-    fn codegen_return_terminator<'b>(
-        &mut self,
-        mut bx: Bx,
-    ) {
+    fn codegen_return_terminator(&mut self, mut bx: Bx) {
         if self.fn_ty.c_variadic {
             match self.va_list_ref {
                 Some(va_list) => {
@@ -506,7 +503,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return;
         }
 
-        // The "spoofed" `VaList` added to a C-variadic functions signature
+        // The "spoofed" `VaListImpl` added to a C-variadic functions signature
         // should not be included in the `extra_args` calculation.
         let extra_args_start_idx = sig.inputs().len() - if sig.c_variadic { 1 } else { 0 };
         let extra_args = &args[extra_args_start_idx..];
@@ -690,7 +687,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             (&args[..], None)
         };
 
-        // Useful determining if the current argument is the "spoofed" `VaList`
+        // Useful determining if the current argument is the "spoofed" `VaListImpl`
         let last_arg_idx = if sig.inputs().is_empty() {
             None
         } else {
@@ -698,7 +695,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         };
         'make_args: for (i, arg) in first_args.iter().enumerate() {
             // If this is a C-variadic function the function signature contains
-            // an "spoofed" `VaList`. This argument is ignored, but we need to
+            // an "spoofed" `VaListImpl`. This argument is ignored, but we need to
             // populate it with a dummy operand so that the users real arguments
             // are not overwritten.
             let i = if sig.c_variadic && last_arg_idx.map(|x| i >= x).unwrap_or(false) {
@@ -791,7 +788,7 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     }
 }
 
-impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
+impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     pub fn codegen_block(
         &mut self,
         bb: mir::BasicBlock,

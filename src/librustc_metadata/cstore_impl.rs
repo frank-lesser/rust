@@ -30,9 +30,11 @@ use syntax::ast;
 use syntax::attr;
 use syntax::source_map;
 use syntax::edition::Edition;
+use syntax::ext::base::{SyntaxExtension, SyntaxExtensionKind};
 use syntax::parse::source_file_to_stream;
 use syntax::parse::parser::emit_unclosed_delims;
 use syntax::symbol::{Symbol, sym};
+use syntax_ext::proc_macro_impl::BangProcMacro;
 use syntax_pos::{Span, NO_EXPANSION, FileName};
 use rustc_data_structures::bit_set::BitSet;
 
@@ -40,11 +42,12 @@ macro_rules! provide {
     (<$lt:tt> $tcx:ident, $def_id:ident, $other:ident, $cdata:ident,
       $($name:ident => $compute:block)*) => {
         pub fn provide_extern<$lt>(providers: &mut Providers<$lt>) {
-            $(fn $name<'a, $lt:$lt, T>($tcx: TyCtxt<'a, $lt, $lt>, def_id_arg: T)
-                                    -> <ty::queries::$name<$lt> as
-                                        QueryConfig<$lt>>::Value
-                where T: IntoArgs,
-            {
+            // HACK(eddyb) `$lt: $lt` forces `$lt` to be early-bound, which
+            // allows the associated type in the return type to be normalized.
+            $(fn $name<$lt: $lt, T: IntoArgs>(
+                $tcx: TyCtxt<$lt>,
+                def_id_arg: T,
+            ) -> <ty::queries::$name<$lt> as QueryConfig<$lt>>::Value {
                 #[allow(unused_variables)]
                 let ($def_id, $other) = def_id_arg.into_args();
                 assert!(!$def_id.is_local());
@@ -426,14 +429,11 @@ impl cstore::CStore {
         if let Some(ref proc_macros) = data.proc_macros {
             return LoadedMacro::ProcMacro(proc_macros[id.index.to_proc_macro_index()].1.clone());
         } else if data.name == sym::proc_macro && data.item_name(id.index) == sym::quote {
-            use syntax::ext::base::SyntaxExtension;
-            use syntax_ext::proc_macro_impl::BangProcMacro;
-
             let client = proc_macro::bridge::client::Client::expand1(proc_macro::quote);
-            let ext = SyntaxExtension::ProcMacro {
-                expander: Box::new(BangProcMacro { client }),
-                allow_internal_unstable: Some(vec![sym::proc_macro_def_site].into()),
-                edition: data.root.edition,
+            let kind = SyntaxExtensionKind::Bang(Box::new(BangProcMacro { client }));
+            let ext = SyntaxExtension {
+                allow_internal_unstable: Some([sym::proc_macro_def_site][..].into()),
+                ..SyntaxExtension::default(kind, data.root.edition)
             };
             return LoadedMacro::ProcMacro(Lrc::new(ext));
         }
@@ -550,10 +550,7 @@ impl CrateStore for cstore::CStore {
         self.do_postorder_cnums_untracked()
     }
 
-    fn encode_metadata<'a, 'tcx>(&self,
-                                 tcx: TyCtxt<'a, 'tcx, 'tcx>)
-                                 -> EncodedMetadata
-    {
+    fn encode_metadata<'tcx>(&self, tcx: TyCtxt<'tcx>) -> EncodedMetadata {
         encoder::encode_metadata(tcx)
     }
 

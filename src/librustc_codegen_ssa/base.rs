@@ -88,13 +88,13 @@ pub fn bin_op_to_fcmp_predicate(op: hir::BinOpKind) -> RealPredicate {
     }
 }
 
-pub fn compare_simd_types<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+pub fn compare_simd_types<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     lhs: Bx::Value,
     rhs: Bx::Value,
     t: Ty<'tcx>,
     ret_ty: Bx::Type,
-    op: hir::BinOpKind
+    op: hir::BinOpKind,
 ) -> Bx::Value {
     let signed = match t.sty {
         ty::Float(_) => {
@@ -152,11 +152,11 @@ pub fn unsized_info<'tcx, Cx: CodegenMethods<'tcx>>(
 }
 
 /// Coerce `src` to `dst_ty`. `src_ty` must be a thin pointer.
-pub fn unsize_thin_ptr<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+pub fn unsize_thin_ptr<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     src: Bx::Value,
     src_ty: Ty<'tcx>,
-    dst_ty: Ty<'tcx>
+    dst_ty: Ty<'tcx>,
 ) -> (Bx::Value, Bx::Value) {
     debug!("unsize_thin_ptr: {:?} => {:?}", src_ty, dst_ty);
     match (&src_ty.sty, &dst_ty.sty) {
@@ -207,11 +207,11 @@ pub fn unsize_thin_ptr<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
 
 /// Coerce `src`, which is a reference to a value of type `src_ty`,
 /// to a value of type `dst_ty` and store the result in `dst`
-pub fn coerce_unsized_into<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+pub fn coerce_unsized_into<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     src: PlaceRef<'tcx, Bx::Value>,
-    dst: PlaceRef<'tcx, Bx::Value>
-)  {
+    dst: PlaceRef<'tcx, Bx::Value>,
+) {
     let src_ty = src.layout.ty;
     let dst_ty = dst.layout.ty;
     let mut coerce_ptr = || {
@@ -266,16 +266,16 @@ pub fn coerce_unsized_into<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
     }
 }
 
-pub fn cast_shift_expr_rhs<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+pub fn cast_shift_expr_rhs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     op: hir::BinOpKind,
     lhs: Bx::Value,
-    rhs: Bx::Value
+    rhs: Bx::Value,
 ) -> Bx::Value {
     cast_shift_rhs(bx, op, lhs, rhs)
 }
 
-fn cast_shift_rhs<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+fn cast_shift_rhs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     op: hir::BinOpKind,
     lhs: Bx::Value,
@@ -316,9 +316,9 @@ pub fn wants_msvc_seh(sess: &Session) -> bool {
     sess.target.target.options.is_like_msvc
 }
 
-pub fn from_immediate<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+pub fn from_immediate<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
-    val: Bx::Value
+    val: Bx::Value,
 ) -> Bx::Value {
     if bx.cx().val_ty(val) == bx.cx().type_i1() {
         bx.zext(val, bx.cx().type_i8())
@@ -327,7 +327,7 @@ pub fn from_immediate<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
     }
 }
 
-pub fn to_immediate<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+pub fn to_immediate<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     val: Bx::Value,
     layout: layout::TyLayout<'_>,
@@ -338,7 +338,7 @@ pub fn to_immediate<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
     val
 }
 
-pub fn to_immediate_scalar<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+pub fn to_immediate_scalar<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     val: Bx::Value,
     scalar: &layout::Scalar,
@@ -349,7 +349,7 @@ pub fn to_immediate_scalar<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
     val
 }
 
-pub fn memcpy_ty<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+pub fn memcpy_ty<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     dst: Bx::Value,
     dst_align: Align,
@@ -387,9 +387,7 @@ pub fn codegen_instance<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
 
 /// Creates the `main` function which will initialize the rust runtime and call
 /// users main function.
-pub fn maybe_create_entry_wrapper<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
-    cx: &'a Bx::CodegenCx
-) {
+pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(cx: &'a Bx::CodegenCx) {
     let (main_def_id, span) = match cx.tcx().entry_fn(LOCAL_CRATE) {
         Some((def_id, _)) => { (def_id, cx.tcx().def_span(def_id)) },
         None => return,
@@ -412,7 +410,7 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
         None => {}    // Do nothing.
     }
 
-    fn create_entry_fn<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
+    fn create_entry_fn<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         cx: &'a Bx::CodegenCx,
         sp: Span,
         rust_main: Bx::Value,
@@ -480,12 +478,11 @@ pub const CODEGEN_WORKER_ID: usize = ::std::usize::MAX;
 
 pub fn codegen_crate<B: ExtraBackendMethods>(
     backend: B,
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     metadata: EncodedMetadata,
     need_metadata_module: bool,
-    rx: mpsc::Receiver<Box<dyn Any + Send>>
+    rx: mpsc::Receiver<Box<dyn Any + Send>>,
 ) -> OngoingCodegen<B> {
-
     check_for_rustc_errors_attr(tcx);
 
     // Skip crate items and just output metadata in -Z no-codegen mode.
@@ -703,7 +700,7 @@ impl<B: ExtraBackendMethods> Drop for AbortCodegenOnDrop<B> {
     }
 }
 
-fn assert_and_save_dep_graph<'ll, 'tcx>(tcx: TyCtxt<'ll, 'tcx, 'tcx>) {
+fn assert_and_save_dep_graph<'tcx>(tcx: TyCtxt<'tcx>) {
     time(tcx.sess,
          "assert dep graph",
          || ::rustc_incremental::assert_dep_graph(tcx));
@@ -714,7 +711,7 @@ fn assert_and_save_dep_graph<'ll, 'tcx>(tcx: TyCtxt<'ll, 'tcx, 'tcx>) {
 }
 
 impl CrateInfo {
-    pub fn new(tcx: TyCtxt<'_, '_, '_>) -> CrateInfo {
+    pub fn new(tcx: TyCtxt<'_>) -> CrateInfo {
         let mut info = CrateInfo {
             panic_runtime: None,
             compiler_builtins: None,
@@ -776,11 +773,11 @@ impl CrateInfo {
             info.missing_lang_items.insert(cnum, missing);
         }
 
-        return info
+        return info;
     }
 }
 
-fn is_codegened_item(tcx: TyCtxt<'_, '_, '_>, id: DefId) -> bool {
+fn is_codegened_item(tcx: TyCtxt<'_>, id: DefId) -> bool {
     let (all_mono_items, _) =
         tcx.collect_and_partition_mono_items(LOCAL_CRATE);
     all_mono_items.contains(&id)
@@ -850,9 +847,7 @@ pub fn provide_both(providers: &mut Providers<'_>) {
     };
 }
 
-fn determine_cgu_reuse<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                 cgu: &CodegenUnit<'tcx>)
-                                 -> CguReuse {
+fn determine_cgu_reuse<'tcx>(tcx: TyCtxt<'tcx>, cgu: &CodegenUnit<'tcx>) -> CguReuse {
     if !tcx.dep_graph.is_fully_enabled() {
         return CguReuse::No
     }

@@ -339,14 +339,15 @@ pub fn combine_substructure<'a>(f: CombineSubstructureFunc<'a>)
 /// This method helps to extract all the type parameters referenced from a
 /// type. For a type parameter `<T>`, it looks for either a `TyPath` that
 /// is not global and starts with `T`, or a `TyQPath`.
-fn find_type_parameters(ty: &ast::Ty,
-                        ty_param_names: &[ast::Name],
-                        span: Span,
-                        cx: &ExtCtxt<'_>)
-                        -> Vec<P<ast::Ty>> {
+fn find_type_parameters(
+    ty: &ast::Ty,
+    ty_param_names: &[ast::Name],
+    span: Span,
+    cx: &ExtCtxt<'_>,
+) -> Vec<P<ast::Ty>> {
     use syntax::visit;
 
-    struct Visitor<'a, 'b: 'a> {
+    struct Visitor<'a, 'b> {
         cx: &'a ExtCtxt<'b>,
         span: Span,
         ty_param_names: &'a [ast::Name],
@@ -928,7 +929,7 @@ impl<'a> MethodDef<'a> {
         let args = {
             let self_args = explicit_self.map(|explicit_self| {
                 let ident = Ident::with_empty_ctxt(kw::SelfLower).with_span_pos(trait_.span);
-                ast::Arg::from_self(explicit_self, ident)
+                ast::Arg::from_self(ThinVec::default(), explicit_self, ident)
             });
             let nonself_args = arg_types.into_iter()
                 .map(|(name, ty)| cx.arg(trait_.span, name, ty));

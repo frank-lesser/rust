@@ -154,12 +154,14 @@ pub fn parse_pretty(sess: &Session,
 
 impl PpSourceMode {
     /// Constructs a `PrinterSupport` object and passes it to `f`.
-    fn call_with_pp_support<'tcx, A, F>(&self,
-                                        sess: &'tcx Session,
-                                        tcx: Option<TyCtxt<'tcx, 'tcx, 'tcx>>,
-                                        f: F)
-                                        -> A
-        where F: FnOnce(&dyn PrinterSupport) -> A
+    fn call_with_pp_support<'tcx, A, F>(
+        &self,
+        sess: &'tcx Session,
+        tcx: Option<TyCtxt<'tcx>>,
+        f: F,
+    ) -> A
+    where
+        F: FnOnce(&dyn PrinterSupport) -> A,
     {
         match *self {
             PpmNormal | PpmEveryBodyLoops | PpmExpanded => {
@@ -186,12 +188,9 @@ impl PpSourceMode {
             _ => panic!("Should use call_with_pp_support_hir"),
         }
     }
-    fn call_with_pp_support_hir<'tcx, A, F>(
-        &self,
-        tcx: TyCtxt<'tcx, 'tcx, 'tcx>,
-        f: F
-    ) -> A
-        where F: FnOnce(&dyn HirPrinterSupport<'_>, &hir::Crate) -> A
+    fn call_with_pp_support_hir<'tcx, A, F>(&self, tcx: TyCtxt<'tcx>, f: F) -> A
+    where
+        F: FnOnce(&dyn HirPrinterSupport<'_>, &hir::Crate) -> A,
     {
         match *self {
             PpmNormal => {
@@ -270,7 +269,7 @@ trait HirPrinterSupport<'hir>: pprust_hir::PpAnn {
 
 struct NoAnn<'hir> {
     sess: &'hir Session,
-    tcx: Option<TyCtxt<'hir, 'hir, 'hir>>,
+    tcx: Option<TyCtxt<'hir>>,
 }
 
 impl<'hir> PrinterSupport for NoAnn<'hir> {
@@ -311,7 +310,7 @@ impl<'hir> pprust_hir::PpAnn for NoAnn<'hir> {
 
 struct IdentifiedAnnotation<'hir> {
     sess: &'hir Session,
-    tcx: Option<TyCtxt<'hir, 'hir, 'hir>>,
+    tcx: Option<TyCtxt<'hir>>,
 }
 
 impl<'hir> PrinterSupport for IdentifiedAnnotation<'hir> {
@@ -454,9 +453,8 @@ impl<'a> pprust::PpAnn for HygieneAnnotation<'a> {
     }
 }
 
-
-struct TypedAnnotation<'a, 'tcx: 'a> {
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+struct TypedAnnotation<'a, 'tcx> {
+    tcx: TyCtxt<'tcx>,
     tables: Cell<&'a ty::TypeckTables<'tcx>>,
 }
 
@@ -617,18 +615,19 @@ impl UserIdentifiedItem {
     }
 }
 
-fn print_flowgraph<'a, 'tcx, W: Write>(variants: Vec<borrowck_dot::Variant>,
-                                       tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                       code: blocks::Code<'tcx>,
-                                       mode: PpFlowGraphMode,
-                                       mut out: W)
-                                       -> io::Result<()> {
+fn print_flowgraph<'tcx, W: Write>(
+    variants: Vec<borrowck_dot::Variant>,
+    tcx: TyCtxt<'tcx>,
+    code: blocks::Code<'tcx>,
+    mode: PpFlowGraphMode,
+    mut out: W,
+) -> io::Result<()> {
     let body_id = match code {
         blocks::Code::Expr(expr) => {
             // Find the function this expression is from.
             let mut hir_id = expr.hir_id;
             loop {
-                let node = tcx.hir().get_by_hir_id(hir_id);
+                let node = tcx.hir().get(hir_id);
                 if let Some(n) = hir::map::blocks::FnLikeNode::from_node(node) {
                     break n.body();
                 }
@@ -755,12 +754,13 @@ pub fn print_after_parsing(sess: &Session,
 }
 
 pub fn print_after_hir_lowering<'tcx>(
-    tcx: TyCtxt<'tcx, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     input: &Input,
     krate: &ast::Crate,
     ppm: PpMode,
     opt_uii: Option<UserIdentifiedItem>,
-    ofile: Option<&Path>) {
+    ofile: Option<&Path>,
+) {
     if ppm.needs_analysis() {
         abort_on_err(print_with_analysis(
             tcx,
@@ -830,7 +830,8 @@ pub fn print_after_hir_lowering<'tcx>(
                                                                          box out,
                                                                          annotation.pp_ann());
                     for node_id in uii.all_matching_node_ids(hir_map) {
-                        let node = hir_map.get(node_id);
+                        let hir_id = tcx.hir().node_to_hir_id(node_id);
+                        let node = hir_map.get(hir_id);
                         pp_state.print_node(node)?;
                         pp_state.s.space()?;
                         let path = annotation.node_path(node_id)
@@ -847,7 +848,8 @@ pub fn print_after_hir_lowering<'tcx>(
                 s.call_with_pp_support_hir(tcx, move |_annotation, _krate| {
                     debug!("pretty printing source code {:?}", s);
                     for node_id in uii.all_matching_node_ids(tcx.hir()) {
-                        let node = tcx.hir().get(node_id);
+                        let hir_id = tcx.hir().node_to_hir_id(node_id);
+                        let node = tcx.hir().get(hir_id);
                         write!(out, "{:#?}", node)?;
                     }
                     Ok(())
@@ -866,10 +868,10 @@ pub fn print_after_hir_lowering<'tcx>(
 // with a different callback than the standard driver, so that isn't easy.
 // Instead, we call that function ourselves.
 fn print_with_analysis<'tcx>(
-    tcx: TyCtxt<'_, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     ppm: PpMode,
     uii: Option<UserIdentifiedItem>,
-    ofile: Option<&Path>
+    ofile: Option<&Path>,
 ) -> Result<(), ErrorReported> {
     let nodeid = if let Some(uii) = uii {
         debug!("pretty printing for {:?}", uii);
@@ -909,7 +911,8 @@ fn print_with_analysis<'tcx>(
                 tcx.sess.fatal(&format!("--pretty flowgraph couldn't find id: {}", nodeid))
             });
 
-            match blocks::Code::from_node(&tcx.hir(), nodeid) {
+            let hir_id = tcx.hir().node_to_hir_id(nodeid);
+            match blocks::Code::from_node(&tcx.hir(), hir_id) {
                 Some(code) => {
                     let variants = gather_flowgraph_variants(tcx.sess);
 
@@ -922,7 +925,8 @@ fn print_with_analysis<'tcx>(
                                             got {:?}",
                                             node);
 
-                    tcx.sess.span_fatal(tcx.hir().span(nodeid), &message)
+                    let hir_id = tcx.hir().node_to_hir_id(nodeid);
+                    tcx.sess.span_fatal(tcx.hir().span(hir_id), &message)
                 }
             }
         }

@@ -12,28 +12,28 @@ use super::{LocationMap, MoveData, MovePath, MovePathLookup, MovePathIndex, Move
 use super::{MoveError, InitIndex, Init, InitLocation, LookupResult, InitKind};
 use super::IllegalMoveOriginKind::*;
 
-struct MoveDataBuilder<'a, 'gcx: 'tcx, 'tcx: 'a> {
-    mir: &'a Body<'tcx>,
-    tcx: TyCtxt<'a, 'gcx, 'tcx>,
+struct MoveDataBuilder<'a, 'tcx> {
+    body: &'a Body<'tcx>,
+    tcx: TyCtxt<'tcx>,
     data: MoveData<'tcx>,
     errors: Vec<(Place<'tcx>, MoveError<'tcx>)>,
 }
 
-impl<'a, 'gcx, 'tcx> MoveDataBuilder<'a, 'gcx, 'tcx> {
-    fn new(mir: &'a Body<'tcx>, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Self {
+impl<'a, 'tcx> MoveDataBuilder<'a, 'tcx> {
+    fn new(body: &'a Body<'tcx>, tcx: TyCtxt<'tcx>) -> Self {
         let mut move_paths = IndexVec::new();
         let mut path_map = IndexVec::new();
         let mut init_path_map = IndexVec::new();
 
         MoveDataBuilder {
-            mir,
+            body,
             tcx,
             errors: Vec::new(),
             data: MoveData {
                 moves: IndexVec::new(),
-                loc_map: LocationMap::new(mir),
+                loc_map: LocationMap::new(body),
                 rev_lookup: MovePathLookup {
-                    locals: mir.local_decls.indices().map(PlaceBase::Local).map(|v| {
+                    locals: body.local_decls.indices().map(PlaceBase::Local).map(|v| {
                         Self::new_move_path(
                             &mut move_paths,
                             &mut path_map,
@@ -47,7 +47,7 @@ impl<'a, 'gcx, 'tcx> MoveDataBuilder<'a, 'gcx, 'tcx> {
                 move_paths,
                 path_map,
                 inits: IndexVec::new(),
-                init_loc_map: LocationMap::new(mir),
+                init_loc_map: LocationMap::new(body),
                 init_path_map,
             }
         }
@@ -83,7 +83,7 @@ impl<'a, 'gcx, 'tcx> MoveDataBuilder<'a, 'gcx, 'tcx> {
     }
 }
 
-impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
+impl<'b, 'a, 'tcx> Gatherer<'b, 'a, 'tcx> {
     /// This creates a MovePath for a given place, returning an `MovePathError`
     /// if that place can't be moved from.
     ///
@@ -104,9 +104,9 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
             };
 
             for proj in place_projection {
-                let mir = self.builder.mir;
+                let body = self.builder.body;
                 let tcx = self.builder.tcx;
-                let place_ty = proj.base.ty(mir, tcx).ty;
+                let place_ty = proj.base.ty(body, tcx).ty;
                 match place_ty.sty {
                     ty::Ref(..) | ty::RawPtr(..) =>
                         return Err(MoveError::cannot_move_out_of(
@@ -178,16 +178,16 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx> MoveDataBuilder<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> MoveDataBuilder<'a, 'tcx> {
     fn finalize(
         self
     ) -> Result<MoveData<'tcx>, (MoveData<'tcx>, Vec<(Place<'tcx>, MoveError<'tcx>)>)> {
         debug!("{}", {
-            debug!("moves for {:?}:", self.mir.span);
+            debug!("moves for {:?}:", self.body.span);
             for (j, mo) in self.data.moves.iter_enumerated() {
                 debug!("    {:?} = {:?}", j, mo);
             }
-            debug!("move paths for {:?}:", self.mir.span);
+            debug!("move paths for {:?}:", self.body.span);
             for (j, path) in self.data.move_paths.iter_enumerated() {
                 debug!("    {:?} = {:?}", j, path);
             }
@@ -202,15 +202,15 @@ impl<'a, 'gcx, 'tcx> MoveDataBuilder<'a, 'gcx, 'tcx> {
     }
 }
 
-pub(super) fn gather_moves<'a, 'gcx, 'tcx>(
-    mir: &Body<'tcx>,
-    tcx: TyCtxt<'a, 'gcx, 'tcx>
+pub(super) fn gather_moves<'tcx>(
+    body: &Body<'tcx>,
+    tcx: TyCtxt<'tcx>,
 ) -> Result<MoveData<'tcx>, (MoveData<'tcx>, Vec<(Place<'tcx>, MoveError<'tcx>)>)> {
-    let mut builder = MoveDataBuilder::new(mir, tcx);
+    let mut builder = MoveDataBuilder::new(body, tcx);
 
     builder.gather_args();
 
-    for (bb, block) in mir.basic_blocks().iter_enumerated() {
+    for (bb, block) in body.basic_blocks().iter_enumerated() {
         for (i, stmt) in block.statements.iter().enumerate() {
             let source = Location { block: bb, statement_index: i };
             builder.gather_statement(source, stmt);
@@ -226,9 +226,9 @@ pub(super) fn gather_moves<'a, 'gcx, 'tcx>(
     builder.finalize()
 }
 
-impl<'a, 'gcx, 'tcx> MoveDataBuilder<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> MoveDataBuilder<'a, 'tcx> {
     fn gather_args(&mut self) {
-        for arg in self.mir.args_iter() {
+        for arg in self.body.args_iter() {
             let path = self.data.rev_lookup.locals[arg];
 
             let init = self.data.inits.push(Init {
@@ -253,12 +253,12 @@ impl<'a, 'gcx, 'tcx> MoveDataBuilder<'a, 'gcx, 'tcx> {
     }
 }
 
-struct Gatherer<'b, 'a: 'b, 'gcx: 'tcx, 'tcx: 'a> {
-    builder: &'b mut MoveDataBuilder<'a, 'gcx, 'tcx>,
+struct Gatherer<'b, 'a, 'tcx> {
+    builder: &'b mut MoveDataBuilder<'a, 'tcx>,
     loc: Location,
 }
 
-impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
+impl<'b, 'a, 'tcx> Gatherer<'b, 'a, 'tcx> {
     fn gather_statement(&mut self, stmt: &Statement<'tcx>) {
         match stmt.kind {
             StatementKind::Assign(ref place, ref rval) => {
@@ -429,7 +429,7 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
             Place::Projection(box Projection {
                 base,
                 elem: ProjectionElem::Field(_, _),
-            }) if match base.ty(self.builder.mir, self.builder.tcx).ty.sty {
+            }) if match base.ty(self.builder.body, self.builder.tcx).ty.sty {
                     ty::Adt(def, _) if def.is_union() => true,
                     _ => false,
             } => base,

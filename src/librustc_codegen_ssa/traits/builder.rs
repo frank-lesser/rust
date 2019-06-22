@@ -22,14 +22,14 @@ pub enum OverflowOp {
     Mul,
 }
 
-pub trait BuilderMethods<'a, 'tcx: 'a>:
+pub trait BuilderMethods<'a, 'tcx>:
     HasCodegen<'tcx>
     + DebugInfoBuilderMethods<'tcx>
     + ArgTypeMethods<'tcx>
     + AbiBuilderMethods<'tcx>
     + IntrinsicCallMethods<'tcx>
     + AsmBuilderMethods<'tcx>
-    + StaticBuilderMethods<'tcx>
+    + StaticBuilderMethods
     + HasParamEnv<'tcx>
     + HasTargetSpec
 

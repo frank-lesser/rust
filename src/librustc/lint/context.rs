@@ -507,9 +507,9 @@ impl LintStore {
 }
 
 /// Context for lint checking after type checking.
-pub struct LateContext<'a, 'tcx: 'a> {
+pub struct LateContext<'a, 'tcx> {
     /// Type context we're checking in.
-    pub tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    pub tcx: TyCtxt<'tcx>,
 
     /// Side-tables for the body we are in.
     // FIXME: Make this lazy to avoid running the TypeckTables query?
@@ -533,7 +533,7 @@ pub struct LateContext<'a, 'tcx: 'a> {
     only_module: bool,
 }
 
-pub struct LateContextAndPass<'a, 'tcx: 'a, T: LateLintPass<'a, 'tcx>> {
+pub struct LateContextAndPass<'a, 'tcx, T: LateLintPass<'a, 'tcx>> {
     context: LateContext<'a, 'tcx>,
     pass: T,
 }
@@ -566,7 +566,7 @@ impl LintPassObject for EarlyLintPassObject {}
 
 impl LintPassObject for LateLintPassObject {}
 
-pub trait LintContext<'tcx>: Sized {
+pub trait LintContext: Sized {
     type PassObject: LintPassObject;
 
     fn sess(&self) -> &Session;
@@ -700,7 +700,7 @@ impl<'a, T: EarlyLintPass> EarlyContextAndPass<'a, T> {
     }
 }
 
-impl<'a, 'tcx> LintContext<'tcx> for LateContext<'a, 'tcx> {
+impl LintContext for LateContext<'_, '_> {
     type PassObject = LateLintPassObject;
 
     /// Gets the overall compiler `Session` object.
@@ -728,7 +728,7 @@ impl<'a, 'tcx> LintContext<'tcx> for LateContext<'a, 'tcx> {
     }
 }
 
-impl<'a> LintContext<'a> for EarlyContext<'a> {
+impl LintContext for EarlyContext<'_> {
     type PassObject = EarlyLintPassObject;
 
     /// Gets the overall compiler `Session` object.
@@ -780,11 +780,11 @@ impl<'a, 'tcx> LateContext<'a, 'tcx> {
     /// }
     /// ```
     pub fn get_def_path(&self, def_id: DefId) -> Vec<Symbol> {
-        pub struct AbsolutePathPrinter<'a, 'tcx> {
-            pub tcx: TyCtxt<'a, 'tcx, 'tcx>,
+        pub struct AbsolutePathPrinter<'tcx> {
+            pub tcx: TyCtxt<'tcx>,
         }
 
-        impl<'tcx> Printer<'tcx, 'tcx> for AbsolutePathPrinter<'_, 'tcx> {
+        impl<'tcx> Printer<'tcx> for AbsolutePathPrinter<'tcx> {
             type Error = !;
 
             type Path = Vec<Symbol>;
@@ -793,7 +793,7 @@ impl<'a, 'tcx> LateContext<'a, 'tcx> {
             type DynExistential = ();
             type Const = ();
 
-            fn tcx<'a>(&'a self) -> TyCtxt<'a, 'tcx, 'tcx> {
+            fn tcx(&self) -> TyCtxt<'tcx> {
                 self.tcx
             }
 
@@ -1372,7 +1372,7 @@ macro_rules! late_lint_pass_impl {
 late_lint_methods!(late_lint_pass_impl, [], ['tcx]);
 
 fn late_lint_mod_pass<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(
-    tcx: TyCtxt<'_, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     module_def_id: DefId,
     pass: T,
 ) {
@@ -1399,12 +1399,12 @@ fn late_lint_mod_pass<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(
 
     // Visit the crate attributes
     if hir_id == hir::CRATE_HIR_ID {
-        walk_list!(cx, visit_attribute, tcx.hir().attrs_by_hir_id(hir::CRATE_HIR_ID));
+        walk_list!(cx, visit_attribute, tcx.hir().attrs(hir::CRATE_HIR_ID));
     }
 }
 
 pub fn late_lint_mod<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(
-    tcx: TyCtxt<'_, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     module_def_id: DefId,
     builtin_lints: T,
 ) {
@@ -1423,10 +1423,7 @@ pub fn late_lint_mod<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(
     }
 }
 
-fn late_lint_pass_crate<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(
-    tcx: TyCtxt<'_, 'tcx, 'tcx>,
-    pass: T
-) {
+fn late_lint_pass_crate<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(tcx: TyCtxt<'tcx>, pass: T) {
     let access_levels = &tcx.privacy_access_levels(LOCAL_CRATE);
 
     let krate = tcx.hir().krate();
@@ -1459,10 +1456,7 @@ fn late_lint_pass_crate<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(
     })
 }
 
-fn late_lint_crate<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(
-    tcx: TyCtxt<'_, 'tcx, 'tcx>,
-    builtin_lints: T
-) {
+fn late_lint_crate<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(tcx: TyCtxt<'tcx>, builtin_lints: T) {
     let mut passes = tcx.sess.lint_store.borrow().late_passes.lock().take().unwrap();
 
     if !tcx.sess.opts.debugging_opts.no_interleave_lints {
@@ -1494,7 +1488,7 @@ fn late_lint_crate<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(
 
 /// Performs lint checking on a crate.
 pub fn check_crate<'tcx, T: for<'a> LateLintPass<'a, 'tcx>>(
-    tcx: TyCtxt<'_, 'tcx, 'tcx>,
+    tcx: TyCtxt<'tcx>,
     builtin_lints: impl FnOnce() -> T + Send,
 ) {
     join(|| {

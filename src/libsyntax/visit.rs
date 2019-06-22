@@ -550,8 +550,9 @@ pub fn walk_fn_ret_ty<'a, V: Visitor<'a>>(visitor: &mut V, ret_ty: &'a FunctionR
 
 pub fn walk_fn_decl<'a, V: Visitor<'a>>(visitor: &mut V, function_declaration: &'a FnDecl) {
     for argument in &function_declaration.inputs {
+        walk_list!(visitor, visit_attribute, argument.attrs.iter());
         visitor.visit_pat(&argument.pat);
-        visitor.visit_ty(&argument.ty)
+        visitor.visit_ty(&argument.ty);
     }
     visitor.visit_fn_ret_ty(&function_declaration.output)
 }
@@ -714,7 +715,6 @@ pub fn walk_expr<'a, V: Visitor<'a>>(visitor: &mut V, expression: &'a Expr) {
         ExprKind::AddrOf(_, ref subexpression) | ExprKind::Unary(_, ref subexpression) => {
             visitor.visit_expr(subexpression)
         }
-        ExprKind::Lit(_) => {}
         ExprKind::Cast(ref subexpression, ref typ) | ExprKind::Type(ref subexpression, ref typ) => {
             visitor.visit_expr(subexpression);
             visitor.visit_ty(typ)
@@ -826,7 +826,7 @@ pub fn walk_expr<'a, V: Visitor<'a>>(visitor: &mut V, expression: &'a Expr) {
         ExprKind::TryBlock(ref body) => {
             visitor.visit_block(body)
         }
-        ExprKind::Err => {}
+        ExprKind::Lit(_) | ExprKind::Err => {}
     }
 
     visitor.visit_expr_post(expression)

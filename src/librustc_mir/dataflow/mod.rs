@@ -41,9 +41,9 @@ pub(crate) mod indexes {
     };
 }
 
-pub(crate) struct DataflowBuilder<'a, 'tcx: 'a, BD>
+pub(crate) struct DataflowBuilder<'a, 'tcx, BD>
 where
-    BD: BitDenotation<'tcx>
+    BD: BitDenotation<'tcx>,
 {
     def_id: DefId,
     flow_state: DataflowAnalysis<'a, 'tcx, BD>,
@@ -86,9 +86,9 @@ pub(crate) trait Dataflow<'tcx, BD: BitDenotation<'tcx>> {
     fn propagate(&mut self);
 }
 
-impl<'a, 'tcx: 'a, BD> Dataflow<'tcx, BD> for DataflowBuilder<'a, 'tcx, BD>
+impl<'a, 'tcx, BD> Dataflow<'tcx, BD> for DataflowBuilder<'a, 'tcx, BD>
 where
-    BD: BitDenotation<'tcx>
+    BD: BitDenotation<'tcx>,
 {
     fn dataflow<P>(&mut self, p: P) where P: Fn(&BD, BD::Idx) -> DebugFormatted {
         self.flow_state.build_sets();
@@ -116,34 +116,41 @@ pub(crate) fn has_rustc_mir_with(attrs: &[ast::Attribute], name: Symbol) -> Opti
     return None;
 }
 
-pub struct MoveDataParamEnv<'gcx, 'tcx> {
+pub struct MoveDataParamEnv<'tcx> {
     pub(crate) move_data: MoveData<'tcx>,
-    pub(crate) param_env: ty::ParamEnv<'gcx>,
+    pub(crate) param_env: ty::ParamEnv<'tcx>,
 }
 
-pub(crate) fn do_dataflow<'a, 'gcx, 'tcx, BD, P>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                                                 mir: &'a Body<'tcx>,
-                                                 def_id: DefId,
-                                                 attributes: &[ast::Attribute],
-                                                 dead_unwinds: &BitSet<BasicBlock>,
-                                                 bd: BD,
-                                                 p: P)
-                                                 -> DataflowResults<'tcx, BD>
-    where BD: BitDenotation<'tcx> + InitialFlow,
-          P: Fn(&BD, BD::Idx) -> DebugFormatted
+pub(crate) fn do_dataflow<'a, 'tcx, BD, P>(
+    tcx: TyCtxt<'tcx>,
+    body: &'a Body<'tcx>,
+    def_id: DefId,
+    attributes: &[ast::Attribute],
+    dead_unwinds: &BitSet<BasicBlock>,
+    bd: BD,
+    p: P,
+) -> DataflowResults<'tcx, BD>
+where
+    BD: BitDenotation<'tcx> + InitialFlow,
+    P: Fn(&BD, BD::Idx) -> DebugFormatted,
 {
-    let flow_state = DataflowAnalysis::new(mir, dead_unwinds, bd);
+    let flow_state = DataflowAnalysis::new(body, dead_unwinds, bd);
     flow_state.run(tcx, def_id, attributes, p)
 }
 
-impl<'a, 'gcx: 'tcx, 'tcx: 'a, BD> DataflowAnalysis<'a, 'tcx, BD> where BD: BitDenotation<'tcx>
+impl<'a, 'tcx, BD> DataflowAnalysis<'a, 'tcx, BD>
+where
+    BD: BitDenotation<'tcx>,
 {
-    pub(crate) fn run<P>(self,
-                         tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                         def_id: DefId,
-                         attributes: &[ast::Attribute],
-                         p: P) -> DataflowResults<'tcx, BD>
-        where P: Fn(&BD, BD::Idx) -> DebugFormatted
+    pub(crate) fn run<P>(
+        self,
+        tcx: TyCtxt<'tcx>,
+        def_id: DefId,
+        attributes: &[ast::Attribute],
+        p: P,
+    ) -> DataflowResults<'tcx, BD>
+    where
+        P: Fn(&BD, BD::Idx) -> DebugFormatted,
     {
         let name_found = |sess: &Session, attrs: &[ast::Attribute], name| -> Option<String> {
             if let Some(item) = has_rustc_mir_with(attrs, name) {
@@ -172,12 +179,16 @@ impl<'a, 'gcx: 'tcx, 'tcx: 'a, BD> DataflowAnalysis<'a, 'tcx, BD> where BD: BitD
     }
 }
 
-struct PropagationContext<'b, 'a: 'b, 'tcx: 'a, O> where O: 'b + BitDenotation<'tcx>
+struct PropagationContext<'b, 'a, 'tcx, O>
+where
+    O: 'b + BitDenotation<'tcx>,
 {
     builder: &'b mut DataflowAnalysis<'a, 'tcx, O>,
 }
 
-impl<'a, 'tcx: 'a, BD> DataflowAnalysis<'a, 'tcx, BD> where BD: BitDenotation<'tcx>
+impl<'a, 'tcx, BD> DataflowAnalysis<'a, 'tcx, BD>
+where
+    BD: BitDenotation<'tcx>,
 {
     fn propagate(&mut self) {
         let mut temp = BitSet::new_empty(self.flow_state.sets.bits_per_block);
@@ -195,7 +206,7 @@ impl<'a, 'tcx: 'a, BD> DataflowAnalysis<'a, 'tcx, BD> where BD: BitDenotation<'t
             self.flow_state.operator.start_block_effect(&mut sets.on_entry);
         }
 
-        for (bb, data) in self.mir.basic_blocks().iter_enumerated() {
+        for (bb, data) in self.body.basic_blocks().iter_enumerated() {
             let &mir::BasicBlockData { ref statements, ref terminator, is_cleanup: _ } = data;
 
             let mut interim_state;
@@ -227,14 +238,16 @@ impl<'a, 'tcx: 'a, BD> DataflowAnalysis<'a, 'tcx, BD> where BD: BitDenotation<'t
     }
 }
 
-impl<'b, 'a: 'b, 'tcx: 'a, BD> PropagationContext<'b, 'a, 'tcx, BD> where BD: BitDenotation<'tcx>
+impl<'b, 'a, 'tcx, BD> PropagationContext<'b, 'a, 'tcx, BD>
+where
+    BD: BitDenotation<'tcx>,
 {
     fn walk_cfg(&mut self, in_out: &mut BitSet<BD::Idx>) {
         let mut dirty_queue: WorkQueue<mir::BasicBlock> =
-            WorkQueue::with_all(self.builder.mir.basic_blocks().len());
-        let mir = self.builder.mir;
+            WorkQueue::with_all(self.builder.body.basic_blocks().len());
+        let body = self.builder.body;
         while let Some(bb) = dirty_queue.pop() {
-            let bb_data = &mir[bb];
+            let bb_data = &body[bb];
             {
                 let sets = self.builder.flow_state.sets.for_block(bb.index());
                 debug_assert!(in_out.words().len() == sets.on_entry.words().len());
@@ -258,7 +271,9 @@ fn dataflow_path(context: &str, path: &str) -> PathBuf {
     path
 }
 
-impl<'a, 'tcx: 'a, BD> DataflowBuilder<'a, 'tcx, BD> where BD: BitDenotation<'tcx>
+impl<'a, 'tcx, BD> DataflowBuilder<'a, 'tcx, BD>
+where
+    BD: BitDenotation<'tcx>,
 {
     fn pre_dataflow_instrumentation<P>(&self, p: P) -> io::Result<()>
         where P: Fn(&BD, BD::Idx) -> DebugFormatted
@@ -312,7 +327,7 @@ pub(crate) trait DataflowResultsConsumer<'a, 'tcx: 'a> {
 
     fn analyze_results(&mut self, flow_uninit: &mut Self::FlowState) {
         let flow = flow_uninit;
-        for (bb, _) in traversal::reverse_postorder(self.mir()) {
+        for (bb, _) in traversal::reverse_postorder(self.body()) {
             flow.reset_to_entry_of(bb);
             self.process_basic_block(bb, flow);
         }
@@ -320,7 +335,7 @@ pub(crate) trait DataflowResultsConsumer<'a, 'tcx: 'a> {
 
     fn process_basic_block(&mut self, bb: BasicBlock, flow_state: &mut Self::FlowState) {
         let BasicBlockData { ref statements, ref terminator, is_cleanup: _ } =
-            self.mir()[bb];
+            self.body()[bb];
         let mut location = Location { block: bb, statement_index: 0 };
         for stmt in statements.iter() {
             flow_state.reconstruct_statement_effect(location);
@@ -343,13 +358,13 @@ pub(crate) trait DataflowResultsConsumer<'a, 'tcx: 'a> {
 
     // Delegated Hooks: Provide access to the MIR and process the flow state.
 
-    fn mir(&self) -> &'a Body<'tcx>;
+    fn body(&self) -> &'a Body<'tcx>;
 }
 
 pub fn state_for_location<'tcx, T: BitDenotation<'tcx>>(loc: Location,
                                                         analysis: &T,
                                                         result: &DataflowResults<'tcx, T>,
-                                                        mir: &Body<'tcx>)
+                                                        body: &Body<'tcx>)
     -> BitSet<T::Idx> {
     let mut on_entry = result.sets().on_entry_set_for(loc.block.index()).to_owned();
     let mut kill_set = on_entry.to_hybrid();
@@ -370,7 +385,7 @@ pub fn state_for_location<'tcx, T: BitDenotation<'tcx>>(loc: Location,
         }
 
         // Apply the pre-statement effect of the statement we're evaluating.
-        if loc.statement_index == mir[loc.block].statements.len() {
+        if loc.statement_index == body[loc.block].statements.len() {
             analysis.before_terminator_effect(&mut sets, loc);
         } else {
             analysis.before_statement_effect(&mut sets, loc);
@@ -380,20 +395,24 @@ pub fn state_for_location<'tcx, T: BitDenotation<'tcx>>(loc: Location,
     gen_set.to_dense()
 }
 
-pub struct DataflowAnalysis<'a, 'tcx: 'a, O> where O: BitDenotation<'tcx>
+pub struct DataflowAnalysis<'a, 'tcx, O>
+where
+    O: BitDenotation<'tcx>,
 {
     flow_state: DataflowState<'tcx, O>,
     dead_unwinds: &'a BitSet<mir::BasicBlock>,
-    mir: &'a Body<'tcx>,
+    body: &'a Body<'tcx>,
 }
 
-impl<'a, 'tcx: 'a, O> DataflowAnalysis<'a, 'tcx, O> where O: BitDenotation<'tcx>
+impl<'a, 'tcx, O> DataflowAnalysis<'a, 'tcx, O>
+where
+    O: BitDenotation<'tcx>,
 {
     pub fn results(self) -> DataflowResults<'tcx, O> {
         DataflowResults(self.flow_state)
     }
 
-    pub fn mir(&self) -> &'a Body<'tcx> { self.mir }
+    pub fn body(&self) -> &'a Body<'tcx> { self.body }
 }
 
 pub struct DataflowResults<'tcx, O>(pub(crate) DataflowState<'tcx, O>) where O: BitDenotation<'tcx>;
@@ -697,11 +716,11 @@ pub trait BitDenotation<'tcx>: BitSetOperator {
 
 impl<'a, 'tcx, D> DataflowAnalysis<'a, 'tcx, D> where D: BitDenotation<'tcx>
 {
-    pub fn new(mir: &'a Body<'tcx>,
+    pub fn new(body: &'a Body<'tcx>,
                dead_unwinds: &'a BitSet<mir::BasicBlock>,
                denotation: D) -> Self where D: InitialFlow {
         let bits_per_block = denotation.bits_per_block();
-        let num_blocks = mir.basic_blocks().len();
+        let num_blocks = body.basic_blocks().len();
 
         let on_entry_sets = if D::bottom_value() {
             vec![BitSet::new_filled(bits_per_block); num_blocks]
@@ -712,7 +731,7 @@ impl<'a, 'tcx, D> DataflowAnalysis<'a, 'tcx, D> where D: BitDenotation<'tcx>
         let kill_sets = gen_sets.clone();
 
         DataflowAnalysis {
-            mir,
+            body,
             dead_unwinds,
             flow_state: DataflowState {
                 sets: AllSets {
@@ -727,7 +746,10 @@ impl<'a, 'tcx, D> DataflowAnalysis<'a, 'tcx, D> where D: BitDenotation<'tcx>
     }
 }
 
-impl<'a, 'tcx: 'a, D> DataflowAnalysis<'a, 'tcx, D> where D: BitDenotation<'tcx> {
+impl<'a, 'tcx, D> DataflowAnalysis<'a, 'tcx, D>
+where
+    D: BitDenotation<'tcx>,
+{
     /// Propagates the bits of `in_out` into all the successors of `bb`,
     /// using bitwise operator denoted by `self.operator`.
     ///
@@ -795,11 +817,9 @@ impl<'a, 'tcx: 'a, D> DataflowAnalysis<'a, 'tcx, D> where D: BitDenotation<'tcx>
                     self.propagate_bits_into_entry_set_for(in_out, dest_bb, dirty_list);
                 }
             }
-            mir::TerminatorKind::FalseEdges { real_target, ref imaginary_targets } => {
+            mir::TerminatorKind::FalseEdges { real_target, imaginary_target } => {
                 self.propagate_bits_into_entry_set_for(in_out, real_target, dirty_list);
-                for target in imaginary_targets {
-                    self.propagate_bits_into_entry_set_for(in_out, *target, dirty_list);
-                }
+                self.propagate_bits_into_entry_set_for(in_out, imaginary_target, dirty_list);
             }
             mir::TerminatorKind::FalseUnwind { real_target, unwind } => {
                 self.propagate_bits_into_entry_set_for(in_out, real_target, dirty_list);

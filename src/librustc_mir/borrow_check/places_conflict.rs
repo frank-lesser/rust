@@ -24,16 +24,16 @@ crate enum PlaceConflictBias {
 /// Helper function for checking if places conflict with a mutable borrow and deep access depth.
 /// This is used to check for places conflicting outside of the borrow checking code (such as in
 /// dataflow).
-crate fn places_conflict<'gcx, 'tcx>(
-    tcx: TyCtxt<'_, 'gcx, 'tcx>,
-    mir: &Body<'tcx>,
+crate fn places_conflict<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
     borrow_place: &Place<'tcx>,
     access_place: &Place<'tcx>,
     bias: PlaceConflictBias,
 ) -> bool {
     borrow_conflicts_with_place(
         tcx,
-        mir,
+        body,
         borrow_place,
         BorrowKind::Mut { allow_two_phase_borrow: true },
         access_place,
@@ -46,9 +46,9 @@ crate fn places_conflict<'gcx, 'tcx>(
 /// access depth. The `bias` parameter is used to determine how the unknowable (comparing runtime
 /// array indices, for example) should be interpreted - this depends on what the caller wants in
 /// order to make the conservative choice and preserve soundness.
-pub(super) fn borrow_conflicts_with_place<'gcx, 'tcx>(
-    tcx: TyCtxt<'_, 'gcx, 'tcx>,
-    mir: &Body<'tcx>,
+pub(super) fn borrow_conflicts_with_place<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
     borrow_place: &Place<'tcx>,
     borrow_kind: BorrowKind,
     access_place: &Place<'tcx>,
@@ -72,7 +72,7 @@ pub(super) fn borrow_conflicts_with_place<'gcx, 'tcx>(
         access_place.iterate(|access_base, access_projections| {
             place_components_conflict(
                 tcx,
-                mir,
+                body,
                 (borrow_base, borrow_projections),
                 borrow_kind,
                 (access_base, access_projections),
@@ -83,9 +83,9 @@ pub(super) fn borrow_conflicts_with_place<'gcx, 'tcx>(
     })
 }
 
-fn place_components_conflict<'gcx, 'tcx>(
-    tcx: TyCtxt<'_, 'gcx, 'tcx>,
-    mir: &Body<'tcx>,
+fn place_components_conflict<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
     borrow_projections: (&PlaceBase<'tcx>, ProjectionsIter<'_, 'tcx>),
     borrow_kind: BorrowKind,
     access_projections: (&PlaceBase<'tcx>, ProjectionsIter<'_, 'tcx>),
@@ -175,7 +175,7 @@ fn place_components_conflict<'gcx, 'tcx>(
                 // check whether the components being borrowed vs
                 // accessed are disjoint (as in the second example,
                 // but not the first).
-                match place_projection_conflict(tcx, mir, borrow_c, access_c, bias) {
+                match place_projection_conflict(tcx, body, borrow_c, access_c, bias) {
                     Overlap::Arbitrary => {
                         // We have encountered different fields of potentially
                         // the same union - the borrow now partially overlaps.
@@ -214,7 +214,7 @@ fn place_components_conflict<'gcx, 'tcx>(
 
                 let base = &borrow_c.base;
                 let elem = &borrow_c.elem;
-                let base_ty = base.ty(mir, tcx).ty;
+                let base_ty = base.ty(body, tcx).ty;
 
                 match (elem, &base_ty.sty, access) {
                     (_, _, Shallow(Some(ArtificialField::ArrayLength)))
@@ -298,8 +298,8 @@ fn place_components_conflict<'gcx, 'tcx>(
 // Given that the bases of `elem1` and `elem2` are always either equal
 // or disjoint (and have the same type!), return the overlap situation
 // between `elem1` and `elem2`.
-fn place_base_conflict<'a, 'gcx: 'tcx, 'tcx>(
-    tcx: TyCtxt<'a, 'gcx, 'tcx>,
+fn place_base_conflict<'tcx>(
+    tcx: TyCtxt<'tcx>,
     elem1: &PlaceBase<'tcx>,
     elem2: &PlaceBase<'tcx>,
 ) -> Overlap {
@@ -365,9 +365,9 @@ fn place_base_conflict<'a, 'gcx: 'tcx, 'tcx>(
 // Given that the bases of `elem1` and `elem2` are always either equal
 // or disjoint (and have the same type!), return the overlap situation
 // between `elem1` and `elem2`.
-fn place_projection_conflict<'a, 'gcx: 'tcx, 'tcx>(
-    tcx: TyCtxt<'a, 'gcx, 'tcx>,
-    mir: &Body<'tcx>,
+fn place_projection_conflict<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
     pi1: &Projection<'tcx>,
     pi2: &Projection<'tcx>,
     bias: PlaceConflictBias,
@@ -384,7 +384,7 @@ fn place_projection_conflict<'a, 'gcx: 'tcx, 'tcx>(
                 debug!("place_element_conflict: DISJOINT-OR-EQ-FIELD");
                 Overlap::EqualOrDisjoint
             } else {
-                let ty = pi1.base.ty(mir, tcx).ty;
+                let ty = pi1.base.ty(body, tcx).ty;
                 match ty.sty {
                     ty::Adt(def, _) if def.is_union() => {
                         // Different fields of a union, we are basically stuck.

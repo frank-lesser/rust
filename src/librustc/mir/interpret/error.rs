@@ -74,19 +74,16 @@ impl<'tcx> fmt::Display for FrameInfo<'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx> ConstEvalErr<'tcx> {
-    pub fn struct_error(&self,
-        tcx: TyCtxtAt<'a, 'gcx, 'tcx>,
-        message: &str)
-        -> Result<DiagnosticBuilder<'tcx>, ErrorHandled>
-    {
+impl<'tcx> ConstEvalErr<'tcx> {
+    pub fn struct_error(
+        &self,
+        tcx: TyCtxtAt<'tcx>,
+        message: &str,
+    ) -> Result<DiagnosticBuilder<'tcx>, ErrorHandled> {
         self.struct_generic(tcx, message, None)
     }
 
-    pub fn report_as_error(&self,
-        tcx: TyCtxtAt<'a, 'gcx, 'tcx>,
-        message: &str
-    ) -> ErrorHandled {
+    pub fn report_as_error(&self, tcx: TyCtxtAt<'tcx>, message: &str) -> ErrorHandled {
         let err = self.struct_error(tcx, message);
         match err {
             Ok(mut err) => {
@@ -97,8 +94,9 @@ impl<'a, 'gcx, 'tcx> ConstEvalErr<'tcx> {
         }
     }
 
-    pub fn report_as_lint(&self,
-        tcx: TyCtxtAt<'a, 'gcx, 'tcx>,
+    pub fn report_as_lint(
+        &self,
+        tcx: TyCtxtAt<'tcx>,
         message: &str,
         lint_root: hir::HirId,
         span: Option<Span>,
@@ -131,7 +129,7 @@ impl<'a, 'gcx, 'tcx> ConstEvalErr<'tcx> {
 
     fn struct_generic(
         &self,
-        tcx: TyCtxtAt<'a, 'gcx, 'tcx>,
+        tcx: TyCtxtAt<'tcx>,
         message: &str,
         lint_root: Option<hir::HirId>,
     ) -> Result<DiagnosticBuilder<'tcx>, ErrorHandled> {
@@ -172,10 +170,7 @@ impl<'a, 'gcx, 'tcx> ConstEvalErr<'tcx> {
     }
 }
 
-pub fn struct_error<'a, 'gcx, 'tcx>(
-    tcx: TyCtxtAt<'a, 'gcx, 'tcx>,
-    msg: &str,
-) -> DiagnosticBuilder<'tcx> {
+pub fn struct_error<'tcx>(tcx: TyCtxtAt<'tcx>, msg: &str) -> DiagnosticBuilder<'tcx> {
     struct_span_err!(tcx.sess, tcx.span, E0080, "{}", msg)
 }
 
@@ -185,12 +180,12 @@ pub fn struct_error<'a, 'gcx, 'tcx>(
 /// a `InterpError`. In `librustc_mir::interpret`, we have the `err!`
 /// macro for this
 #[derive(Debug, Clone)]
-pub struct EvalError<'tcx> {
+pub struct InterpErrorInfo<'tcx> {
     pub kind: InterpError<'tcx, u64>,
     backtrace: Option<Box<Backtrace>>,
 }
 
-impl<'tcx> EvalError<'tcx> {
+impl<'tcx> InterpErrorInfo<'tcx> {
     pub fn print_backtrace(&mut self) {
         if let Some(ref mut backtrace) = self.backtrace {
             print_backtrace(&mut *backtrace);
@@ -203,7 +198,7 @@ fn print_backtrace(backtrace: &mut Backtrace) {
     eprintln!("\n\nAn error occurred in miri:\n{:?}", backtrace);
 }
 
-impl<'tcx> From<InterpError<'tcx, u64>> for EvalError<'tcx> {
+impl<'tcx> From<InterpError<'tcx, u64>> for InterpErrorInfo<'tcx> {
     fn from(kind: InterpError<'tcx, u64>) -> Self {
         let backtrace = match env::var("RUST_CTFE_BACKTRACE") {
             // Matching `RUST_BACKTRACE` -- we treat "0" the same as "not present".
@@ -220,7 +215,7 @@ impl<'tcx> From<InterpError<'tcx, u64>> for EvalError<'tcx> {
             },
             _ => None,
         };
-        EvalError {
+        InterpErrorInfo {
             kind,
             backtrace,
         }
@@ -320,7 +315,7 @@ pub enum InterpError<'tcx, O> {
     InfiniteLoop,
 }
 
-pub type EvalResult<'tcx, T = ()> = Result<T, EvalError<'tcx>>;
+pub type InterpResult<'tcx, T = ()> = Result<T, InterpErrorInfo<'tcx>>;
 
 impl<'tcx, O> InterpError<'tcx, O> {
     pub fn description(&self) -> &str {
@@ -456,7 +451,7 @@ impl<'tcx, O> InterpError<'tcx, O> {
     }
 }
 
-impl<'tcx> fmt::Display for EvalError<'tcx> {
+impl<'tcx> fmt::Display for InterpErrorInfo<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.kind)
     }

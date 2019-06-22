@@ -32,12 +32,12 @@ struct ClosureSignatures<'tcx> {
     liberated_sig: ty::FnSig<'tcx>,
 }
 
-impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub fn check_expr_closure(
         &self,
         expr: &hir::Expr,
         _capture: hir::CaptureClause,
-        decl: &'gcx hir::FnDecl,
+        decl: &'tcx hir::FnDecl,
         body_id: hir::BodyId,
         gen: Option<hir::GeneratorMovability>,
         expected: Expectation<'tcx>,
@@ -62,8 +62,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         &self,
         expr: &hir::Expr,
         opt_kind: Option<ty::ClosureKind>,
-        decl: &'gcx hir::FnDecl,
-        body: &'gcx hir::Body,
+        decl: &'tcx hir::FnDecl,
+        body: &'tcx hir::Body,
         gen: Option<hir::GeneratorMovability>,
         expected_sig: Option<ExpectedSig<'tcx>>,
     ) -> Ty<'tcx> {
@@ -592,13 +592,13 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         expr_def_id: DefId,
         decl: &hir::FnDecl,
     ) -> ty::PolyFnSig<'tcx> {
-        let astconv: &dyn AstConv<'_, '_> = self;
+        let astconv: &dyn AstConv<'_> = self;
 
         // First, convert the types that the user supplied (if any).
         let supplied_arguments = decl.inputs.iter().map(|a| astconv.ast_ty_to_ty(a));
         let supplied_return = match decl.output {
             hir::Return(ref output) => astconv.ast_ty_to_ty(&output),
-            hir::DefaultReturn(_) => astconv.ty_infer(decl.output.span()),
+            hir::DefaultReturn(_) => astconv.ty_infer(None, decl.output.span()),
         };
 
         let result = ty::Binder::bind(self.tcx.mk_fn_sig(
@@ -624,7 +624,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
     /// so should yield an error, but returns back a signature where
     /// all parameters are of type `TyErr`.
     fn error_sig_of_closure(&self, decl: &hir::FnDecl) -> ty::PolyFnSig<'tcx> {
-        let astconv: &dyn AstConv<'_, '_> = self;
+        let astconv: &dyn AstConv<'_> = self;
 
         let supplied_arguments = decl.inputs.iter().map(|a| {
             // Convert the types that the user supplied (if any), but ignore them.

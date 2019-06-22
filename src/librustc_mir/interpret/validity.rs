@@ -1,5 +1,4 @@
 use std::fmt::Write;
-use std::hash::Hash;
 use std::ops::RangeInclusive;
 
 use syntax_pos::symbol::{sym, Symbol};
@@ -8,8 +7,10 @@ use rustc::ty::layout::{self, Size, Align, TyLayout, LayoutOf, VariantIdx};
 use rustc::ty;
 use rustc_data_structures::fx::FxHashSet;
 use rustc::mir::interpret::{
-    Scalar, GlobalAlloc, EvalResult, InterpError, CheckInAllocMsg,
+    Scalar, GlobalAlloc, InterpResult, InterpError, CheckInAllocMsg,
 };
+
+use std::hash::Hash;
 
 use super::{
     OpTy, Machine, InterpretCx, ValueVisitor, MPlaceTy,
@@ -76,19 +77,34 @@ pub enum PathElem {
 }
 
 /// State for tracking recursive validation of references
-pub struct RefTracking<T> {
+pub struct RefTracking<T, PATH = ()> {
     pub seen: FxHashSet<T>,
-    pub todo: Vec<(T, Vec<PathElem>)>,
+    pub todo: Vec<(T, PATH)>,
 }
 
-impl<'tcx, T: Copy + Eq + Hash> RefTracking<T> {
-    pub fn new(op: T) -> Self {
-        let mut ref_tracking = RefTracking {
+impl<T: Copy + Eq + Hash + std::fmt::Debug, PATH: Default> RefTracking<T, PATH> {
+    pub fn empty() -> Self {
+        RefTracking {
             seen: FxHashSet::default(),
-            todo: vec![(op, Vec::new())],
+            todo: vec![],
+        }
+    }
+    pub fn new(op: T) -> Self {
+        let mut ref_tracking_for_consts = RefTracking {
+            seen: FxHashSet::default(),
+            todo: vec![(op, PATH::default())],
         };
-        ref_tracking.seen.insert(op);
-        ref_tracking
+        ref_tracking_for_consts.seen.insert(op);
+        ref_tracking_for_consts
+    }
+
+    pub fn track(&mut self, op: T, path: impl FnOnce() -> PATH) {
+        if self.seen.insert(op) {
+            trace!("Recursing below ptr {:#?}", op);
+            let path = path();
+            // Remember to come back to this later.
+            self.todo.push((op, path));
+        }
     }
 }
 
@@ -149,17 +165,19 @@ fn wrapping_range_format(r: &RangeInclusive<u128>, max_hi: u128) -> String {
     }
 }
 
-struct ValidityVisitor<'rt, 'a: 'rt, 'mir: 'rt, 'tcx: 'a+'rt+'mir, M: Machine<'a, 'mir, 'tcx>+'rt> {
+struct ValidityVisitor<'rt, 'mir, 'tcx, M: Machine<'mir, 'tcx>> {
     /// The `path` may be pushed to, but the part that is present when a function
     /// starts must not be changed!  `visit_fields` and `visit_array` rely on
     /// this stack discipline.
     path: Vec<PathElem>,
-    ref_tracking: Option<&'rt mut RefTracking<MPlaceTy<'tcx, M::PointerTag>>>,
-    const_mode: bool,
-    ecx: &'rt InterpretCx<'a, 'mir, 'tcx, M>,
+    ref_tracking_for_consts: Option<&'rt mut RefTracking<
+        MPlaceTy<'tcx, M::PointerTag>,
+        Vec<PathElem>,
+    >>,
+    ecx: &'rt InterpretCx<'mir, 'tcx, M>,
 }
 
-impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> ValidityVisitor<'rt, 'a, 'mir, 'tcx, M> {
+impl<'rt, 'mir, 'tcx, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, 'tcx, M> {
     fn aggregate_field_path_elem(
         &mut self,
         layout: TyLayout<'tcx>,
@@ -175,8 +193,8 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> ValidityVisitor<'rt, 'a, '
                         // Sometimes the index is beyond the number of upvars (seen
                         // for a generator).
                         if let Some((&var_hir_id, _)) = upvars.get_index(field) {
-                            let var_node_id = self.ecx.tcx.hir().hir_to_node_id(var_hir_id);
-                            if let hir::Node::Binding(pat) = self.ecx.tcx.hir().get(var_node_id) {
+                            let node = self.ecx.tcx.hir().get(var_hir_id);
+                            if let hir::Node::Binding(pat) = node {
                                 if let hir::PatKind::Binding(_, _, ident, _) = pat.node {
                                     name = Some(ident.name);
                                 }
@@ -223,7 +241,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> ValidityVisitor<'rt, 'a, '
         &mut self,
         new_op: OpTy<'tcx, M::PointerTag>,
         elem: PathElem,
-    ) -> EvalResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         // Remember the old state
         let path_len = self.path.len();
         // Perform operation
@@ -235,13 +253,13 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> ValidityVisitor<'rt, 'a, '
     }
 }
 
-impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
-    ValueVisitor<'a, 'mir, 'tcx, M> for ValidityVisitor<'rt, 'a, 'mir, 'tcx, M>
+impl<'rt, 'mir, 'tcx, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
+    for ValidityVisitor<'rt, 'mir, 'tcx, M>
 {
     type V = OpTy<'tcx, M::PointerTag>;
 
     #[inline(always)]
-    fn ecx(&self) -> &InterpretCx<'a, 'mir, 'tcx, M> {
+    fn ecx(&self) -> &InterpretCx<'mir, 'tcx, M> {
         &self.ecx
     }
 
@@ -251,7 +269,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
         old_op: OpTy<'tcx, M::PointerTag>,
         field: usize,
         new_op: OpTy<'tcx, M::PointerTag>
-    ) -> EvalResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         let elem = self.aggregate_field_path_elem(old_op.layout, field);
         self.visit_elem(new_op, elem)
     }
@@ -262,7 +280,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
         old_op: OpTy<'tcx, M::PointerTag>,
         variant_id: VariantIdx,
         new_op: OpTy<'tcx, M::PointerTag>
-    ) -> EvalResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         let name = match old_op.layout.ty.sty {
             ty::Adt(adt, _) => PathElem::Variant(adt.variants[variant_id].ident.name),
             // Generators also have variants
@@ -273,7 +291,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
     }
 
     #[inline]
-    fn visit_value(&mut self, op: OpTy<'tcx, M::PointerTag>) -> EvalResult<'tcx>
+    fn visit_value(&mut self, op: OpTy<'tcx, M::PointerTag>) -> InterpResult<'tcx>
     {
         trace!("visit_value: {:?}, {:?}", *op, op.layout);
         // Translate some possible errors to something nicer.
@@ -293,7 +311,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
         }
     }
 
-    fn visit_primitive(&mut self, value: OpTy<'tcx, M::PointerTag>) -> EvalResult<'tcx>
+    fn visit_primitive(&mut self, value: OpTy<'tcx, M::PointerTag>) -> InterpResult<'tcx>
     {
         let value = self.ecx.read_immediate(value)?;
         // Go over all the primitive types
@@ -314,7 +332,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                 // types below!
                 let size = value.layout.size;
                 let value = value.to_scalar_or_undef();
-                if self.const_mode {
+                if self.ref_tracking_for_consts.is_some() {
                     // Integers/floats in CTFE: Must be scalar bits, pointers are dangerous
                     try_validation!(value.to_bits(size),
                         value, self.path, "initialized plain (non-pointer) bytes");
@@ -324,7 +342,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                 }
             }
             ty::RawPtr(..) => {
-                if self.const_mode {
+                if self.ref_tracking_for_consts.is_some() {
                     // Integers/floats in CTFE: For consistency with integers, we do not
                     // accept undef.
                     let _ptr = try_validation!(value.to_scalar_ptr(),
@@ -393,9 +411,9 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                     }
                 }
                 // Recursive checking
-                if let Some(ref mut ref_tracking) = self.ref_tracking {
-                    assert!(self.const_mode, "We should only do recursie checking in const mode");
+                if let Some(ref mut ref_tracking) = self.ref_tracking_for_consts {
                     let place = self.ecx.ref_to_mplace(value)?;
+                    // FIXME(RalfJ): check ZST for inbound pointers
                     if size != Size::ZERO {
                         // Non-ZST also have to be dereferencable
                         let ptr = try_validation!(place.ptr.to_ptr(),
@@ -423,16 +441,15 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                     // before.  Proceed recursively even for integer pointers, no
                     // reason to skip them! They are (recursively) valid for some ZST,
                     // but not for others (e.g., `!` is a ZST).
-                    if ref_tracking.seen.insert(place) {
-                        trace!("Recursing below ptr {:#?}", *place);
+                    let path = &self.path;
+                    ref_tracking.track(place, || {
                         // We need to clone the path anyway, make sure it gets created
                         // with enough space for the additional `Deref`.
-                        let mut new_path = Vec::with_capacity(self.path.len()+1);
-                        new_path.clone_from(&self.path);
+                        let mut new_path = Vec::with_capacity(path.len() + 1);
+                        new_path.clone_from(path);
                         new_path.push(PathElem::Deref);
-                        // Remember to come back to this later.
-                        ref_tracking.todo.push((place, new_path));
-                    }
+                        new_path
+                    });
                 }
             }
             ty::FnPtr(_sig) => {
@@ -449,7 +466,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
         Ok(())
     }
 
-    fn visit_uninhabited(&mut self) -> EvalResult<'tcx>
+    fn visit_uninhabited(&mut self) -> InterpResult<'tcx>
     {
         validation_failure!("a value of an uninhabited type", self.path)
     }
@@ -458,7 +475,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
         &mut self,
         op: OpTy<'tcx, M::PointerTag>,
         layout: &layout::Scalar,
-    ) -> EvalResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         let value = self.ecx.read_scalar(op)?;
         // Determine the allowed range
         let (lo, hi) = layout.valid_range.clone().into_inner();
@@ -488,10 +505,17 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                     let non_null =
                         self.ecx.memory.check_align(
                             Scalar::Ptr(ptr), Align::from_bytes(1).unwrap()
-                        ).is_ok() ||
-                        self.ecx.memory.get_fn(ptr).is_ok();
+                        ).is_ok();
                     if !non_null {
-                        // could be NULL
+                        // These conditions are just here to improve the diagnostics so we can
+                        // differentiate between null pointers and dangling pointers
+                        if self.ref_tracking_for_consts.is_some() &&
+                            self.ecx.memory.get(ptr.alloc_id).is_err() &&
+                            self.ecx.memory.get_fn(ptr).is_err() {
+                            return validation_failure!(
+                                "encountered dangling pointer", self.path
+                            );
+                        }
                         return validation_failure!("a potentially NULL pointer", self.path);
                     }
                     return Ok(());
@@ -526,8 +550,8 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
     fn visit_aggregate(
         &mut self,
         op: OpTy<'tcx, M::PointerTag>,
-        fields: impl Iterator<Item=EvalResult<'tcx, Self::V>>,
-    ) -> EvalResult<'tcx> {
+        fields: impl Iterator<Item=InterpResult<'tcx, Self::V>>,
+    ) -> InterpResult<'tcx> {
         match op.layout.ty.sty {
             ty::Str => {
                 let mplace = op.to_mem_place(); // strings are never immediate
@@ -559,7 +583,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                 // This is the size in bytes of the whole array.
                 let size = ty_size * len;
 
-                let ptr = mplace.ptr.to_ptr()?;
+                let ptr = self.ecx.force_ptr(mplace.ptr)?;
 
                 // NOTE: Keep this in sync with the handling of integer and float
                 // types above, in `visit_primitive`.
@@ -574,7 +598,7 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
                     self.ecx,
                     ptr,
                     size,
-                    /*allow_ptr_and_undef*/!self.const_mode,
+                    /*allow_ptr_and_undef*/ self.ref_tracking_for_consts.is_none(),
                 ) {
                     // In the happy case, we needn't check anything else.
                     Ok(()) => {},
@@ -607,28 +631,30 @@ impl<'rt, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>>
     }
 }
 
-impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> {
+impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> InterpretCx<'mir, 'tcx, M> {
     /// This function checks the data at `op`. `op` is assumed to cover valid memory if it
     /// is an indirect operand.
     /// It will error if the bits at the destination do not match the ones described by the layout.
     ///
-    /// `ref_tracking` can be `None` to avoid recursive checking below references.
+    /// `ref_tracking_for_consts` can be `None` to avoid recursive checking below references.
     /// This also toggles between "run-time" (no recursion) and "compile-time" (with recursion)
-    /// validation (e.g., pointer values are fine in integers at runtime).
+    /// validation (e.g., pointer values are fine in integers at runtime) and various other const
+    /// specific validation checks
     pub fn validate_operand(
         &self,
         op: OpTy<'tcx, M::PointerTag>,
         path: Vec<PathElem>,
-        ref_tracking: Option<&mut RefTracking<MPlaceTy<'tcx, M::PointerTag>>>,
-        const_mode: bool,
-    ) -> EvalResult<'tcx> {
+        ref_tracking_for_consts: Option<&mut RefTracking<
+            MPlaceTy<'tcx, M::PointerTag>,
+            Vec<PathElem>,
+        >>,
+    ) -> InterpResult<'tcx> {
         trace!("validate_operand: {:?}, {:?}", *op, op.layout.ty);
 
         // Construct a visitor
         let mut visitor = ValidityVisitor {
             path,
-            ref_tracking,
-            const_mode,
+            ref_tracking_for_consts,
             ecx: self,
         };
 

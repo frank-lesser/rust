@@ -25,7 +25,7 @@ use crate::source_map::Spanned;
 use crate::edition::{ALL_EDITIONS, Edition};
 use crate::visit::{self, FnKind, Visitor};
 use crate::parse::{token, ParseSess};
-use crate::symbol::{Symbol, kw, sym};
+use crate::symbol::{Symbol, sym};
 use crate::tokenstream::TokenTree;
 
 use errors::{Applicability, DiagnosticBuilder, Handler};
@@ -526,9 +526,6 @@ declare_features! (
     // Allows `impl Trait` in bindings (`let`, `const`, `static`).
     (active, impl_trait_in_bindings, "1.30.0", Some(34511), None),
 
-    // Allows `const _: TYPE = VALUE`.
-    (active, underscore_const_names, "1.31.0", Some(54912), None),
-
     // Allows using `reason` in lint attributes and the `#[expect(lint)]` lint check.
     (active, lint_reasons, "1.31.0", Some(54503), None),
 
@@ -551,18 +548,23 @@ declare_features! (
     // Allows using `#[optimize(X)]`.
     (active, optimize_attribute, "1.34.0", Some(54882), None),
 
-    // Allows using `#[repr(align(X))]` on enums.
-    (active, repr_align_enum, "1.34.0", Some(57996), None),
-
     // Allows using C-variadics.
     (active, c_variadic, "1.34.0", Some(44930), None),
 
     // Allows the user of associated type bounds.
     (active, associated_type_bounds, "1.34.0", Some(52662), None),
 
-    // Allows calling constructor functions in `const fn`
-    // FIXME Create issue
+    // Attributes on formal function params.
+    (active, param_attrs, "1.36.0", Some(60406), None),
+
+    // Allows calling constructor functions in `const fn`.
     (active, const_constructor, "1.37.0", Some(61456), None),
+
+    // #[repr(transparent)] on enums.
+    (active, transparent_enums, "1.37.0", Some(60405), None),
+
+    // #[repr(transparent)] on unions.
+    (active, transparent_unions, "1.37.0", Some(60405), None),
 
     // -------------------------------------------------------------------------
     // feature-group-end: actual feature gates
@@ -843,6 +845,11 @@ declare_features! (
     (accepted, extern_crate_self, "1.34.0", Some(56409), None),
     // Allows arbitrary delimited token streams in non-macro attributes.
     (accepted, unrestricted_attribute_tokens, "1.34.0", Some(55208), None),
+    // Allows using `#[repr(align(X))]` on enums with equivalent semantics
+    // to wrapping an enum in a wrapper struct with `#[repr(align(X))]`.
+    (accepted, repr_align_enum, "1.37.0", Some(57996), None),
+    // Allows `const _: TYPE = VALUE`.
+    (accepted, underscore_const_names, "1.37.0", Some(54912), None),
 
     // -------------------------------------------------------------------------
     // feature-group-end: accepted features
@@ -1330,6 +1337,16 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
                                                 sym::rustc_attrs,
                                                 "internal implementation detail",
                                                 cfg_fn!(rustc_attrs))),
+
+    (sym::rustc_allocator, Whitelisted, template!(Word), Gated(Stability::Unstable,
+                                                sym::rustc_attrs,
+                                                "internal implementation detail",
+                                                cfg_fn!(rustc_attrs))),
+
+    (sym::rustc_dummy, Normal, template!(Word /* doesn't matter*/), Gated(Stability::Unstable,
+                                         sym::rustc_attrs,
+                                         "used by the test suite",
+                                         cfg_fn!(rustc_attrs))),
 
     // FIXME: #14408 whitelist docs since rustdoc looks at them
     (
@@ -1957,12 +1974,10 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
         }
 
         match attr_info {
-            Some(&(name, _, template, _)) => self.check_builtin_attribute(
-                attr,
-                name,
-                template
-            ),
-            None => if let Some(TokenTree::Token(token)) = attr.tokens.trees().next() {
+            // `rustc_dummy` doesn't have any restrictions specific to built-in attributes.
+            Some(&(name, _, template, _)) if name != sym::rustc_dummy =>
+                self.check_builtin_attribute(attr, name, template),
+            _ => if let Some(TokenTree::Token(token)) = attr.tokens.trees().next() {
                 if token == token::Eq {
                     // All key-value attributes are restricted to meta-item syntax.
                     attr.parse_meta(self.context.parse_sess).map_err(|mut err| err.emit()).ok();
@@ -1984,13 +1999,6 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
 
     fn visit_item(&mut self, i: &'a ast::Item) {
         match i.node {
-            ast::ItemKind::Const(_,_) => {
-                if i.ident.name == kw::Underscore {
-                    gate_feature_post!(&self, underscore_const_names, i.span,
-                                        "naming constants with `_` is unstable");
-                }
-            }
-
             ast::ItemKind::ForeignMod(ref foreign_module) => {
                 self.check_abi(foreign_module.abi, i.span);
             }
@@ -2020,17 +2028,6 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                         if item.check_name(sym::simd) {
                             gate_feature_post!(&self, repr_simd, attr.span,
                                                "SIMD types are experimental and possibly buggy");
-                        }
-                    }
-                }
-            }
-
-            ast::ItemKind::Enum(..) => {
-                for attr in attr::filter_by_name(&i.attrs[..], sym::repr) {
-                    for item in attr.meta_item_list().unwrap_or_else(Vec::new) {
-                        if item.check_name(sym::align) {
-                            gate_feature_post!(&self, repr_align_enum, attr.span,
-                                               "`#[repr(align(x))]` on enums is experimental");
                         }
                     }
                 }
@@ -2508,6 +2505,18 @@ pub fn check_crate(krate: &ast::Crate,
         parse_sess: sess,
         plugin_attributes,
     };
+
+    sess
+        .param_attr_spans
+        .borrow()
+        .iter()
+        .for_each(|span| gate_feature!(
+            &ctx,
+            param_attrs,
+            *span,
+            "attributes on function parameters are unstable"
+        ));
+
     let visitor = &mut PostExpansionVisitor {
         context: &ctx,
         builtin_attributes: &*BUILTIN_ATTRIBUTE_MAP,

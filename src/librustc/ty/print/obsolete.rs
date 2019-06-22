@@ -16,18 +16,14 @@ use syntax::ast;
 
 /// Same as `unique_type_name()` but with the result pushed onto the given
 /// `output` parameter.
-pub struct DefPathBasedNames<'a, 'tcx: 'a> {
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+pub struct DefPathBasedNames<'tcx> {
+    tcx: TyCtxt<'tcx>,
     omit_disambiguators: bool,
     omit_local_crate_name: bool,
 }
 
-impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
-    pub fn new(
-        tcx: TyCtxt<'a, 'tcx, 'tcx>,
-        omit_disambiguators: bool,
-        omit_local_crate_name: bool,
-    ) -> Self {
+impl DefPathBasedNames<'tcx> {
+    pub fn new(tcx: TyCtxt<'tcx>, omit_disambiguators: bool, omit_local_crate_name: bool) -> Self {
         DefPathBasedNames { tcx, omit_disambiguators, omit_local_crate_name }
     }
 
@@ -190,7 +186,7 @@ impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
     // as well as the unprintable types of constants (see `push_type_name` for more details).
     pub fn push_const_name(&self, c: &Const<'tcx>, output: &mut String, debug: bool) {
         match c.val {
-            ConstValue::Scalar(..) | ConstValue::Slice { .. } | ConstValue::ByRef(..) => {
+            ConstValue::Scalar(..) | ConstValue::Slice { .. } | ConstValue::ByRef { .. } => {
                 // FIXME(const_generics): we could probably do a better job here.
                 write!(output, "{:?}", c).unwrap()
             }

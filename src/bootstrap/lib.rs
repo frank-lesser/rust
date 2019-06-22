@@ -270,14 +270,9 @@ pub struct Build {
 #[derive(Debug)]
 struct Crate {
     name: Interned<String>,
-    version: String,
     deps: HashSet<Interned<String>>,
     id: String,
     path: PathBuf,
-    doc_step: String,
-    build_step: String,
-    test_step: String,
-    bench_step: String,
 }
 
 impl Crate {
@@ -1214,8 +1209,7 @@ impl Build {
     /// when this function is called.
     pub fn cp_r(&self, src: &Path, dst: &Path) {
         if self.config.dry_run { return; }
-        for f in t!(fs::read_dir(src)) {
-            let f = t!(f);
+        for f in self.read_dir(src) {
             let path = f.path();
             let name = path.file_name().unwrap();
             let dst = dst.join(name);

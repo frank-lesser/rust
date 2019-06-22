@@ -79,7 +79,7 @@
 #![feature(coerce_unsized)]
 #![feature(dispatch_from_dyn)]
 #![feature(core_intrinsics)]
-#![feature(custom_attribute)]
+#![cfg_attr(bootstrap, feature(custom_attribute))]
 #![feature(dropck_eyepatch)]
 #![feature(exact_size_is_empty)]
 #![feature(fmt_internals)]
@@ -141,7 +141,7 @@ mod boxed {
     pub use std::boxed::Box;
 }
 #[cfg(test)]
-mod boxed_test;
+mod tests;
 pub mod collections;
 #[cfg(all(target_has_atomic = "ptr", target_has_atomic = "cas"))]
 pub mod sync;

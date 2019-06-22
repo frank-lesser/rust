@@ -10,7 +10,7 @@ use rustc_data_structures::graph::dominators::Dominators;
 /// Returns `true` if the borrow represented by `kind` is
 /// allowed to be split into separate Reservation and
 /// Activation phases.
-pub(super) fn allow_two_phase_borrow<'a, 'tcx, 'gcx: 'tcx>(kind: BorrowKind) -> bool {
+pub(super) fn allow_two_phase_borrow(kind: BorrowKind) -> bool {
     kind.allows_two_phase_borrow()
 }
 
@@ -22,10 +22,10 @@ pub(super) enum Control {
 }
 
 /// Encapsulates the idea of iterating over every borrow that involves a particular path
-pub(super) fn each_borrow_involving_path<'a, 'tcx, 'gcx: 'tcx, F, I, S> (
+pub(super) fn each_borrow_involving_path<'tcx, F, I, S>(
     s: &mut S,
-    tcx: TyCtxt<'a, 'gcx, 'tcx>,
-    mir: &Body<'tcx>,
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
     _location: Location,
     access_place: (AccessDepth, &Place<'tcx>),
     borrow_set: &BorrowSet<'tcx>,
@@ -33,7 +33,7 @@ pub(super) fn each_borrow_involving_path<'a, 'tcx, 'gcx: 'tcx, F, I, S> (
     mut op: F,
 ) where
     F: FnMut(&mut S, BorrowIndex, &BorrowData<'tcx>) -> Control,
-    I: Iterator<Item=BorrowIndex>
+    I: Iterator<Item = BorrowIndex>,
 {
     let (access, place) = access_place;
 
@@ -47,7 +47,7 @@ pub(super) fn each_borrow_involving_path<'a, 'tcx, 'gcx: 'tcx, F, I, S> (
 
         if places_conflict::borrow_conflicts_with_place(
             tcx,
-            mir,
+            body,
             &borrowed.borrowed_place,
             borrowed.kind,
             place,

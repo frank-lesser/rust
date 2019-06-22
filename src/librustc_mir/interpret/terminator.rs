@@ -6,14 +6,14 @@ use rustc::ty::layout::{self, TyLayout, LayoutOf};
 use syntax::source_map::Span;
 use rustc_target::spec::abi::Abi;
 
-use rustc::mir::interpret::{EvalResult, PointerArithmetic, InterpError, Scalar};
+use rustc::mir::interpret::{InterpResult, PointerArithmetic, InterpError, Scalar};
 use super::{
     InterpretCx, Machine, Immediate, OpTy, ImmTy, PlaceTy, MPlaceTy, StackPopCleanup
 };
 
-impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> {
+impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> InterpretCx<'mir, 'tcx, M> {
     #[inline]
-    pub fn goto_block(&mut self, target: Option<mir::BasicBlock>) -> EvalResult<'tcx> {
+    pub fn goto_block(&mut self, target: Option<mir::BasicBlock>) -> InterpResult<'tcx> {
         if let Some(target) = target {
             self.frame_mut().block = target;
             self.frame_mut().stmt = 0;
@@ -26,7 +26,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> 
     pub(super) fn eval_terminator(
         &mut self,
         terminator: &mir::Terminator<'tcx>,
-    ) -> EvalResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         use rustc::mir::TerminatorKind::*;
         match terminator.kind {
             Return => {
@@ -79,7 +79,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> 
                 let (fn_def, abi) = match func.layout.ty.sty {
                     ty::FnPtr(sig) => {
                         let caller_abi = sig.abi();
-                        let fn_ptr = self.read_scalar(func)?.to_ptr()?;
+                        let fn_ptr = self.force_ptr(self.read_scalar(func)?.not_undef()?)?;
                         let instance = self.memory.get_fn(fn_ptr)?;
                         (instance, caller_abi)
                     }
@@ -206,7 +206,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> 
         rust_abi: bool,
         caller_arg: &mut impl Iterator<Item=OpTy<'tcx, M::PointerTag>>,
         callee_arg: PlaceTy<'tcx, M::PointerTag>,
-    ) -> EvalResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         if rust_abi && callee_arg.layout.is_zst() {
             // Nothing to do.
             trace!("Skipping callee ZST");
@@ -234,7 +234,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> 
         args: &[OpTy<'tcx, M::PointerTag>],
         dest: Option<PlaceTy<'tcx, M::PointerTag>>,
         ret: Option<mir::BasicBlock>,
-    ) -> EvalResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         trace!("eval_fn_call: {:#?}", instance);
 
         match instance.def {
@@ -281,15 +281,15 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> 
                 }
 
                 // We need MIR for this fn
-                let mir = match M::find_fn(self, instance, args, dest, ret)? {
-                    Some(mir) => mir,
+                let body = match M::find_fn(self, instance, args, dest, ret)? {
+                    Some(body) => body,
                     None => return Ok(()),
                 };
 
                 self.push_stack_frame(
                     instance,
                     span,
-                    mir,
+                    body,
                     dest,
                     StackPopCleanup::Goto(ret),
                 )?;
@@ -307,8 +307,8 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> 
                     );
                     trace!(
                         "spread_arg: {:?}, locals: {:#?}",
-                        mir.spread_arg,
-                        mir.args_iter()
+                        body.spread_arg,
+                        body.args_iter()
                             .map(|local|
                                 (local, self.layout_of_local(self.frame(), local, None).unwrap().ty)
                             )
@@ -337,7 +337,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> 
                                 .chain((0..untuple_arg.layout.fields.count()).into_iter()
                                     .map(|i| self.operand_field(untuple_arg, i as u64))
                                 )
-                                .collect::<EvalResult<'_, Vec<OpTy<'tcx, M::PointerTag>>>>()?)
+                                .collect::<InterpResult<'_, Vec<OpTy<'tcx, M::PointerTag>>>>()?)
                         } else {
                             // Plain arg passing
                             Cow::from(args)
@@ -352,12 +352,12 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> 
                     // this is a single iterator (that handles `spread_arg`), then
                     // `pass_argument` would be the loop body. It takes care to
                     // not advance `caller_iter` for ZSTs.
-                    let mut locals_iter = mir.args_iter();
+                    let mut locals_iter = body.args_iter();
                     while let Some(local) = locals_iter.next() {
                         let dest = self.eval_place(
                             &mir::Place::Base(mir::PlaceBase::Local(local))
                         )?;
-                        if Some(local) == mir.spread_arg {
+                        if Some(local) == body.spread_arg {
                             // Must be a tuple
                             for i in 0..dest.layout.fields.count() {
                                 let dest = self.place_field(dest, i as u64)?;
@@ -457,7 +457,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> InterpretCx<'a, 'mir, 'tcx, M> 
         instance: ty::Instance<'tcx>,
         span: Span,
         target: mir::BasicBlock,
-    ) -> EvalResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         trace!("drop_in_place: {:?},\n  {:?}, {:?}", *place, place.layout.ty, instance);
         // We take the address of the object.  This may well be unaligned, which is fine
         // for us here.  However, unaligned accesses will probably make the actual drop

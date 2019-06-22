@@ -11,7 +11,7 @@ use rustc::mir::{
 use rustc::mir::visit::{
     Visitor, PlaceContext, MutatingUseContext, MutVisitor, NonMutatingUseContext,
 };
-use rustc::mir::interpret::{InterpError, Scalar, GlobalId, EvalResult};
+use rustc::mir::interpret::{InterpError, Scalar, GlobalId, InterpResult};
 use rustc::ty::{self, Instance, ParamEnv, Ty, TyCtxt};
 use syntax_pos::{Span, DUMMY_SP};
 use rustc::ty::subst::InternalSubsts;
@@ -31,10 +31,7 @@ use crate::transform::{MirPass, MirSource};
 pub struct ConstProp;
 
 impl MirPass for ConstProp {
-    fn run_pass<'a, 'tcx>(&self,
-                          tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                          source: MirSource<'tcx>,
-                          mir: &mut Body<'tcx>) {
+    fn run_pass<'tcx>(&self, tcx: TyCtxt<'tcx>, source: MirSource<'tcx>, body: &mut Body<'tcx>) {
         // will be evaluated by miri and produce its errors there
         if source.promoted.is_some() {
             return;
@@ -44,7 +41,7 @@ impl MirPass for ConstProp {
         let hir_id = tcx.hir().as_local_hir_id(source.def_id())
                               .expect("Non-local call to local provider is_const_fn");
 
-        let is_fn_like = FnLikeNode::from_node(tcx.hir().get_by_hir_id(hir_id)).is_some();
+        let is_fn_like = FnLikeNode::from_node(tcx.hir().get(hir_id)).is_some();
         let is_assoc_const = match tcx.def_kind(source.def_id()) {
             Some(DefKind::AssocConst) => true,
             _ => false,
@@ -63,16 +60,16 @@ impl MirPass for ConstProp {
         // constants, instead of just checking for const-folding succeeding.
         // That would require an uniform one-def no-mutation analysis
         // and RPO (or recursing when needing the value of a local).
-        let mut optimization_finder = ConstPropagator::new(mir, tcx, source);
-        optimization_finder.visit_body(mir);
+        let mut optimization_finder = ConstPropagator::new(body, tcx, source);
+        optimization_finder.visit_body(body);
 
         // put back the data we stole from `mir`
         std::mem::replace(
-            &mut mir.source_scope_local_data,
+            &mut body.source_scope_local_data,
             optimization_finder.source_scope_local_data
         );
         std::mem::replace(
-            &mut mir.promoted,
+            &mut body.promoted,
             optimization_finder.promoted
         );
 
@@ -83,9 +80,9 @@ impl MirPass for ConstProp {
 type Const<'tcx> = OpTy<'tcx>;
 
 /// Finds optimization opportunities on the MIR.
-struct ConstPropagator<'a, 'mir, 'tcx:'a+'mir> {
-    ecx: InterpretCx<'a, 'mir, 'tcx, CompileTimeInterpreter<'a, 'mir, 'tcx>>,
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+struct ConstPropagator<'mir, 'tcx> {
+    ecx: InterpretCx<'mir, 'tcx, CompileTimeInterpreter<'mir, 'tcx>>,
+    tcx: TyCtxt<'tcx>,
     source: MirSource<'tcx>,
     places: IndexVec<Local, Option<Const<'tcx>>>,
     can_const_prop: IndexVec<Local, bool>,
@@ -95,7 +92,7 @@ struct ConstPropagator<'a, 'mir, 'tcx:'a+'mir> {
     promoted: IndexVec<Promoted, Body<'tcx>>,
 }
 
-impl<'a, 'b, 'tcx> LayoutOf for ConstPropagator<'a, 'b, 'tcx> {
+impl<'mir, 'tcx> LayoutOf for ConstPropagator<'mir, 'tcx> {
     type Ty = Ty<'tcx>;
     type TyLayout = Result<TyLayout<'tcx>, LayoutError<'tcx>>;
 
@@ -104,35 +101,35 @@ impl<'a, 'b, 'tcx> LayoutOf for ConstPropagator<'a, 'b, 'tcx> {
     }
 }
 
-impl<'a, 'b, 'tcx> HasDataLayout for ConstPropagator<'a, 'b, 'tcx> {
+impl<'mir, 'tcx> HasDataLayout for ConstPropagator<'mir, 'tcx> {
     #[inline]
     fn data_layout(&self) -> &TargetDataLayout {
         &self.tcx.data_layout
     }
 }
 
-impl<'a, 'b, 'tcx> HasTyCtxt<'tcx> for ConstPropagator<'a, 'b, 'tcx> {
+impl<'mir, 'tcx> HasTyCtxt<'tcx> for ConstPropagator<'mir, 'tcx> {
     #[inline]
-    fn tcx<'c>(&'c self) -> TyCtxt<'c, 'tcx, 'tcx> {
+    fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 }
 
-impl<'a, 'mir, 'tcx> ConstPropagator<'a, 'mir, 'tcx> {
+impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
     fn new(
-        mir: &mut Body<'tcx>,
-        tcx: TyCtxt<'a, 'tcx, 'tcx>,
+        body: &mut Body<'tcx>,
+        tcx: TyCtxt<'tcx>,
         source: MirSource<'tcx>,
-    ) -> ConstPropagator<'a, 'mir, 'tcx> {
+    ) -> ConstPropagator<'mir, 'tcx> {
         let param_env = tcx.param_env(source.def_id());
         let ecx = mk_eval_cx(tcx, tcx.def_span(source.def_id()), param_env);
-        let can_const_prop = CanConstProp::check(mir);
+        let can_const_prop = CanConstProp::check(body);
         let source_scope_local_data = std::mem::replace(
-            &mut mir.source_scope_local_data,
+            &mut body.source_scope_local_data,
             ClearCrossCrate::Clear
         );
         let promoted = std::mem::replace(
-            &mut mir.promoted,
+            &mut body.promoted,
             IndexVec::new()
         );
 
@@ -142,10 +139,10 @@ impl<'a, 'mir, 'tcx> ConstPropagator<'a, 'mir, 'tcx> {
             source,
             param_env,
             can_const_prop,
-            places: IndexVec::from_elem(None, &mir.local_decls),
+            places: IndexVec::from_elem(None, &body.local_decls),
             source_scope_local_data,
             //FIXME(wesleywiser) we can't steal this because `Visitor::super_visit_body()` needs it
-            local_decls: mir.local_decls.clone(),
+            local_decls: body.local_decls.clone(),
             promoted,
         }
     }
@@ -156,7 +153,7 @@ impl<'a, 'mir, 'tcx> ConstPropagator<'a, 'mir, 'tcx> {
         f: F
     ) -> Option<T>
     where
-        F: FnOnce(&mut Self) -> EvalResult<'tcx, T>,
+        F: FnOnce(&mut Self) -> InterpResult<'tcx, T>,
     {
         self.ecx.tcx.span = source_info.span;
         let lint_root = match self.source_scope_local_data {
@@ -315,8 +312,8 @@ impl<'a, 'mir, 'tcx> ConstPropagator<'a, 'mir, 'tcx> {
                     // cannot use `const_eval` here, because that would require having the MIR
                     // for the current function available, but we're producing said MIR right now
                     let res = self.use_ecx(source_info, |this| {
-                        let mir = &this.promoted[*promoted];
-                        eval_promoted(this.tcx, cid, mir, this.param_env)
+                        let body = &this.promoted[*promoted];
+                        eval_promoted(this.tcx, cid, body, this.param_env)
                     })?;
                     trace!("evaluated promoted {:?} to {:?}", promoted, res);
                     res.into()
@@ -554,7 +551,12 @@ impl<'a, 'mir, 'tcx> ConstPropagator<'a, 'mir, 'tcx> {
         source_info: SourceInfo,
     ) {
         trace!("attepting to replace {:?} with {:?}", rval, value);
-        if let Err(e) = self.ecx.validate_operand(value, vec![], None, true) {
+        if let Err(e) = self.ecx.validate_operand(
+            value,
+            vec![],
+            // FIXME: is ref tracking too expensive?
+            Some(&mut interpret::RefTracking::empty()),
+        ) {
             trace!("validation error, attempt failed: {:?}", e);
             return;
         }
@@ -565,7 +567,7 @@ impl<'a, 'mir, 'tcx> ConstPropagator<'a, 'mir, 'tcx> {
         });
 
         if let Some(Ok(imm)) = imm {
-            match imm {
+            match *imm {
                 interpret::Immediate::Scalar(ScalarMaybeUndef::Scalar(scalar)) => {
                     *rval = Rvalue::Use(
                         self.operand_from_scalar(scalar, value.layout.ty, source_info.span));
@@ -599,9 +601,11 @@ impl<'a, 'mir, 'tcx> ConstPropagator<'a, 'mir, 'tcx> {
     }
 }
 
-fn type_size_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                          param_env: ty::ParamEnv<'tcx>,
-                          ty: Ty<'tcx>) -> Option<u64> {
+fn type_size_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
+    ty: Ty<'tcx>,
+) -> Option<u64> {
     tcx.layout_of(param_env.and(ty)).ok().map(|layout| layout.size.bytes())
 }
 
@@ -613,10 +617,10 @@ struct CanConstProp {
 
 impl CanConstProp {
     /// returns true if `local` can be propagated
-    fn check(mir: &Body<'_>) -> IndexVec<Local, bool> {
+    fn check(body: &Body<'_>) -> IndexVec<Local, bool> {
         let mut cpv = CanConstProp {
-            can_const_prop: IndexVec::from_elem(true, &mir.local_decls),
-            found_assignment: IndexVec::from_elem(false, &mir.local_decls),
+            can_const_prop: IndexVec::from_elem(true, &body.local_decls),
+            found_assignment: IndexVec::from_elem(false, &body.local_decls),
         };
         for (local, val) in cpv.can_const_prop.iter_enumerated_mut() {
             // cannot use args at all
@@ -624,13 +628,13 @@ impl CanConstProp {
             //        lint for x != y
             // FIXME(oli-obk): lint variables until they are used in a condition
             // FIXME(oli-obk): lint if return value is constant
-            *val = mir.local_kind(local) == LocalKind::Temp;
+            *val = body.local_kind(local) == LocalKind::Temp;
 
             if !*val {
                 trace!("local {:?} can't be propagated because it's not a temporary", local);
             }
         }
-        cpv.visit_body(mir);
+        cpv.visit_body(body);
         cpv.can_const_prop
     }
 }
@@ -668,7 +672,7 @@ impl<'tcx> Visitor<'tcx> for CanConstProp {
     }
 }
 
-impl<'b, 'a, 'tcx> MutVisitor<'tcx> for ConstPropagator<'b, 'a, 'tcx> {
+impl<'mir, 'tcx> MutVisitor<'tcx> for ConstPropagator<'mir, 'tcx> {
     fn visit_constant(
         &mut self,
         constant: &mut Constant<'tcx>,

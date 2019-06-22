@@ -183,8 +183,8 @@ impl<'tcx> fmt::Display for TypeError<'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'lcx, 'tcx> ty::TyS<'tcx> {
-    pub fn sort_string(&self, tcx: TyCtxt<'a, 'gcx, 'lcx>) -> Cow<'static, str> {
+impl<'tcx> ty::TyS<'tcx> {
+    pub fn sort_string(&self, tcx: TyCtxt<'_>) -> Cow<'static, str> {
         match self.sty {
             ty::Bool | ty::Char | ty::Int(_) |
             ty::Uint(_) | ty::Float(_) | ty::Str | ty::Never => self.to_string().into(),
@@ -192,9 +192,12 @@ impl<'a, 'gcx, 'lcx, 'tcx> ty::TyS<'tcx> {
 
             ty::Adt(def, _) => format!("{} `{}`", def.descr(), tcx.def_path_str(def.did)).into(),
             ty::Foreign(def_id) => format!("extern type `{}`", tcx.def_path_str(def_id)).into(),
-            ty::Array(_, n) => match n.assert_usize(tcx) {
-                Some(n) => format!("array of {} elements", n).into(),
-                None => "array".into(),
+            ty::Array(_, n) => {
+                let n = tcx.lift_to_global(&n).unwrap();
+                match n.assert_usize(tcx) {
+                    Some(n) => format!("array of {} elements", n).into(),
+                    None => "array".into(),
+                }
             }
             ty::Slice(_) => "slice".into(),
             ty::RawPtr(_) => "*-ptr".into(),
@@ -249,7 +252,7 @@ impl<'a, 'gcx, 'lcx, 'tcx> ty::TyS<'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
+impl<'tcx> TyCtxt<'tcx> {
     pub fn note_and_explain_type_err(self,
                                      db: &mut DiagnosticBuilder<'_>,
                                      err: &TypeError<'tcx>,

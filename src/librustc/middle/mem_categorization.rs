@@ -287,14 +287,14 @@ impl HirNode for hir::Pat {
 }
 
 #[derive(Clone)]
-pub struct MemCategorizationContext<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
-    pub tcx: TyCtxt<'a, 'gcx, 'tcx>,
+pub struct MemCategorizationContext<'a, 'tcx> {
+    pub tcx: TyCtxt<'tcx>,
     pub body_owner: DefId,
     pub upvars: Option<&'tcx FxIndexMap<hir::HirId, hir::Upvar>>,
     pub region_scope_tree: &'a region::ScopeTree,
     pub tables: &'a ty::TypeckTables<'tcx>,
     rvalue_promotable_map: Option<&'tcx ItemLocalSet>,
-    infcx: Option<&'a InferCtxt<'a, 'gcx, 'tcx>>,
+    infcx: Option<&'a InferCtxt<'a, 'tcx>>,
 }
 
 pub type McResult<T> = Result<T, ()>;
@@ -339,8 +339,11 @@ impl MutabilityCategory {
         ret
     }
 
-    fn from_local(tcx: TyCtxt<'_, '_, '_>, tables: &ty::TypeckTables<'_>,
-                  id: ast::NodeId) -> MutabilityCategory {
+    fn from_local(
+        tcx: TyCtxt<'_>,
+        tables: &ty::TypeckTables<'_>,
+        id: hir::HirId,
+    ) -> MutabilityCategory {
         let ret = match tcx.hir().get(id) {
             Node::Binding(p) => match p.node {
                 PatKind::Binding(..) => {
@@ -399,13 +402,14 @@ impl MutabilityCategory {
     }
 }
 
-impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx, 'tcx> {
-    pub fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-               body_owner: DefId,
-               region_scope_tree: &'a region::ScopeTree,
-               tables: &'a ty::TypeckTables<'tcx>,
-               rvalue_promotable_map: Option<&'tcx ItemLocalSet>)
-               -> MemCategorizationContext<'a, 'tcx, 'tcx> {
+impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
+    pub fn new(
+        tcx: TyCtxt<'tcx>,
+        body_owner: DefId,
+        region_scope_tree: &'a region::ScopeTree,
+        tables: &'a ty::TypeckTables<'tcx>,
+        rvalue_promotable_map: Option<&'tcx ItemLocalSet>,
+    ) -> MemCategorizationContext<'a, 'tcx> {
         MemCategorizationContext {
             tcx,
             body_owner,
@@ -418,7 +422,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx, 'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
     /// Creates a `MemCategorizationContext` during type inference.
     /// This is used during upvar analysis and a few other places.
     /// Because the typeck tables are not yet complete, the results
@@ -428,11 +432,12 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
     ///   temporaries may be overly conservative;
     /// - similarly, as the results of upvar analysis are not yet
     ///   known, the results around upvar accesses may be incorrect.
-    pub fn with_infer(infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
-                      body_owner: DefId,
-                      region_scope_tree: &'a region::ScopeTree,
-                      tables: &'a ty::TypeckTables<'tcx>)
-                      -> MemCategorizationContext<'a, 'gcx, 'tcx> {
+    pub fn with_infer(
+        infcx: &'a InferCtxt<'a, 'tcx>,
+        body_owner: DefId,
+        region_scope_tree: &'a region::ScopeTree,
+        tables: &'a ty::TypeckTables<'tcx>,
+    ) -> MemCategorizationContext<'a, 'tcx> {
         let tcx = infcx.tcx;
 
         // Subtle: we can't do rvalue promotion analysis until the
@@ -495,7 +500,6 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
             // FIXME
             None if self.is_tainted_by_errors() => Err(()),
             None => {
-                let id = self.tcx.hir().hir_to_node_id(id);
                 bug!("no type for node {}: {} in mem_categorization",
                      id, self.tcx.hir().node_to_string(id));
             }
@@ -582,10 +586,11 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
     pub fn cat_expr(&self, expr: &hir::Expr) -> McResult<cmt_<'tcx>> {
         // This recursion helper avoids going through *too many*
         // adjustments, since *only* non-overloaded deref recurses.
-        fn helper<'a, 'gcx, 'tcx>(mc: &MemCategorizationContext<'a, 'gcx, 'tcx>,
-                                  expr: &hir::Expr,
-                                  adjustments: &[adjustment::Adjustment<'tcx>])
-                                  -> McResult<cmt_<'tcx>> {
+        fn helper<'a, 'tcx>(
+            mc: &MemCategorizationContext<'a, 'tcx>,
+            expr: &hir::Expr,
+            adjustments: &[adjustment::Adjustment<'tcx>],
+        ) -> McResult<cmt_<'tcx>> {
             match adjustments.split_last() {
                 None => mc.cat_expr_unadjusted(expr),
                 Some((adjustment, previous)) => {
@@ -747,15 +752,14 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
             }
 
             Res::Local(var_id) => {
-                let var_nid = self.tcx.hir().hir_to_node_id(var_id);
                 if self.upvars.map_or(false, |upvars| upvars.contains_key(&var_id)) {
-                    self.cat_upvar(hir_id, span, var_nid)
+                    self.cat_upvar(hir_id, span, var_id)
                 } else {
                     Ok(cmt_ {
                         hir_id,
                         span,
                         cat: Categorization::Local(var_id),
-                        mutbl: MutabilityCategory::from_local(self.tcx, self.tables, var_nid),
+                        mutbl: MutabilityCategory::from_local(self.tcx, self.tables, var_id),
                         ty: expr_ty,
                         note: NoteNone
                     })
@@ -772,7 +776,7 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
         &self,
         hir_id: hir::HirId,
         span: Span,
-        var_id: ast::NodeId,
+        var_id: hir::HirId,
     ) -> McResult<cmt_<'tcx>> {
         // An upvar can have up to 3 components. We translate first to a
         // `Categorization::Upvar`, which is itself a fiction -- it represents the reference to the
@@ -813,22 +817,18 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
                              .unwrap_or(ty::ClosureKind::LATTICE_BOTTOM),
 
                     None =>
-                        self.tcx.global_tcx()
-                                .lift(&closure_substs)
-                                .expect("no inference cx, but inference variables in closure ty")
-                                .closure_kind(closure_def_id, self.tcx.global_tcx()),
+                        closure_substs.closure_kind(closure_def_id, self.tcx.global_tcx()),
                 }
             }
             _ => span_bug!(span, "unexpected type for fn in mem_categorization: {:?}", ty),
         };
 
-        let var_hir_id = self.tcx.hir().node_to_hir_id(var_id);
         let upvar_id = ty::UpvarId {
-            var_path: ty::UpvarPath { hir_id: var_hir_id },
+            var_path: ty::UpvarPath { hir_id: var_id },
             closure_expr_id: closure_expr_def_id.to_local(),
         };
 
-        let var_ty = self.node_ty(var_hir_id)?;
+        let var_ty = self.node_ty(var_id)?;
 
         // Mutability of original variable itself
         let var_mutbl = MutabilityCategory::from_local(self.tcx, self.tables, var_id);
@@ -1514,7 +1514,7 @@ impl<'tcx> cmt_<'tcx> {
         }
     }
 
-    pub fn descriptive_string(&self, tcx: TyCtxt<'_, '_, '_>) -> Cow<'static, str> {
+    pub fn descriptive_string(&self, tcx: TyCtxt<'_>) -> Cow<'static, str> {
         match self.cat {
             Categorization::StaticItem => {
                 "static item".into()

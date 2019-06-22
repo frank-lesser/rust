@@ -34,8 +34,8 @@ use crate::abi::Abi;
 /// There is one `CodegenCx` per compilation unit. Each one has its own LLVM
 /// `llvm::Context` so that several compilation units may be optimized in parallel.
 /// All other LLVM data structures in the `CodegenCx` are tied to that `llvm::Context`.
-pub struct CodegenCx<'ll, 'tcx: 'll> {
-    pub tcx: TyCtxt<'ll, 'tcx, 'tcx>,
+pub struct CodegenCx<'ll, 'tcx> {
+    pub tcx: TyCtxt<'tcx>,
     pub check_overflow: bool,
     pub use_dll_storage_attrs: bool,
     pub tls_model: llvm::ThreadLocalMode,
@@ -47,8 +47,8 @@ pub struct CodegenCx<'ll, 'tcx: 'll> {
     /// Cache instances of monomorphic and polymorphic items
     pub instances: RefCell<FxHashMap<Instance<'tcx>, &'ll Value>>,
     /// Cache generated vtables
-    pub vtables: RefCell<FxHashMap<
-            (Ty<'tcx>, Option<ty::PolyExistentialTraitRef<'tcx>>), &'ll Value>>,
+    pub vtables:
+        RefCell<FxHashMap<(Ty<'tcx>, Option<ty::PolyExistentialTraitRef<'tcx>>), &'ll Value>>,
     /// Cache of constant strings,
     pub const_cstr_cache: RefCell<FxHashMap<LocalInternedString, &'ll Value>>,
 
@@ -141,7 +141,7 @@ pub fn is_pie_binary(sess: &Session) -> bool {
 }
 
 pub unsafe fn create_module(
-    tcx: TyCtxt<'_, '_, '_>,
+    tcx: TyCtxt<'_>,
     llcx: &'ll llvm::Context,
     mod_name: &str,
 ) -> &'ll llvm::Module {
@@ -207,10 +207,11 @@ pub unsafe fn create_module(
 }
 
 impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
-    crate fn new(tcx: TyCtxt<'ll, 'tcx, 'tcx>,
-                 codegen_unit: Arc<CodegenUnit<'tcx>>,
-                 llvm_module: &'ll crate::ModuleLlvm)
-                 -> Self {
+    crate fn new(
+        tcx: TyCtxt<'tcx>,
+        codegen_unit: Arc<CodegenUnit<'tcx>>,
+        llvm_module: &'ll crate::ModuleLlvm,
+    ) -> Self {
         // An interesting part of Windows which MSVC forces our hand on (and
         // apparently MinGW didn't) is the usage of `dllimport` and `dllexport`
         // attributes in LLVM IR as well as native dependencies (in C these
@@ -458,7 +459,7 @@ impl CodegenCx<'b, 'tcx> {
         };
         let f = self.declare_cfn(name, fn_ty);
         llvm::SetUnnamedAddr(f, false);
-        self.intrinsics.borrow_mut().insert(name, f.clone());
+        self.intrinsics.borrow_mut().insert(name, f);
         f
     }
 
@@ -838,7 +839,7 @@ impl HasTargetSpec for CodegenCx<'ll, 'tcx> {
 }
 
 impl ty::layout::HasTyCtxt<'tcx> for CodegenCx<'ll, 'tcx> {
-    fn tcx<'a>(&'a self) -> TyCtxt<'a, 'tcx, 'tcx> {
+    fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 }
