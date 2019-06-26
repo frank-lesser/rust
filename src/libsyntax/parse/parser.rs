@@ -3,7 +3,7 @@
 use crate::ast::{AngleBracketedArgs, ParenthesizedArgs, AttrStyle, BareFnTy};
 use crate::ast::{GenericBound, TraitBoundModifier};
 use crate::ast::Unsafety;
-use crate::ast::{Mod, AnonConst, Arg, Arm, Guard, Attribute, BindingMode, TraitItemKind};
+use crate::ast::{Mod, AnonConst, Arg, Arm, Attribute, BindingMode, TraitItemKind};
 use crate::ast::Block;
 use crate::ast::{BlockCheckMode, CaptureBy, Movability};
 use crate::ast::{Constness, Crate};
@@ -3396,7 +3396,7 @@ impl<'a> Parser<'a> {
         let lo = self.token.span;
         let pats = self.parse_pats()?;
         let guard = if self.eat_keyword(kw::If) {
-            Some(Guard::If(self.parse_expr()?))
+            Some(self.parse_expr()?)
         } else {
             None
         };
@@ -6946,36 +6946,34 @@ impl<'a> Parser<'a> {
     /// Parses the part of an enum declaration following the `{`.
     fn parse_enum_def(&mut self, _generics: &ast::Generics) -> PResult<'a, EnumDef> {
         let mut variants = Vec::new();
-        let mut any_disr = vec![];
         while self.token != token::CloseDelim(token::Brace) {
             let variant_attrs = self.parse_outer_attributes()?;
             let vlo = self.token.span;
 
-            let struct_def;
-            let mut disr_expr = None;
             self.eat_bad_pub();
             let ident = self.parse_ident()?;
-            if self.check(&token::OpenDelim(token::Brace)) {
+
+            let struct_def = if self.check(&token::OpenDelim(token::Brace)) {
                 // Parse a struct variant.
                 let (fields, recovered) = self.parse_record_struct_body()?;
-                struct_def = VariantData::Struct(fields, recovered);
+                VariantData::Struct(fields, recovered)
             } else if self.check(&token::OpenDelim(token::Paren)) {
-                struct_def = VariantData::Tuple(
+                VariantData::Tuple(
                     self.parse_tuple_struct_body()?,
                     ast::DUMMY_NODE_ID,
-                );
-            } else if self.eat(&token::Eq) {
-                disr_expr = Some(AnonConst {
+                )
+            } else {
+                VariantData::Unit(ast::DUMMY_NODE_ID)
+            };
+
+            let disr_expr = if self.eat(&token::Eq) {
+                Some(AnonConst {
                     id: ast::DUMMY_NODE_ID,
                     value: self.parse_expr()?,
-                });
-                if let Some(sp) = disr_expr.as_ref().map(|c| c.value.span) {
-                    any_disr.push(sp);
-                }
-                struct_def = VariantData::Unit(ast::DUMMY_NODE_ID);
+                })
             } else {
-                struct_def = VariantData::Unit(ast::DUMMY_NODE_ID);
-            }
+                None
+            };
 
             let vr = ast::Variant_ {
                 ident,
@@ -7003,7 +7001,6 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(&token::CloseDelim(token::Brace))?;
-        self.maybe_report_invalid_custom_discriminants(any_disr, &variants);
 
         Ok(ast::EnumDef { variants })
     }
