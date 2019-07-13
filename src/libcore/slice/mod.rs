@@ -2459,12 +2459,12 @@ impl<T> [T] {
     /// ```
     #[inline]
     #[unstable(feature = "is_sorted", reason = "new API", issue = "53485")]
-    pub fn is_sorted_by_key<F, K>(&self, mut f: F) -> bool
+    pub fn is_sorted_by_key<F, K>(&self, f: F) -> bool
     where
         F: FnMut(&T) -> K,
         K: PartialOrd
     {
-        self.is_sorted_by(|a, b| f(a).partial_cmp(&f(b)))
+        self.iter().is_sorted_by_key(f)
     }
 }
 
@@ -4453,6 +4453,21 @@ impl<'a, T> DoubleEndedIterator for ChunksExact<'a, T> {
             Some(snd)
         }
     }
+
+    #[inline]
+    fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
+        let len = self.len();
+        if n >= len {
+            self.v = &[];
+            None
+        } else {
+            let start = (len - 1 - n) * self.chunk_size;
+            let end = start + self.chunk_size;
+            let nth_back = &self.v[start..end];
+            self.v = &self.v[..start];
+            Some(nth_back)
+        }
+    }
 }
 
 #[stable(feature = "chunks_exact", since = "1.31.0")]
@@ -5327,13 +5342,24 @@ impl<A, B> SlicePartialEq<B> for [A]
             return false;
         }
 
-        for i in 0..self.len() {
-            if !self[i].eq(&other[i]) {
-                return false;
-            }
+        self.iter().zip(other.iter()).all(|(x, y)| x == y)
+    }
+}
+
+// Use an equal-pointer optimization when types are `Eq`
+impl<A> SlicePartialEq<A> for [A]
+    where A: PartialEq<A> + Eq
+{
+    default fn equal(&self, other: &[A]) -> bool {
+        if self.len() != other.len() {
+            return false;
         }
 
-        true
+        if self.as_ptr() == other.as_ptr() {
+            return true;
+        }
+
+        self.iter().zip(other.iter()).all(|(x, y)| x == y)
     }
 }
 
@@ -5442,7 +5468,7 @@ impl SliceOrd<u8> for [u8] {
 #[doc(hidden)]
 /// Trait implemented for types that can be compared for equality using
 /// their bytewise representation
-trait BytewiseEquality { }
+trait BytewiseEquality: Eq + Copy { }
 
 macro_rules! impl_marker_for {
     ($traitname:ident, $($ty:ty)*) => {

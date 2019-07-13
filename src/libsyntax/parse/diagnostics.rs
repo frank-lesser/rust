@@ -611,14 +611,12 @@ impl<'a> Parser<'a> {
         match ty.node {
             TyKind::Rptr(ref lifetime, ref mut_ty) => {
                 let sum_with_parens = pprust::to_string(|s| {
-                    use crate::print::pprust::PrintState;
-
-                    s.s.word("&")?;
-                    s.print_opt_lifetime(lifetime)?;
-                    s.print_mutability(mut_ty.mutbl)?;
-                    s.popen()?;
-                    s.print_type(&mut_ty.ty)?;
-                    s.print_type_bounds(" +", &bounds)?;
+                    s.s.word("&");
+                    s.print_opt_lifetime(lifetime);
+                    s.print_mutability(mut_ty.mutbl);
+                    s.popen();
+                    s.print_type(&mut_ty.ty);
+                    s.print_type_bounds(" +", &bounds);
                     s.pclose()
                 });
                 err.span_suggestion(
@@ -942,7 +940,7 @@ impl<'a> Parser<'a> {
                 //  {foo(bar {}}
                 //      -      ^
                 //      |      |
-                //      |      help: `)` may belong here (FIXME: #58270)
+                //      |      help: `)` may belong here
                 //      |
                 //      unclosed delimiter
                 if let Some(sp) = unmatched.unclosed_span {

@@ -50,8 +50,14 @@ impl fmt::Debug for Lifetime {
             f,
             "lifetime({}: {})",
             self.id,
-            pprust::lifetime_to_string(self)
+            self
         )
+    }
+}
+
+impl fmt::Display for Lifetime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.ident.name.as_str())
     }
 }
 
@@ -1832,7 +1838,7 @@ impl Arg {
                         lt,
                         MutTy {
                             ty: infer_ty,
-                            mutbl: mutbl,
+                            mutbl,
                         },
                     ),
                     span,
@@ -2120,7 +2126,7 @@ impl PolyTraitRef {
         PolyTraitRef {
             bound_generic_params: generic_params,
             trait_ref: TraitRef {
-                path: path,
+                path,
                 ref_id: DUMMY_NODE_ID,
             },
             span,

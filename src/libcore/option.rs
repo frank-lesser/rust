@@ -178,7 +178,7 @@ impl<T> Option<T> {
     /// ```
     ///
     /// [`Some`]: #variant.Some
-    #[must_use]
+    #[must_use = "if you intended to assert that this has a value, consider `.unwrap()` instead"]
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn is_some(&self) -> bool {
@@ -201,11 +201,38 @@ impl<T> Option<T> {
     /// ```
     ///
     /// [`None`]: #variant.None
-    #[must_use]
+    #[must_use = "if you intended to assert that this doesn't have a value, consider \
+                  `.and_then(|| panic!(\"`Option` had a value when expected `None`\"))` instead"]
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn is_none(&self) -> bool {
         !self.is_some()
+    }
+
+    /// Returns `true` if the option is a [`Some`] value containing the given value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(option_result_contains)]
+    ///
+    /// let x: Option<u32> = Some(2);
+    /// assert_eq!(x.contains(&2), true);
+    ///
+    /// let x: Option<u32> = Some(3);
+    /// assert_eq!(x.contains(&2), false);
+    ///
+    /// let x: Option<u32> = None;
+    /// assert_eq!(x.contains(&2), false);
+    /// ```
+    #[must_use]
+    #[inline]
+    #[unstable(feature = "option_result_contains", issue = "62358")]
+    pub fn contains<U>(&self, x: &U) -> bool where U: PartialEq<T> {
+        match self {
+            Some(y) => x == y,
+            None => false,
+        }
     }
 
     /////////////////////////////////////////////////////////////////////////
@@ -263,7 +290,7 @@ impl<T> Option<T> {
     }
 
 
-    /// Converts from `Pin<&Option<T>>` to `Option<Pin<&T>>`
+    /// Converts from [`Pin`]`<&Option<T>>` to `Option<`[`Pin`]`<&T>>`.
     #[inline]
     #[stable(feature = "pin", since = "1.33.0")]
     pub fn as_pin_ref<'a>(self: Pin<&'a Option<T>>) -> Option<Pin<&'a T>> {
@@ -272,7 +299,7 @@ impl<T> Option<T> {
         }
     }
 
-    /// Converts from `Pin<&mut Option<T>>` to `Option<Pin<&mut T>>`
+    /// Converts from [`Pin`]`<&mut Option<T>>` to `Option<`[`Pin`]`<&mut T>>`.
     #[inline]
     #[stable(feature = "pin", since = "1.33.0")]
     pub fn as_pin_mut<'a>(self: Pin<&'a mut Option<T>>) -> Option<Pin<&'a mut T>> {
@@ -626,14 +653,14 @@ impl<T> Option<T> {
         }
     }
 
-    /// Returns `None` if the option is `None`, otherwise calls `predicate`
+    /// Returns [`None`] if the option is [`None`], otherwise calls `predicate`
     /// with the wrapped value and returns:
     ///
-    /// - `Some(t)` if `predicate` returns `true` (where `t` is the wrapped
+    /// - [`Some(t)`] if `predicate` returns `true` (where `t` is the wrapped
     ///   value), and
-    /// - `None` if `predicate` returns `false`.
+    /// - [`None`] if `predicate` returns `false`.
     ///
-    /// This function works similar to `Iterator::filter()`. You can imagine
+    /// This function works similar to [`Iterator::filter()`]. You can imagine
     /// the `Option<T>` being an iterator over one or zero elements. `filter()`
     /// lets you decide which elements to keep.
     ///
@@ -648,6 +675,10 @@ impl<T> Option<T> {
     /// assert_eq!(Some(3).filter(is_even), None);
     /// assert_eq!(Some(4).filter(is_even), Some(4));
     /// ```
+    ///
+    /// [`None`]: #variant.None
+    /// [`Some(t)`]: #variant.Some
+    /// [`Iterator::filter()`]: ../../std/iter/trait.Iterator.html#method.filter
     #[inline]
     #[stable(feature = "option_filter", since = "1.27.0")]
     pub fn filter<P: FnOnce(&T) -> bool>(self, predicate: P) -> Self {
@@ -777,15 +808,7 @@ impl<T> Option<T> {
     #[inline]
     #[stable(feature = "option_entry", since = "1.20.0")]
     pub fn get_or_insert(&mut self, v: T) -> &mut T {
-        match *self {
-            None => *self = Some(v),
-            _ => (),
-        }
-
-        match *self {
-            Some(ref mut v) => v,
-            None => unsafe { hint::unreachable_unchecked() },
-        }
+        self.get_or_insert_with(|| v)
     }
 
     /// Inserts a value computed from `f` into the option if it is [`None`], then
@@ -845,7 +868,7 @@ impl<T> Option<T> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn take(&mut self) -> Option<T> {
-        mem::replace(self, None)
+        mem::take(self)
     }
 
     /// Replaces the actual value in the option by the value given in parameter,
@@ -994,17 +1017,25 @@ impl<T: Deref> Option<T> {
     /// Converts from `&Option<T>` to `Option<&T::Target>`.
     ///
     /// Leaves the original Option in-place, creating a new one with a reference
-    /// to the original one, additionally coercing the contents via `Deref`.
+    /// to the original one, additionally coercing the contents via [`Deref`].
+    ///
+    /// [`Deref`]: ../../std/ops/trait.Deref.html
     pub fn deref(&self) -> Option<&T::Target> {
         self.as_ref().map(|t| t.deref())
     }
 }
 
 impl<T, E> Option<Result<T, E>> {
-    /// Transposes an `Option` of a `Result` into a `Result` of an `Option`.
+    /// Transposes an `Option` of a [`Result`] into a [`Result`] of an `Option`.
     ///
-    /// `None` will be mapped to `Ok(None)`.
-    /// `Some(Ok(_))` and `Some(Err(_))` will be mapped to `Ok(Some(_))` and `Err(_)`.
+    /// [`None`] will be mapped to [`Ok`]`(`[`None`]`)`.
+    /// [`Some`]`(`[`Ok`]`(_))` and [`Some`]`(`[`Err`]`(_))` will be mapped to
+    /// [`Ok`]`(`[`Some`]`(_))` and [`Err`]`(_)`.
+    ///
+    /// [`None`]: #variant.None
+    /// [`Ok`]: ../../std/result/enum.Result.html#variant.Ok
+    /// [`Some`]: #variant.Some
+    /// [`Err`]: ../../std/result/enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
