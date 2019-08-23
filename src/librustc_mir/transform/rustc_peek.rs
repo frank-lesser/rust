@@ -118,8 +118,14 @@ fn each_block<'tcx, O>(
     };
     assert!(args.len() == 1);
     let peek_arg_place = match args[0] {
-        mir::Operand::Copy(ref place @ mir::Place::Base(mir::PlaceBase::Local(_))) |
-        mir::Operand::Move(ref place @ mir::Place::Base(mir::PlaceBase::Local(_))) => Some(place),
+        mir::Operand::Copy(ref place @ mir::Place {
+            base: mir::PlaceBase::Local(_),
+            projection: None,
+        }) |
+        mir::Operand::Move(ref place @ mir::Place {
+            base: mir::PlaceBase::Local(_),
+            projection: None,
+        }) => Some(place),
         _ => None,
     };
 
@@ -162,7 +168,7 @@ fn each_block<'tcx, O>(
         if place == peek_arg_place {
             if let mir::Rvalue::Ref(_, mir::BorrowKind::Shared, ref peeking_at_place) = **rvalue {
                 // Okay, our search is over.
-                match move_data.rev_lookup.find(peeking_at_place) {
+                match move_data.rev_lookup.find(peeking_at_place.as_ref()) {
                     LookupResult::Exact(peek_mpi) => {
                         let bit_state = on_entry.contains(peek_mpi);
                         debug!("rustc_peek({:?} = &{:?}) bit_state: {}",
@@ -186,7 +192,7 @@ fn each_block<'tcx, O>(
             }
         }
 
-        let lhs_mpi = move_data.rev_lookup.find(place);
+        let lhs_mpi = move_data.rev_lookup.find(place.as_ref());
 
         debug!("rustc_peek: computing effect on place: {:?} ({:?}) in stmt: {:?}",
                place, lhs_mpi, stmt);
@@ -218,7 +224,7 @@ fn is_rustc_peek<'a, 'tcx>(
     if let Some(mir::Terminator { ref kind, source_info, .. }) = *terminator {
         if let mir::TerminatorKind::Call { func: ref oper, ref args, .. } = *kind {
             if let mir::Operand::Constant(ref func) = *oper {
-                if let ty::FnDef(def_id, _) = func.ty.sty {
+                if let ty::FnDef(def_id, _) = func.literal.ty.sty {
                     let abi = tcx.fn_sig(def_id).abi();
                     let name = tcx.item_name(def_id);
                     if abi == Abi::RustIntrinsic && name == sym::rustc_peek {

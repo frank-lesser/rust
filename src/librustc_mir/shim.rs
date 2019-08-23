@@ -304,8 +304,10 @@ impl<'a, 'tcx> DropElaborator<'a, 'tcx> for DropShimElaborator<'a, 'tcx> {
 fn build_clone_shim<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, self_ty: Ty<'tcx>) -> Body<'tcx> {
     debug!("build_clone_shim(def_id={:?})", def_id);
 
+    let param_env = tcx.param_env(def_id);
+
     let mut builder = CloneShimBuilder::new(tcx, def_id, self_ty);
-    let is_copy = self_ty.is_copy_modulo_regions(tcx, tcx.param_env(def_id), builder.span);
+    let is_copy = self_ty.is_copy_modulo_regions(tcx, param_env, builder.span);
 
     let dest = Place::RETURN_PLACE;
     let src = Place::from(Local::new(1+0)).deref();
@@ -313,7 +315,7 @@ fn build_clone_shim<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, self_ty: Ty<'tcx>) -
     match self_ty.sty {
         _ if is_copy => builder.copy_shim(),
         ty::Array(ty, len) => {
-            let len = len.unwrap_usize(tcx);
+            let len = len.eval_usize(tcx, param_env);
             builder.array_shim(dest, src, ty, len)
         }
         ty::Closure(def_id, substs) => {
@@ -322,7 +324,7 @@ fn build_clone_shim<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, self_ty: Ty<'tcx>) -
                 substs.upvar_tys(def_id, tcx)
             )
         }
-        ty::Tuple(tys) => builder.tuple_like_shim(dest, src, tys.iter().map(|k| k.expect_ty())),
+        ty::Tuple(..) => builder.tuple_like_shim(dest, src, self_ty.tuple_fields()),
         _ => {
             bug!("clone shim for `{:?}` which is not `Copy` and is not an aggregate", self_ty)
         }
@@ -443,7 +445,6 @@ impl CloneShimBuilder<'tcx> {
         let func_ty = tcx.mk_fn_def(self.def_id, substs);
         let func = Operand::Constant(box Constant {
             span: self.span,
-            ty: func_ty,
             user_ty: None,
             literal: ty::Const::zero_sized(tcx, func_ty),
         });
@@ -503,7 +504,6 @@ impl CloneShimBuilder<'tcx> {
     fn make_usize(&self, value: u64) -> Box<Constant<'tcx>> {
         box Constant {
             span: self.span,
-            ty: self.tcx.types.usize,
             user_ty: None,
             literal: ty::Const::from_usize(self.tcx, value),
         }
@@ -708,7 +708,7 @@ fn build_call_shim<'tcx>(
         Adjustment::DerefMove => {
             // fn(Self, ...) -> fn(*mut Self, ...)
             let arg_ty = local_decls[rcvr_arg].ty;
-            assert!(arg_ty.is_self());
+            debug_assert!(tcx.generics_of(def_id).has_self && arg_ty == tcx.types.self_param);
             local_decls[rcvr_arg].ty = tcx.mk_mut_ptr(arg_ty);
 
             Operand::Move(rcvr_l.deref())
@@ -743,7 +743,6 @@ fn build_call_shim<'tcx>(
             let ty = tcx.type_of(def_id);
             (Operand::Constant(box Constant {
                 span,
-                ty,
                 user_ty: None,
                 literal: ty::Const::zero_sized(tcx, ty),
              }),

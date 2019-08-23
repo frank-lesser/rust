@@ -427,7 +427,7 @@ pub trait TryInto<T>: Sized {
 /// - [`try_from`] is reflexive, which means that `TryFrom<T> for T`
 /// is implemented and cannot fail -- the associated `Error` type for
 /// calling `T::try_from()` on a value of type `T` is [`Infallible`].
-/// When the [`!`] type is stablized [`Infallible`] and [`!`] will be
+/// When the [`!`] type is stabilized [`Infallible`] and [`!`] will be
 /// equivalent.
 ///
 /// `TryFrom<T>` can be implemented as follows:
@@ -477,6 +477,7 @@ pub trait TryInto<T>: Sized {
 /// [`TryInto`]: trait.TryInto.html
 /// [`i32::MAX`]: ../../std/i32/constant.MAX.html
 /// [`!`]: ../../std/primitive.never.html
+/// [`Infallible`]: enum.Infallible.html
 #[stable(feature = "try_from", since = "1.34.0")]
 pub trait TryFrom<T>: Sized {
     /// The type returned in the event of a conversion error.
@@ -512,7 +513,7 @@ impl<T: ?Sized, U: ?Sized> AsRef<U> for &mut T where T: AsRef<U>
 
 // FIXME (#45742): replace the above impls for &/&mut with the following more general one:
 // // As lifts over Deref
-// impl<D: ?Sized + Deref, U: ?Sized> AsRef<U> for D where D::Target: AsRef<U> {
+// impl<D: ?Sized + Deref<Target: AsRef<U>>, U: ?Sized> AsRef<U> for D {
 //     fn as_ref(&self) -> &U {
 //         self.deref().as_ref()
 //     }
@@ -529,7 +530,7 @@ impl<T: ?Sized, U: ?Sized> AsMut<U> for &mut T where T: AsMut<U>
 
 // FIXME (#45742): replace the above impl for &mut with the following more general one:
 // // AsMut lifts over DerefMut
-// impl<D: ?Sized + Deref, U: ?Sized> AsMut<U> for D where D::Target: AsMut<U> {
+// impl<D: ?Sized + Deref<Target: AsMut<U>>, U: ?Sized> AsMut<U> for D {
 //     fn as_mut(&mut self) -> &mut U {
 //         self.deref_mut().as_mut()
 //     }

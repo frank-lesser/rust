@@ -23,7 +23,6 @@ use rustc_target::spec::abi::Abi;
 use syntax::ast::{self, CrateSugar, Ident, Name, NodeId, AsmDialect};
 use syntax::ast::{Attribute, Label, LitKind, StrStyle, FloatTy, IntTy, UintTy};
 use syntax::attr::{InlineAttr, OptimizeAttr};
-use syntax::ext::hygiene::SyntaxContext;
 use syntax::symbol::{Symbol, kw};
 use syntax::tokenstream::TokenStream;
 use syntax::util::parser::ExprPrecedence;
@@ -34,7 +33,7 @@ use rustc_data_structures::sync::{par_for_each_in, Send, Sync};
 use rustc_data_structures::thin_vec::ThinVec;
 use rustc_macros::HashStable;
 
-use serialize::{self, Encoder, Encodable, Decoder, Decodable};
+use rustc_serialize::{self, Encoder, Encodable, Decoder, Decodable};
 use std::collections::{BTreeSet, BTreeMap};
 use std::fmt;
 use smallvec::SmallVec;
@@ -92,7 +91,7 @@ impl HirId {
     }
 }
 
-impl serialize::UseSpecializedEncodable for HirId {
+impl rustc_serialize::UseSpecializedEncodable for HirId {
     fn default_encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
         let HirId {
             owner,
@@ -104,7 +103,7 @@ impl serialize::UseSpecializedEncodable for HirId {
     }
 }
 
-impl serialize::UseSpecializedDecodable for HirId {
+impl rustc_serialize::UseSpecializedDecodable for HirId {
     fn default_decode<D: Decoder>(d: &mut D) -> Result<HirId, D::Error> {
         let owner = DefIndex::decode(d)?;
         let local_id = ItemLocalId::decode(d)?;
@@ -202,7 +201,7 @@ impl ParamName {
         match *self {
             ParamName::Plain(ident) => ident,
             ParamName::Fresh(_) |
-            ParamName::Error => Ident::with_empty_ctxt(kw::UnderscoreLifetime),
+            ParamName::Error => Ident::with_dummy_span(kw::UnderscoreLifetime),
         }
     }
 
@@ -222,6 +221,19 @@ pub enum LifetimeName {
     /// User wrote nothing (e.g., the lifetime in `&u32`).
     Implicit,
 
+    /// Implicit lifetime in a context like `dyn Foo`. This is
+    /// distinguished from implicit lifetimes elsewhere because the
+    /// lifetime that they default to must appear elsewhere within the
+    /// enclosing type.  This means that, in an `impl Trait` context, we
+    /// don't have to create a parameter for them. That is, `impl
+    /// Trait<Item = &u32>` expands to an opaque type like `type
+    /// Foo<'a> = impl Trait<Item = &'a u32>`, but `impl Trait<item =
+    /// dyn Bar>` expands to `type Foo = impl Trait<Item = dyn Bar +
+    /// 'static>`. The latter uses `ImplicitObjectLifetimeDefault` so
+    /// that surrounding code knows not to create a lifetime
+    /// parameter.
+    ImplicitObjectLifetimeDefault,
+
     /// Indicates an error during lowering (usually `'_` in wrong place)
     /// that was already reported.
     Error,
@@ -236,16 +248,20 @@ pub enum LifetimeName {
 impl LifetimeName {
     pub fn ident(&self) -> Ident {
         match *self {
-            LifetimeName::Implicit | LifetimeName::Error => Ident::invalid(),
-            LifetimeName::Underscore => Ident::with_empty_ctxt(kw::UnderscoreLifetime),
-            LifetimeName::Static => Ident::with_empty_ctxt(kw::StaticLifetime),
+            LifetimeName::ImplicitObjectLifetimeDefault
+                | LifetimeName::Implicit
+                | LifetimeName::Error => Ident::invalid(),
+            LifetimeName::Underscore => Ident::with_dummy_span(kw::UnderscoreLifetime),
+            LifetimeName::Static => Ident::with_dummy_span(kw::StaticLifetime),
             LifetimeName::Param(param_name) => param_name.ident(),
         }
     }
 
     pub fn is_elided(&self) -> bool {
         match self {
-            LifetimeName::Implicit | LifetimeName::Underscore => true,
+            LifetimeName::ImplicitObjectLifetimeDefault
+            | LifetimeName::Implicit
+            | LifetimeName::Underscore => true,
 
             // It might seem surprising that `Fresh(_)` counts as
             // *not* elided -- but this is because, as far as the code
@@ -877,11 +893,12 @@ impl Pat {
         match self.node {
             PatKind::Binding(.., Some(ref p)) => p.walk_(it),
             PatKind::Struct(_, ref fields, _) => {
-                fields.iter().all(|field| field.node.pat.walk_(it))
+                fields.iter().all(|field| field.pat.walk_(it))
             }
             PatKind::TupleStruct(_, ref s, _) | PatKind::Tuple(ref s, _) => {
                 s.iter().all(|p| p.walk_(it))
             }
+            PatKind::Or(ref pats) => pats.iter().all(|p| p.walk_(it)),
             PatKind::Box(ref s) | PatKind::Ref(ref s, _) => {
                 s.walk_(it)
             }
@@ -923,6 +940,7 @@ pub struct FieldPat {
     /// The pattern the field is destructured to.
     pub pat: P<Pat>,
     pub is_shorthand: bool,
+    pub span: Span,
 }
 
 /// Explicit binding annotations given in the HIR for a binding. Note
@@ -968,12 +986,16 @@ pub enum PatKind {
 
     /// A struct or struct variant pattern (e.g., `Variant {x, y, ..}`).
     /// The `bool` is `true` in the presence of a `..`.
-    Struct(QPath, HirVec<Spanned<FieldPat>>, bool),
+    Struct(QPath, HirVec<FieldPat>, bool),
 
     /// A tuple struct/variant pattern `Variant(x, y, .., z)`.
     /// If the `..` pattern fragment is present, then `Option<usize>` denotes its position.
     /// `0 <= position <= subpats.len()`
     TupleStruct(QPath, HirVec<P<Pat>>, Option<usize>),
+
+    /// An or-pattern `A | B | C`.
+    /// Invariant: `pats.len() >= 2`.
+    Or(HirVec<P<Pat>>),
 
     /// A path pattern for an unit struct/variant or a (maybe-associated) constant.
     Path(QPath),
@@ -1541,7 +1563,7 @@ pub enum ExprKind {
     Match(P<Expr>, HirVec<Arm>, MatchSource),
     /// A closure (e.g., `move |a, b, c| {a + b + c}`).
     ///
-    /// The final span is the span of the argument block `|...|`.
+    /// The `Span` is the argument block `|...|`.
     ///
     /// This may also be a generator literal or an `async block` as indicated by the
     /// `Option<GeneratorMovability>`.
@@ -1815,7 +1837,7 @@ pub struct ImplItemId {
     pub hir_id: HirId,
 }
 
-/// Represents anything within an `impl` block
+/// Represents anything within an `impl` block.
 #[derive(RustcEncodable, RustcDecodable, Debug)]
 pub struct ImplItem {
     pub ident: Ident,
@@ -1832,14 +1854,14 @@ pub struct ImplItem {
 #[derive(RustcEncodable, RustcDecodable, Debug, HashStable)]
 pub enum ImplItemKind {
     /// An associated constant of the given type, set to the constant result
-    /// of the expression
+    /// of the expression.
     Const(P<Ty>, BodyId),
-    /// A method implementation with the given signature and body
+    /// A method implementation with the given signature and body.
     Method(MethodSig, BodyId),
-    /// An associated type
-    Type(P<Ty>),
-    /// An associated existential type
-    Existential(GenericBounds),
+    /// An associated type.
+    TyAlias(P<Ty>),
+    /// An associated `type = impl Trait`.
+    OpaqueTy(GenericBounds),
 }
 
 /// Bind a type to an associated type (i.e., `A = Foo`).
@@ -1922,20 +1944,20 @@ pub struct BareFnTy {
 }
 
 #[derive(RustcEncodable, RustcDecodable, Debug, HashStable)]
-pub struct ExistTy {
+pub struct OpaqueTy {
     pub generics: Generics,
     pub bounds: GenericBounds,
     pub impl_trait_fn: Option<DefId>,
-    pub origin: ExistTyOrigin,
+    pub origin: OpaqueTyOrigin,
 }
 
-/// Where the existential type came from
+/// From whence the opaque type came.
 #[derive(Copy, Clone, RustcEncodable, RustcDecodable, Debug, HashStable)]
-pub enum ExistTyOrigin {
-    /// `existential type Foo: Trait;`
-    ExistentialType,
+pub enum OpaqueTyOrigin {
+    /// `type Foo = impl Trait;`
+    TypeAlias,
     /// `-> impl Trait`
-    ReturnImplTrait,
+    FnReturn,
     /// `async fn`
     AsyncFn,
 }
@@ -1962,7 +1984,7 @@ pub enum TyKind {
     ///
     /// Type parameters may be stored in each `PathSegment`.
     Path(QPath),
-    /// A type definition itself. This is currently only used for the `existential type`
+    /// A type definition itself. This is currently only used for the `type Foo = impl Trait`
     /// item that `impl Trait` in return position desugars to.
     ///
     /// The generic argument list contains the lifetimes (and in the future possibly parameters)
@@ -2003,15 +2025,15 @@ pub struct InlineAsm {
     pub volatile: bool,
     pub alignstack: bool,
     pub dialect: AsmDialect,
-    #[stable_hasher(ignore)] // This is used for error reporting
-    pub ctxt: SyntaxContext,
 }
 
 /// Represents an argument in a function header.
 #[derive(RustcEncodable, RustcDecodable, Debug, HashStable)]
 pub struct Arg {
-    pub pat: P<Pat>,
+    pub attrs: HirVec<Attribute>,
     pub hir_id: HirId,
+    pub pat: P<Pat>,
+    pub span: Span,
 }
 
 /// Represents the header (not the body) of a function declaration.
@@ -2181,8 +2203,6 @@ pub struct ForeignMod {
 #[derive(RustcEncodable, RustcDecodable, Debug, HashStable)]
 pub struct GlobalAsm {
     pub asm: Symbol,
-    #[stable_hasher(ignore)] // This is used for error reporting
-    pub ctxt: SyntaxContext,
 }
 
 #[derive(RustcEncodable, RustcDecodable, Debug, HashStable)]
@@ -2191,7 +2211,7 @@ pub struct EnumDef {
 }
 
 #[derive(RustcEncodable, RustcDecodable, Debug, HashStable)]
-pub struct VariantKind {
+pub struct Variant {
     /// Name of the variant.
     #[stable_hasher(project(name))]
     pub ident: Ident,
@@ -2203,9 +2223,9 @@ pub struct VariantKind {
     pub data: VariantData,
     /// Explicit discriminant (e.g., `Foo = 1`).
     pub disr_expr: Option<AnonConst>,
+    /// Span
+    pub span: Span
 }
-
-pub type Variant = Spanned<VariantKind>;
 
 #[derive(Copy, Clone, PartialEq, RustcEncodable, RustcDecodable, Debug, HashStable)]
 pub enum UseKind {
@@ -2232,7 +2252,7 @@ pub enum UseKind {
 #[derive(RustcEncodable, RustcDecodable, Debug, HashStable)]
 pub struct TraitRef {
     pub path: P<Path>,
-    // Don't hash the ref_id. It is tracked via the thing it is used to access
+    // Don't hash the `ref_id`. It is tracked via the thing it is used to access.
     #[stable_hasher(ignore)]
     pub hir_ref_id: HirId,
 }
@@ -2418,18 +2438,18 @@ pub enum ItemKind {
     /// Module-level inline assembly (from global_asm!)
     GlobalAsm(P<GlobalAsm>),
     /// A type alias, e.g., `type Foo = Bar<u8>`
-    Ty(P<Ty>, Generics),
-    /// An existential type definition, e.g., `existential type Foo: Bar;`
-    Existential(ExistTy),
+    TyAlias(P<Ty>, Generics),
+    /// An opaque `impl Trait` type alias, e.g., `type Foo = impl Bar;`
+    OpaqueTy(OpaqueTy),
     /// An enum definition, e.g., `enum Foo<A, B> {C<A>, D<B>}`
     Enum(EnumDef, Generics),
     /// A struct definition, e.g., `struct Foo<A> {x: A}`
     Struct(VariantData, Generics),
     /// A union definition, e.g., `union Foo<A, B> {x: A, y: B}`
     Union(VariantData, Generics),
-    /// Represents a Trait Declaration
+    /// A trait definition
     Trait(IsAuto, Unsafety, Generics, GenericBounds, HirVec<TraitItemRef>),
-    /// Represents a Trait Alias Declaration
+    /// A trait alias
     TraitAlias(Generics, GenericBounds),
 
     /// An implementation, eg `impl<A> Trait for Foo { .. }`
@@ -2453,8 +2473,8 @@ impl ItemKind {
             ItemKind::Mod(..) => "module",
             ItemKind::ForeignMod(..) => "foreign module",
             ItemKind::GlobalAsm(..) => "global asm",
-            ItemKind::Ty(..) => "type alias",
-            ItemKind::Existential(..) => "existential type",
+            ItemKind::TyAlias(..) => "type alias",
+            ItemKind::OpaqueTy(..) => "opaque type",
             ItemKind::Enum(..) => "enum",
             ItemKind::Struct(..) => "struct",
             ItemKind::Union(..) => "union",
@@ -2476,8 +2496,8 @@ impl ItemKind {
     pub fn generics(&self) -> Option<&Generics> {
         Some(match *self {
             ItemKind::Fn(_, _, ref generics, _) |
-            ItemKind::Ty(_, ref generics) |
-            ItemKind::Existential(ExistTy { ref generics, impl_trait_fn: None, .. }) |
+            ItemKind::TyAlias(_, ref generics) |
+            ItemKind::OpaqueTy(OpaqueTy { ref generics, impl_trait_fn: None, .. }) |
             ItemKind::Enum(_, ref generics) |
             ItemKind::Struct(_, ref generics) |
             ItemKind::Union(_, ref generics) |
@@ -2526,7 +2546,7 @@ pub enum AssocItemKind {
     Const,
     Method { has_self: bool },
     Type,
-    Existential,
+    OpaqueTy,
 }
 
 #[derive(RustcEncodable, RustcDecodable, Debug, HashStable)]
@@ -2701,6 +2721,7 @@ impl CodegenFnAttrs {
 
 #[derive(Copy, Clone, Debug)]
 pub enum Node<'hir> {
+    Arg(&'hir Arg),
     Item(&'hir Item),
     ForeignItem(&'hir ForeignItem),
     TraitItem(&'hir TraitItem),

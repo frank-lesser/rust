@@ -214,6 +214,7 @@ impl HirNode for hir::Pat {
 #[derive(Clone)]
 pub struct MemCategorizationContext<'a, 'tcx> {
     pub tcx: TyCtxt<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
     pub body_owner: DefId,
     pub upvars: Option<&'tcx FxIndexMap<hir::HirId, hir::Upvar>>,
     pub region_scope_tree: &'a region::ScopeTree,
@@ -330,6 +331,7 @@ impl MutabilityCategory {
 impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
     pub fn new(
         tcx: TyCtxt<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
         body_owner: DefId,
         region_scope_tree: &'a region::ScopeTree,
         tables: &'a ty::TypeckTables<'tcx>,
@@ -342,7 +344,8 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
             region_scope_tree,
             tables,
             rvalue_promotable_map,
-            infcx: None
+            infcx: None,
+            param_env,
         }
     }
 }
@@ -359,6 +362,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
     ///   known, the results around upvar accesses may be incorrect.
     pub fn with_infer(
         infcx: &'a InferCtxt<'a, 'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
         body_owner: DefId,
         region_scope_tree: &'a region::ScopeTree,
         tables: &'a ty::TypeckTables<'tcx>,
@@ -379,6 +383,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
             tables,
             rvalue_promotable_map,
             infcx: Some(infcx),
+            param_env,
         }
     }
 
@@ -896,7 +901,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
 
         // Always promote `[T; 0]` (even when e.g., borrowed mutably).
         let promotable = match expr_ty.sty {
-            ty::Array(_, len) if len.assert_usize(self.tcx) == Some(0) => true,
+            ty::Array(_, len) if len.try_eval_usize(self.tcx, self.param_env) == Some(0) => true,
             _ => promotable,
         };
 
@@ -994,7 +999,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
         let deref_ty = match base_cmt_ty.builtin_deref(true) {
             Some(mt) => mt.ty,
             None => {
-                debug!("Explicit deref of non-derefable type: {:?}", base_cmt_ty);
+                debug!("explicit deref of non-derefable type: {:?}", base_cmt_ty);
                 return Err(());
             }
         };
@@ -1277,11 +1282,17 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
                 };
 
                 for fp in field_pats {
-                    let field_ty = self.pat_ty_adjusted(&fp.node.pat)?; // see (*2)
-                    let f_index = self.tcx.field_index(fp.node.hir_id, self.tables);
+                    let field_ty = self.pat_ty_adjusted(&fp.pat)?; // see (*2)
+                    let f_index = self.tcx.field_index(fp.hir_id, self.tables);
                     let cmt_field = Rc::new(self.cat_field(pat, cmt.clone(), f_index,
-                                                           fp.node.ident, field_ty));
-                    self.cat_pattern_(cmt_field, &fp.node.pat, op)?;
+                                                           fp.ident, field_ty));
+                    self.cat_pattern_(cmt_field, &fp.pat, op)?;
+                }
+            }
+
+            PatKind::Or(ref pats) => {
+                for pat in pats {
+                    self.cat_pattern_(cmt.clone(), &pat, op)?;
                 }
             }
 
@@ -1317,7 +1328,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
                 let element_ty = match cmt.ty.builtin_index() {
                     Some(ty) => ty,
                     None => {
-                        debug!("Explicit index of non-indexable type {:?}", cmt);
+                        debug!("explicit index of non-indexable type {:?}", cmt);
                         return Err(());
                     }
                 };

@@ -312,10 +312,10 @@ impl<'a, 'tcx> Expectation<'tcx> {
     /// It is only the `&[1, 2, 3]` expression as a whole that can be coerced
     /// to the type `&[isize]`. Therefore, we propagate this more limited hint,
     /// which still is useful, because it informs integer literals and the like.
-    /// See the test case `test/run-pass/coerce-expect-unsized.rs` and #20169
+    /// See the test case `test/ui/coerce-expect-unsized.rs` and #20169
     /// for examples of where this comes up,.
     fn rvalue_hint(fcx: &FnCtxt<'a, 'tcx>, ty: Ty<'tcx>) -> Expectation<'tcx> {
-        match fcx.tcx.struct_tail(ty).sty {
+        match fcx.tcx.struct_tail_without_normalization(ty).sty {
             ty::Slice(_) | ty::Str | ty::Dynamic(..) => {
                 ExpectRvalueLikeUnsized(ty)
             }
@@ -746,11 +746,12 @@ fn adt_destructor(tcx: TyCtxt<'_>, def_id: DefId) -> Option<ty::Destructor> {
     tcx.calculate_dtor(def_id, &mut dropck::check_drop_impl)
 }
 
-/// If this `DefId` is a "primary tables entry", returns `Some((body_id, decl))`
-/// with information about it's body-id and fn-decl (if any). Otherwise,
+/// If this `DefId` is a "primary tables entry", returns
+/// `Some((body_id, header, decl))` with information about
+/// it's body-id, fn-header and fn-decl (if any). Otherwise,
 /// returns `None`.
 ///
-/// If this function returns "some", then `typeck_tables(def_id)` will
+/// If this function returns `Some`, then `typeck_tables(def_id)` will
 /// succeed; if it returns `None`, then `typeck_tables(def_id)` may or
 /// may not succeed. In some cases where this function returns `None`
 /// (notably closures), `typeck_tables(def_id)` would wind up
@@ -758,40 +759,40 @@ fn adt_destructor(tcx: TyCtxt<'_>, def_id: DefId) -> Option<ty::Destructor> {
 fn primary_body_of(
     tcx: TyCtxt<'_>,
     id: hir::HirId,
-) -> Option<(hir::BodyId, Option<&hir::FnDecl>)> {
+) -> Option<(hir::BodyId, Option<&hir::Ty>, Option<&hir::FnHeader>, Option<&hir::FnDecl>)> {
     match tcx.hir().get(id) {
         Node::Item(item) => {
             match item.node {
-                hir::ItemKind::Const(_, body) |
-                hir::ItemKind::Static(_, _, body) =>
-                    Some((body, None)),
-                hir::ItemKind::Fn(ref decl, .., body) =>
-                    Some((body, Some(decl))),
+                hir::ItemKind::Const(ref ty, body) |
+                hir::ItemKind::Static(ref ty, _, body) =>
+                    Some((body, Some(ty), None, None)),
+                hir::ItemKind::Fn(ref decl, ref header, .., body) =>
+                    Some((body, None, Some(header), Some(decl))),
                 _ =>
                     None,
             }
         }
         Node::TraitItem(item) => {
             match item.node {
-                hir::TraitItemKind::Const(_, Some(body)) =>
-                    Some((body, None)),
+                hir::TraitItemKind::Const(ref ty, Some(body)) =>
+                    Some((body, Some(ty), None, None)),
                 hir::TraitItemKind::Method(ref sig, hir::TraitMethod::Provided(body)) =>
-                    Some((body, Some(&sig.decl))),
+                    Some((body, None, Some(&sig.header), Some(&sig.decl))),
                 _ =>
                     None,
             }
         }
         Node::ImplItem(item) => {
             match item.node {
-                hir::ImplItemKind::Const(_, body) =>
-                    Some((body, None)),
+                hir::ImplItemKind::Const(ref ty, body) =>
+                    Some((body, Some(ty), None, None)),
                 hir::ImplItemKind::Method(ref sig, body) =>
-                    Some((body, Some(&sig.decl))),
+                    Some((body, None, Some(&sig.header), Some(&sig.decl))),
                 _ =>
                     None,
             }
         }
-        Node::AnonConst(constant) => Some((constant.body, None)),
+        Node::AnonConst(constant) => Some((constant.body, None, None, None)),
         _ => None,
     }
 }
@@ -824,15 +825,21 @@ fn typeck_tables_of(tcx: TyCtxt<'_>, def_id: DefId) -> &ty::TypeckTables<'_> {
     let span = tcx.hir().span(id);
 
     // Figure out what primary body this item has.
-    let (body_id, fn_decl) = primary_body_of(tcx, id).unwrap_or_else(|| {
-        span_bug!(span, "can't type-check body of {:?}", def_id);
-    });
+    let (body_id, body_ty, fn_header, fn_decl) = primary_body_of(tcx, id)
+        .unwrap_or_else(|| {
+            span_bug!(span, "can't type-check body of {:?}", def_id);
+        });
     let body = tcx.hir().body(body_id);
 
     let tables = Inherited::build(tcx, def_id).enter(|inh| {
         let param_env = tcx.param_env(def_id);
-        let fcx = if let Some(decl) = fn_decl {
-            let fn_sig = tcx.fn_sig(def_id);
+        let fcx = if let (Some(header), Some(decl)) = (fn_header, fn_decl) {
+            let fn_sig = if crate::collect::get_infer_ret_ty(&decl.output).is_some() {
+                let fcx = FnCtxt::new(&inh, param_env, body.value.hir_id);
+                AstConv::ty_of_fn(&fcx, header.unsafety, header.abi, decl)
+            } else {
+                tcx.fn_sig(def_id)
+            };
 
             check_abi(tcx, span, fn_sig.abi());
 
@@ -849,7 +856,10 @@ fn typeck_tables_of(tcx: TyCtxt<'_>, def_id: DefId) -> &ty::TypeckTables<'_> {
             fcx
         } else {
             let fcx = FnCtxt::new(&inh, param_env, body.value.hir_id);
-            let expected_type = tcx.type_of(def_id);
+            let expected_type = body_ty.and_then(|ty| match ty.node {
+                hir::TyKind::Infer => Some(AstConv::ast_ty_to_ty(&fcx, ty)),
+                _ => None
+            }).unwrap_or_else(|| tcx.type_of(def_id));
             let expected_type = fcx.normalize_associated_types_in(body.value.span, &expected_type);
             fcx.require_type_is_sized(expected_type, body.value.span, traits::ConstSized);
 
@@ -1315,19 +1325,117 @@ fn check_union(tcx: TyCtxt<'_>, id: hir::HirId, span: Span) {
     check_packed(tcx, span, def_id);
 }
 
-fn check_opaque<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, substs: SubstsRef<'tcx>, span: Span) {
-    if let Err(partially_expanded_type) = tcx.try_expand_impl_trait_type(def_id, substs) {
-        let mut err = struct_span_err!(
-            tcx.sess, span, E0720,
-            "opaque type expands to a recursive type",
-        );
-        err.span_label(span, "expands to self-referential type");
-        if let ty::Opaque(..) = partially_expanded_type.sty {
-            err.note("type resolves to itself");
-        } else {
-            err.note(&format!("expanded type is `{}`", partially_expanded_type));
+/// Checks that an opaque type does not contain cycles and does not use `Self` or `T::Foo`
+/// projections that would result in "inheriting lifetimes".
+fn check_opaque<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    substs: SubstsRef<'tcx>,
+    span: Span,
+    origin: &hir::OpaqueTyOrigin,
+) {
+    check_opaque_for_inheriting_lifetimes(tcx, def_id, span);
+    check_opaque_for_cycles(tcx, def_id, substs, span, origin);
+}
+
+/// Checks that an opaque type does not use `Self` or `T::Foo` projections that would result
+/// in "inheriting lifetimes".
+fn check_opaque_for_inheriting_lifetimes(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    span: Span,
+) {
+    let item = tcx.hir().expect_item(
+        tcx.hir().as_local_hir_id(def_id).expect("opaque type is not local"));
+    debug!("check_opaque_for_inheriting_lifetimes: def_id={:?} span={:?} item={:?}",
+           def_id, span, item);
+
+    #[derive(Debug)]
+    struct ProhibitOpaqueVisitor<'tcx> {
+        opaque_identity_ty: Ty<'tcx>,
+        generics: &'tcx ty::Generics,
+    };
+
+    impl<'tcx> ty::fold::TypeVisitor<'tcx> for ProhibitOpaqueVisitor<'tcx> {
+        fn visit_ty(&mut self, t: Ty<'tcx>) -> bool {
+            debug!("check_opaque_for_inheriting_lifetimes: (visit_ty) t={:?}", t);
+            if t == self.opaque_identity_ty { false } else { t.super_visit_with(self) }
         }
-        err.emit();
+
+        fn visit_region(&mut self, r: ty::Region<'tcx>) -> bool {
+            debug!("check_opaque_for_inheriting_lifetimes: (visit_region) r={:?}", r);
+            if let RegionKind::ReEarlyBound(ty::EarlyBoundRegion { index, .. }) = r {
+                return *index < self.generics.parent_count as u32;
+            }
+
+            r.super_visit_with(self)
+        }
+    }
+
+    let prohibit_opaque = match item.node {
+        ItemKind::OpaqueTy(hir::OpaqueTy { origin: hir::OpaqueTyOrigin::AsyncFn, .. }) |
+        ItemKind::OpaqueTy(hir::OpaqueTy { origin: hir::OpaqueTyOrigin::FnReturn, .. }) => {
+            let mut visitor = ProhibitOpaqueVisitor {
+                opaque_identity_ty: tcx.mk_opaque(
+                    def_id, InternalSubsts::identity_for_item(tcx, def_id)),
+                generics: tcx.generics_of(def_id),
+            };
+            debug!("check_opaque_for_inheriting_lifetimes: visitor={:?}", visitor);
+
+            tcx.predicates_of(def_id).predicates.iter().any(
+                |(predicate, _)| predicate.visit_with(&mut visitor))
+        },
+        _ => false,
+    };
+
+    debug!("check_opaque_for_inheriting_lifetimes: prohibit_opaque={:?}", prohibit_opaque);
+    if prohibit_opaque {
+        let is_async = match item.node {
+            ItemKind::OpaqueTy(hir::OpaqueTy { origin, .. }) => match origin {
+                hir::OpaqueTyOrigin::AsyncFn => true,
+                _ => false,
+            },
+            _ => unreachable!(),
+        };
+
+        tcx.sess.span_err(span, &format!(
+            "`{}` return type cannot contain a projection or `Self` that references lifetimes from \
+             a parent scope",
+            if is_async { "async fn" } else { "impl Trait" },
+        ));
+    }
+}
+
+/// Checks that an opaque type does not contain cycles.
+fn check_opaque_for_cycles<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    substs: SubstsRef<'tcx>,
+    span: Span,
+    origin: &hir::OpaqueTyOrigin,
+) {
+    if let Err(partially_expanded_type) = tcx.try_expand_impl_trait_type(def_id, substs) {
+        if let hir::OpaqueTyOrigin::AsyncFn = origin {
+            struct_span_err!(
+                tcx.sess, span, E0733,
+                "recursion in an `async fn` requires boxing",
+            )
+            .span_label(span, "an `async fn` cannot invoke itself directly")
+            .note("a recursive `async fn` must be rewritten to return a boxed future.")
+            .emit();
+        } else {
+            let mut err = struct_span_err!(
+                tcx.sess, span, E0720,
+                "opaque type expands to a recursive type",
+            );
+            err.span_label(span, "expands to a recursive type");
+            if let ty::Opaque(..) = partially_expanded_type.sty {
+                err.note("type resolves to itself");
+            } else {
+                err.note(&format!("expanded type is `{}`", partially_expanded_type));
+            }
+            err.emit();
+        }
     }
 }
 
@@ -1377,13 +1485,13 @@ pub fn check_item_type<'tcx>(tcx: TyCtxt<'tcx>, it: &'tcx hir::Item) {
         hir::ItemKind::Union(..) => {
             check_union(tcx, it.hir_id, it.span);
         }
-        hir::ItemKind::Existential(..) => {
+        hir::ItemKind::OpaqueTy(hir::OpaqueTy{origin, ..}) => {
             let def_id = tcx.hir().local_def_id(it.hir_id);
 
             let substs = InternalSubsts::identity_for_item(tcx, def_id);
-            check_opaque(tcx, def_id, substs, it.span);
+            check_opaque(tcx, def_id, substs, it.span, &origin);
         }
-        hir::ItemKind::Ty(..) => {
+        hir::ItemKind::TyAlias(..) => {
             let def_id = tcx.hir().local_def_id(it.hir_id);
             let pty_ty = tcx.type_of(def_id);
             let generics = tcx.generics_of(def_id);
@@ -1442,11 +1550,14 @@ fn maybe_check_static_with_link_section(tcx: TyCtxt<'_>, id: DefId, span: Span) 
         return
     }
 
-    // For the wasm32 target statics with #[link_section] are placed into custom
+    // For the wasm32 target statics with `#[link_section]` are placed into custom
     // sections of the final output file, but this isn't link custom sections of
     // other executable formats. Namely we can only embed a list of bytes,
     // nothing with pointers to anything else or relocations. If any relocation
     // show up, reject them here.
+    // `#[link_section]` may contain arbitrary, or even undefined bytes, but it is
+    // the consumer's responsibility to ensure all bytes that have been read
+    // have defined values.
     let instance = ty::Instance::mono(tcx, id);
     let cid = GlobalId {
         instance,
@@ -1513,8 +1624,8 @@ fn check_specialization_validity<'tcx>(
     let kind = match impl_item.node {
         hir::ImplItemKind::Const(..) => ty::AssocKind::Const,
         hir::ImplItemKind::Method(..) => ty::AssocKind::Method,
-        hir::ImplItemKind::Existential(..) => ty::AssocKind::Existential,
-        hir::ImplItemKind::Type(_) => ty::AssocKind::Type
+        hir::ImplItemKind::OpaqueTy(..) => ty::AssocKind::OpaqueTy,
+        hir::ImplItemKind::TyAlias(_) => ty::AssocKind::Type,
     };
 
     let parent = ancestors.defs(tcx, trait_item.ident, kind, trait_def.def_id).nth(1)
@@ -1610,8 +1721,8 @@ fn check_impl_items_against_trait<'tcx>(
                          err.emit()
                     }
                 }
-                hir::ImplItemKind::Existential(..) |
-                hir::ImplItemKind::Type(_) => {
+                hir::ImplItemKind::OpaqueTy(..) |
+                hir::ImplItemKind::TyAlias(_) => {
                     if ty_trait_item.kind == ty::AssocKind::Type {
                         if ty_trait_item.defaultness.has_value() {
                             overridden_associated_type = Some(impl_item);
@@ -1805,7 +1916,7 @@ fn bad_variant_count<'tcx>(tcx: TyCtxt<'tcx>, adt: &'tcx ty::AdtDef, sp: Span, d
     );
     let mut err = struct_span_err!(tcx.sess, sp, E0731, "transparent enum {}", msg);
     err.span_label(sp, &msg);
-    if let &[ref start.., ref end] = &variant_spans[..] {
+    if let &[ref start @ .., ref end] = &variant_spans[..] {
         for variant_span in start {
             err.span_label(*variant_span, "");
         }
@@ -1937,19 +2048,19 @@ pub fn check_enum<'tcx>(tcx: TyCtxt<'tcx>, sp: Span, vs: &'tcx [hir::Variant], i
     }
 
     for v in vs {
-        if let Some(ref e) = v.node.disr_expr {
+        if let Some(ref e) = v.disr_expr {
             tcx.typeck_tables_of(tcx.hir().local_def_id(e.hir_id));
         }
     }
 
     if tcx.adt_def(def_id).repr.int.is_none() && tcx.features().arbitrary_enum_discriminant {
         let is_unit =
-            |var: &hir::Variant| match var.node.data {
+            |var: &hir::Variant| match var.data {
                 hir::VariantData::Unit(..) => true,
                 _ => false
             };
 
-        let has_disr = |var: &hir::Variant| var.node.disr_expr.is_some();
+        let has_disr = |var: &hir::Variant| var.disr_expr.is_some();
         let has_non_units = vs.iter().any(|var| !is_unit(var));
         let disr_units = vs.iter().any(|var| is_unit(&var) && has_disr(&var));
         let disr_non_unit = vs.iter().any(|var| !is_unit(&var) && has_disr(&var));
@@ -1968,11 +2079,11 @@ pub fn check_enum<'tcx>(tcx: TyCtxt<'tcx>, sp: Span, vs: &'tcx [hir::Variant], i
             let variant_did = def.variants[VariantIdx::new(i)].def_id;
             let variant_i_hir_id = tcx.hir().as_local_hir_id(variant_did).unwrap();
             let variant_i = tcx.hir().expect_variant(variant_i_hir_id);
-            let i_span = match variant_i.node.disr_expr {
+            let i_span = match variant_i.disr_expr {
                 Some(ref expr) => tcx.hir().span(expr.hir_id),
                 None => tcx.hir().span(variant_i_hir_id)
             };
-            let span = match v.node.disr_expr {
+            let span = match v.disr_expr {
                 Some(ref expr) => tcx.hir().span(expr.hir_id),
                 None => v.span
             };
@@ -1999,7 +2110,7 @@ fn report_unexpected_variant_res(tcx: TyCtxt<'_>, res: Res, span: Span, qpath: &
 impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
     fn tcx<'b>(&'b self) -> TyCtxt<'tcx> {
         self.tcx
-        }
+    }
 
     fn get_type_parameter_bounds(&self, _: Span, def_id: DefId)
                                  -> &'tcx ty::GenericPredicates<'tcx>
@@ -2832,7 +2943,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             (PlaceOp::Index, false) => (self.tcx.lang_items().index_trait(), sym::index),
             (PlaceOp::Index, true) => (self.tcx.lang_items().index_mut_trait(), sym::index_mut),
         };
-        (tr, ast::Ident::with_empty_ctxt(name))
+        (tr, ast::Ident::with_dummy_span(name))
     }
 
     fn try_overloaded_place_op(&self,
@@ -3678,7 +3789,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             self.consider_hint_about_removing_semicolon(blk, expected_ty, err);
                         }
                         if let Some(fn_span) = fn_span {
-                            err.span_label(fn_span, "this function's body doesn't return");
+                            err.span_label(
+                                fn_span,
+                                "implicitly returns `()` as its body has no tail or `return` \
+                                 expression",
+                            );
                         }
                     }, false);
                 }
@@ -3785,7 +3900,103 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 err, &fn_decl, expected, found, can_suggest);
         }
         self.suggest_ref_or_into(err, expression, expected, found);
+        self.suggest_boxing_when_appropriate(err, expression, expected, found);
         pointing_at_return_type
+    }
+
+    /// When encountering an fn-like ctor that needs to unify with a value, check whether calling
+    /// the ctor would successfully solve the type mismatch and if so, suggest it:
+    /// ```
+    /// fn foo(x: usize) -> usize { x }
+    /// let x: usize = foo;  // suggest calling the `foo` function: `foo(42)`
+    /// ```
+    fn suggest_fn_call(
+        &self,
+        err: &mut DiagnosticBuilder<'tcx>,
+        expr: &hir::Expr,
+        expected: Ty<'tcx>,
+        found: Ty<'tcx>,
+    ) -> bool {
+        match found.sty {
+            ty::FnDef(..) | ty::FnPtr(_) => {}
+            _ => return false,
+        }
+        let hir = self.tcx.hir();
+
+        let sig = found.fn_sig(self.tcx);
+        let sig = self
+            .replace_bound_vars_with_fresh_vars(expr.span, infer::FnCall, &sig)
+            .0;
+        let sig = self.normalize_associated_types_in(expr.span, &sig);
+        if let Ok(_) = self.try_coerce(expr, sig.output(), expected, AllowTwoPhase::No) {
+            let (mut sugg_call, applicability) = if sig.inputs().is_empty() {
+                (String::new(), Applicability::MachineApplicable)
+            } else {
+                ("...".to_string(), Applicability::HasPlaceholders)
+            };
+            let mut msg = "call this function";
+            if let ty::FnDef(def_id, ..) = found.sty {
+                match hir.get_if_local(def_id) {
+                    Some(Node::Item(hir::Item {
+                        node: ItemKind::Fn(.., body_id),
+                        ..
+                    })) |
+                    Some(Node::ImplItem(hir::ImplItem {
+                        node: hir::ImplItemKind::Method(_, body_id),
+                        ..
+                    })) |
+                    Some(Node::TraitItem(hir::TraitItem {
+                        node: hir::TraitItemKind::Method(.., hir::TraitMethod::Provided(body_id)),
+                        ..
+                    })) => {
+                        let body = hir.body(*body_id);
+                        sugg_call = body.arguments.iter()
+                            .map(|arg| match &arg.pat.node {
+                                hir::PatKind::Binding(_, _, ident, None)
+                                if ident.name != kw::SelfLower => ident.to_string(),
+                                _ => "_".to_string(),
+                            }).collect::<Vec<_>>().join(", ");
+                    }
+                    Some(Node::Ctor(hir::VariantData::Tuple(fields, _))) => {
+                        sugg_call = fields.iter().map(|_| "_").collect::<Vec<_>>().join(", ");
+                        match hir.as_local_hir_id(def_id).and_then(|hir_id| hir.def_kind(hir_id)) {
+                            Some(hir::def::DefKind::Ctor(hir::def::CtorOf::Variant, _)) => {
+                                msg = "instantiate this tuple variant";
+                            }
+                            Some(hir::def::DefKind::Ctor(hir::def::CtorOf::Struct, _)) => {
+                                msg = "instantiate this tuple struct";
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some(Node::ForeignItem(hir::ForeignItem {
+                        node: hir::ForeignItemKind::Fn(_, idents, _),
+                        ..
+                    })) |
+                    Some(Node::TraitItem(hir::TraitItem {
+                        node: hir::TraitItemKind::Method(.., hir::TraitMethod::Required(idents)),
+                        ..
+                    })) => sugg_call = idents.iter()
+                            .map(|ident| if ident.name != kw::SelfLower {
+                                ident.to_string()
+                            } else {
+                                "_".to_string()
+                            }).collect::<Vec<_>>()
+                            .join(", "),
+                    _ => {}
+                }
+            };
+            if let Ok(code) = self.sess().source_map().span_to_snippet(expr.span) {
+                err.span_suggestion(
+                    expr.span,
+                    &format!("use parentheses to {}", msg),
+                    format!("{}({})", code, sugg_call),
+                    applicability,
+                );
+                return true;
+            }
+        }
+        false
     }
 
     pub fn suggest_ref_or_into(
@@ -3802,6 +4013,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 suggestion,
                 Applicability::MachineApplicable,
             );
+        } else if let (ty::FnDef(def_id, ..), true) = (
+            &found.sty,
+            self.suggest_fn_call(err, expr, expected, found),
+        ) {
+            if let Some(sp) = self.tcx.hir().span_if_local(*def_id) {
+                let sp = self.sess().source_map().def_span(sp);
+                err.span_label(sp, &format!("{} defined here", found));
+            }
         } else if !self.check_for_cast(err, expr, found, expected) {
             let is_struct_pat_shorthand_field = self.is_hir_id_from_struct_pattern_shorthand_field(
                 expr.hir_id,
@@ -3841,6 +4060,41 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
         }
     }
+
+    /// When encountering the expected boxed value allocated in the stack, suggest allocating it
+    /// in the heap by calling `Box::new()`.
+    fn suggest_boxing_when_appropriate(
+        &self,
+        err: &mut DiagnosticBuilder<'tcx>,
+        expr: &hir::Expr,
+        expected: Ty<'tcx>,
+        found: Ty<'tcx>,
+    ) {
+        if self.tcx.hir().is_const_context(expr.hir_id) {
+            // Do not suggest `Box::new` in const context.
+            return;
+        }
+        if !expected.is_box() || found.is_box() {
+            return;
+        }
+        let boxed_found = self.tcx.mk_box(found);
+        if let (true, Ok(snippet)) = (
+            self.can_coerce(boxed_found, expected),
+            self.sess().source_map().span_to_snippet(expr.span),
+        ) {
+            err.span_suggestion(
+                expr.span,
+                "store this in the heap by calling `Box::new`",
+                format!("Box::new({})", snippet),
+                Applicability::MachineApplicable,
+            );
+            err.note("for more on the distinction between the stack and the \
+                        heap, read https://doc.rust-lang.org/book/ch15-01-box.html, \
+                        https://doc.rust-lang.org/rust-by-example/std/box.html, and \
+                        https://doc.rust-lang.org/std/boxed/index.html");
+        }
+    }
+
 
     /// A common error is to forget to add a semicolon at the end of a block, e.g.,
     ///
@@ -3943,8 +4197,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// A possible error is to forget to add `.await` when using futures:
     ///
     /// ```
-    /// #![feature(async_await)]
-    ///
     /// async fn make_u32() -> u32 {
     ///     22
     /// }

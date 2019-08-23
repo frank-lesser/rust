@@ -1,13 +1,9 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 #![feature(nll)]
-#![deny(rust_2018_idioms)]
-#![deny(unused_lifetimes)]
-#![allow(unused_attributes)]
 
 #![recursion_limit="256"]
 
-
-mod json_dumper;
+mod dumper;
 mod dump_visitor;
 #[macro_use]
 mod span_utils;
@@ -39,12 +35,11 @@ use syntax::visit::{self, Visitor};
 use syntax::print::pprust::{arg_to_string, ty_to_string};
 use syntax_pos::*;
 
-use json_dumper::JsonDumper;
 use dump_visitor::DumpVisitor;
 use span_utils::SpanUtils;
 
 use rls_data::{Def, DefKind, ExternalCrateData, GlobalCrateId, MacroRef, Ref, RefKind, Relation,
-               RelationKind, SpanData, Impl, ImplKind};
+               RelationKind, SpanData, Impl, ImplKind, Analysis};
 use rls_data::config::Config;
 
 use log::{debug, error, info};
@@ -111,7 +106,7 @@ impl<'l, 'tcx> SaveContext<'l, 'tcx> {
             let span = match self.tcx.extern_crate(n.as_def_id()) {
                 Some(&ExternCrate { span, .. }) => span,
                 None => {
-                    debug!("Skipping crate {}, no data", n);
+                    debug!("skipping crate {}, no data", n);
                     continue;
                 }
             };
@@ -282,7 +277,7 @@ impl<'l, 'tcx> SaveContext<'l, 'tcx> {
                 filter!(self.span_utils, item.ident.span);
                 let variants_str = def.variants
                     .iter()
-                    .map(|v| v.node.ident.to_string())
+                    .map(|v| v.ident.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
                 let value = format!("{}::{{{}}}", name, variants_str);
@@ -296,7 +291,7 @@ impl<'l, 'tcx> SaveContext<'l, 'tcx> {
                     parent: None,
                     children: def.variants
                         .iter()
-                        .map(|v| id_from_node_id(v.node.id, self))
+                        .map(|v| id_from_node_id(v.id, self))
                         .collect(),
                     decl_id: None,
                     docs: self.docs_for_attrs(&item.attrs),
@@ -469,7 +464,7 @@ impl<'l, 'tcx> SaveContext<'l, 'tcx> {
                         )
                     }
                     None => {
-                        debug!("Could not find container for method {} at {:?}", id, span);
+                        debug!("could not find container for method {} at {:?}", id, span);
                         // This is not necessarily a bug, if there was a compilation error,
                         // the tables we need might not exist.
                         return None;
@@ -550,7 +545,7 @@ impl<'l, 'tcx> SaveContext<'l, 'tcx> {
                     }
                     ty::Tuple(..) => None,
                     _ => {
-                        debug!("Expected struct or union type, found {:?}", ty);
+                        debug!("expected struct or union type, found {:?}", ty);
                         None
                     }
                 }
@@ -580,7 +575,7 @@ impl<'l, 'tcx> SaveContext<'l, 'tcx> {
                 let method_id = match self.tables.type_dependent_def_id(expr_hir_id) {
                     Some(id) => id,
                     None => {
-                        debug!("Could not resolve method id for {:?}", expr);
+                        debug!("could not resolve method id for {:?}", expr);
                         return None;
                     }
                 };
@@ -730,10 +725,10 @@ impl<'l, 'tcx> SaveContext<'l, 'tcx> {
             Res::Def(HirDefKind::TyAlias, def_id) |
             Res::Def(HirDefKind::ForeignTy, def_id) |
             Res::Def(HirDefKind::TraitAlias, def_id) |
-            Res::Def(HirDefKind::AssocExistential, def_id) |
+            Res::Def(HirDefKind::AssocOpaqueTy, def_id) |
             Res::Def(HirDefKind::AssocTy, def_id) |
             Res::Def(HirDefKind::Trait, def_id) |
-            Res::Def(HirDefKind::Existential, def_id) |
+            Res::Def(HirDefKind::OpaqueTy, def_id) |
             Res::Def(HirDefKind::TyParam, def_id) => {
                 Some(Ref {
                     kind: RefKind::Type,
@@ -1001,12 +996,10 @@ impl<'l> Visitor<'l> for PathCollector<'l> {
 
 /// Defines what to do with the results of saving the analysis.
 pub trait SaveHandler {
-    fn save<'l, 'tcx>(
+    fn save(
         &mut self,
-        save_ctxt: SaveContext<'l, 'tcx>,
-        krate: &ast::Crate,
-        cratename: &str,
-        input: &'l Input,
+        save_ctxt: &SaveContext<'_, '_>,
+        analysis: &Analysis,
     );
 }
 
@@ -1066,28 +1059,19 @@ impl<'a> DumpHandler<'a> {
     }
 }
 
-impl<'a> SaveHandler for DumpHandler<'a> {
-    fn save<'l, 'tcx>(
+impl SaveHandler for DumpHandler<'_> {
+    fn save(
         &mut self,
-        save_ctxt: SaveContext<'l, 'tcx>,
-        krate: &ast::Crate,
-        cratename: &str,
-        input: &'l Input,
+        save_ctxt: &SaveContext<'_, '_>,
+        analysis: &Analysis,
     ) {
         let sess = &save_ctxt.tcx.sess;
-        let file_name = {
-            let (mut output, file_name) = self.output_file(&save_ctxt);
-            let mut dumper = JsonDumper::new(&mut output, save_ctxt.config.clone());
-            let mut visitor = DumpVisitor::new(save_ctxt, &mut dumper);
+        let (output, file_name) = self.output_file(&save_ctxt);
+        if let Err(e) = serde_json::to_writer(output, &analysis) {
+            error!("Can't serialize save-analysis: {:?}", e);
+        }
 
-            visitor.dump_crate_info(cratename, krate);
-            visitor.dump_compilation_options(input, cratename);
-            visit::walk_crate(&mut visitor, krate);
-
-            file_name
-        };
-
-        if sess.opts.debugging_opts.emit_artifact_notifications {
+        if sess.opts.json_artifact_notifications {
             sess.parse_sess.span_diagnostic
                 .emit_artifact_notification(&file_name, "save-analysis");
         }
@@ -1099,25 +1083,13 @@ pub struct CallbackHandler<'b> {
     pub callback: &'b mut dyn FnMut(&rls_data::Analysis),
 }
 
-impl<'b> SaveHandler for CallbackHandler<'b> {
-    fn save<'l, 'tcx>(
+impl SaveHandler for CallbackHandler<'_> {
+    fn save(
         &mut self,
-        save_ctxt: SaveContext<'l, 'tcx>,
-        krate: &ast::Crate,
-        cratename: &str,
-        input: &'l Input,
+        _: &SaveContext<'_, '_>,
+        analysis: &Analysis,
     ) {
-        // We're using the JsonDumper here because it has the format of the
-        // save-analysis results that we will pass to the callback. IOW, we are
-        // using the JsonDumper to collect the save-analysis results, but not
-        // actually to dump them to a file. This is all a bit convoluted and
-        // there is certainly a simpler design here trying to get out (FIXME).
-        let mut dumper = JsonDumper::with_callback(self.callback, save_ctxt.config.clone());
-        let mut visitor = DumpVisitor::new(save_ctxt, &mut dumper);
-
-        visitor.dump_crate_info(cratename, krate);
-        visitor.dump_compilation_options(input, cratename);
-        visit::walk_crate(&mut visitor, krate);
+        (self.callback)(analysis)
     }
 }
 
@@ -1148,7 +1120,13 @@ pub fn process_crate<'l, 'tcx, H: SaveHandler>(
             impl_counter: Cell::new(0),
         };
 
-        handler.save(save_ctxt, krate, cratename, input)
+        let mut visitor = DumpVisitor::new(save_ctxt);
+
+        visitor.dump_crate_info(cratename, krate);
+        visitor.dump_compilation_options(input, cratename);
+        visit::walk_crate(&mut visitor, krate);
+
+        handler.save(&visitor.save_ctxt, &visitor.analysis())
     })
 }
 
@@ -1178,7 +1156,7 @@ fn escape(s: String) -> String {
 // Helper function to determine if a span came from a
 // macro expansion or syntax extension.
 fn generated_code(span: Span) -> bool {
-    span.ctxt() != NO_EXPANSION || span.is_dummy()
+    span.from_expansion() || span.is_dummy()
 }
 
 // DefId::index is a newtype and so the JSON serialisation is ugly. Therefore

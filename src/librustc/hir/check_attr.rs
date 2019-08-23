@@ -26,8 +26,8 @@ pub(crate) enum Target {
     Mod,
     ForeignMod,
     GlobalAsm,
-    Ty,
-    Existential,
+    TyAlias,
+    OpaqueTy,
     Enum,
     Struct,
     Union,
@@ -50,8 +50,8 @@ impl Display for Target {
             Target::Mod => "module",
             Target::ForeignMod => "foreign module",
             Target::GlobalAsm => "global asm",
-            Target::Ty => "type alias",
-            Target::Existential => "existential type",
+            Target::TyAlias => "type alias",
+            Target::OpaqueTy => "opaque type",
             Target::Enum => "enum",
             Target::Struct => "struct",
             Target::Union => "union",
@@ -75,8 +75,8 @@ impl Target {
             hir::ItemKind::Mod(..) => Target::Mod,
             hir::ItemKind::ForeignMod(..) => Target::ForeignMod,
             hir::ItemKind::GlobalAsm(..) => Target::GlobalAsm,
-            hir::ItemKind::Ty(..) => Target::Ty,
-            hir::ItemKind::Existential(..) => Target::Existential,
+            hir::ItemKind::TyAlias(..) => Target::TyAlias,
+            hir::ItemKind::OpaqueTy(..) => Target::OpaqueTy,
             hir::ItemKind::Enum(..) => Target::Enum,
             hir::ItemKind::Struct(..) => Target::Struct,
             hir::ItemKind::Union(..) => Target::Union,
@@ -336,7 +336,7 @@ impl Visitor<'tcx> for CheckAttrVisitor<'tcx> {
 fn is_c_like_enum(item: &hir::Item) -> bool {
     if let hir::ItemKind::Enum(ref def, _) = item.node {
         for variant in &def.variants {
-            match variant.node.data {
+            match variant.data {
                 hir::VariantData::Unit(..) => { /* continue */ }
                 _ => { return false; }
             }

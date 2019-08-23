@@ -350,7 +350,7 @@ impl<'a> HashStable<StableHashingContext<'a>> for Span {
         let line_col_len = col | line | len;
         std_hash::Hash::hash(&line_col_len, hasher);
 
-        if span.ctxt == SyntaxContext::empty() {
+        if span.ctxt == SyntaxContext::root() {
             TAG_NO_EXPANSION.hash_stable(hcx, hasher);
         } else {
             TAG_EXPANSION.hash_stable(hcx, hasher);
@@ -359,21 +359,21 @@ impl<'a> HashStable<StableHashingContext<'a>> for Span {
             // times, we cache a stable hash of it and hash that instead of
             // recursing every time.
             thread_local! {
-                static CACHE: RefCell<FxHashMap<hygiene::Mark, u64>> = Default::default();
+                static CACHE: RefCell<FxHashMap<hygiene::ExpnId, u64>> = Default::default();
             }
 
             let sub_hash: u64 = CACHE.with(|cache| {
-                let mark = span.ctxt.outer();
+                let expn_id = span.ctxt.outer_expn();
 
-                if let Some(&sub_hash) = cache.borrow().get(&mark) {
+                if let Some(&sub_hash) = cache.borrow().get(&expn_id) {
                     return sub_hash;
                 }
 
                 let mut hasher = StableHasher::new();
-                mark.expn_info().hash_stable(hcx, &mut hasher);
+                expn_id.expn_data().hash_stable(hcx, &mut hasher);
                 let sub_hash: Fingerprint = hasher.finish();
                 let sub_hash = sub_hash.to_smaller_hash();
-                cache.borrow_mut().insert(mark, sub_hash);
+                cache.borrow_mut().insert(expn_id, sub_hash);
                 sub_hash
             });
 

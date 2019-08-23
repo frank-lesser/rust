@@ -269,8 +269,8 @@ impl<'tcx> TyCtxt<'tcx> {
         match item.node {
             hir::ImplItemKind::Method(..) => "method body",
             hir::ImplItemKind::Const(..)
-            | hir::ImplItemKind::Existential(..)
-            | hir::ImplItemKind::Type(..) => "associated item",
+            | hir::ImplItemKind::OpaqueTy(..)
+            | hir::ImplItemKind::TyAlias(..) => "associated item",
         }
     }
 
@@ -662,19 +662,22 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     }
                 }
                 _ => {
+                    // `last_ty` can be `!`, `expected` will have better info when present.
+                    let t = self.resolve_vars_if_possible(&match exp_found {
+                        Some(ty::error::ExpectedFound { expected, .. }) => expected,
+                        _ => last_ty,
+                    });
                     let msg = "`match` arms have incompatible types";
                     err.span_label(cause.span, msg);
                     if prior_arms.len() <= 4 {
                         for sp in prior_arms {
-                            err.span_label(*sp, format!(
-                                "this is found to be of type `{}`",
-                                self.resolve_vars_if_possible(&last_ty),
-                            ));
+                            err.span_label( *sp, format!("this is found to be of type `{}`", t));
                         }
                     } else if let Some(sp) = prior_arms.last() {
-                        err.span_label(*sp, format!(
-                            "this and all prior arms are found to be of type `{}`", last_ty,
-                        ));
+                        err.span_label(
+                            *sp,
+                            format!("this and all prior arms are found to be of type `{}`", t),
+                        );
                     }
                 }
             },
@@ -1143,27 +1146,6 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 }
                 (_, false, _) => {
                     if let Some(exp_found) = exp_found {
-                        let (def_id, ret_ty) = match exp_found.found.sty {
-                            ty::FnDef(def, _) => {
-                                (Some(def), Some(self.tcx.fn_sig(def).output()))
-                            }
-                            _ => (None, None),
-                        };
-
-                        let exp_is_struct = match exp_found.expected.sty {
-                            ty::Adt(def, _) => def.is_struct(),
-                            _ => false,
-                        };
-
-                        if let (Some(def_id), Some(ret_ty)) = (def_id, ret_ty) {
-                            if exp_is_struct && &exp_found.expected == ret_ty.skip_binder() {
-                                let message = format!(
-                                    "did you mean `{}(/* fields */)`?",
-                                    self.tcx.def_path_str(def_id)
-                                );
-                                diag.span_label(span, message);
-                            }
-                        }
                         self.suggest_as_ref_where_appropriate(span, &exp_found, diag);
                     }
 
@@ -1347,7 +1329,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     let generics = self.tcx.generics_of(did);
                     // Account for the case where `did` corresponds to `Self`, which doesn't have
                     // the expected type argument.
-                    if !param.is_self() {
+                    if !(generics.has_self && param.index == 0) {
                         let type_param = generics.type_param(param, self.tcx);
                         let hir = &self.tcx.hir();
                         hir.as_local_hir_id(type_param.def_id).map(|id| {
@@ -1355,7 +1337,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                             // We do this to avoid suggesting code that ends up as `T: 'a'b`,
                             // instead we suggest `T: 'a + 'b` in that case.
                             let mut has_bounds = false;
-                            if let Node::GenericParam(ref param) = hir.get(id) {
+                            if let Node::GenericParam(param) = hir.get(id) {
                                 has_bounds = !param.bounds.is_empty();
                             }
                             let sp = hir.span(id);
@@ -1668,7 +1650,7 @@ impl<'tcx> ObligationCause<'tcx> {
                 hir::MatchSource::IfLetDesugar { .. } => "`if let` arms have compatible types",
                 _ => "match arms have compatible types",
             },
-            IfExpression { .. } => "if and else have compatible types",
+            IfExpression { .. } => "if and else have incompatible types",
             IfExpressionWithNoElse => "if missing an else returns ()",
             MainFunctionType => "`main` function has the correct type",
             StartFunctionType => "`start` function has the correct type",

@@ -1,9 +1,7 @@
 use errors::{Applicability, DiagnosticBuilder};
 
 use syntax::ast::{self, *};
-use syntax::source_map::Spanned;
 use syntax::ext::base::*;
-use syntax::ext::build::AstBuilder;
 use syntax::parse::token::{self, TokenKind};
 use syntax::parse::parser::Parser;
 use syntax::print::pprust;
@@ -21,12 +19,12 @@ pub fn expand_assert<'cx>(
         Ok(assert) => assert,
         Err(mut err) => {
             err.emit();
-            return DummyResult::expr(sp);
+            return DummyResult::any(sp);
         }
     };
 
-    let sp = sp.apply_mark(cx.current_expansion.mark);
-    let panic_call = Mac_ {
+    let sp = sp.apply_mark(cx.current_expansion.id);
+    let panic_call = Mac {
         path: Path::from_ident(Ident::new(sym::panic, sp)),
         tts: custom_message.unwrap_or_else(|| {
             TokenStream::from(TokenTree::token(
@@ -38,16 +36,15 @@ pub fn expand_assert<'cx>(
             ))
         }).into(),
         delim: MacDelimiter::Parenthesis,
+        span: sp,
+        prior_type_ascription: None,
     };
     let if_expr = cx.expr_if(
         sp,
         cx.expr(sp, ExprKind::Unary(UnOp::Not, cond_expr)),
         cx.expr(
             sp,
-            ExprKind::Mac(Spanned {
-                span: sp,
-                node: panic_call,
-            }),
+            ExprKind::Mac(panic_call),
         ),
         None,
     );

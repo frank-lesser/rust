@@ -4,21 +4,28 @@ use crate::ast::{Attribute, MacDelimiter, GenericArg};
 use crate::util::parser::{self, AssocOp, Fixity};
 use crate::attr;
 use crate::source_map::{self, SourceMap, Spanned};
-use crate::parse::token::{self, BinOpToken, Nonterminal, Token, TokenKind};
+use crate::parse::token::{self, BinOpToken, DelimToken, Nonterminal, Token, TokenKind};
 use crate::parse::lexer::comments;
 use crate::parse::{self, ParseSess};
 use crate::print::pp::{self, Breaks};
 use crate::print::pp::Breaks::{Consistent, Inconsistent};
 use crate::ptr::P;
-use crate::std_inject;
 use crate::symbol::{kw, sym};
 use crate::tokenstream::{self, TokenStream, TokenTree};
 
 use rustc_target::spec::abi::{self, Abi};
 use syntax_pos::{self, BytePos};
-use syntax_pos::{DUMMY_SP, FileName, Span};
+use syntax_pos::{FileName, Span};
 
 use std::borrow::Cow;
+
+#[cfg(test)]
+mod tests;
+
+pub enum MacHeader<'a> {
+    Path(&'a ast::Path),
+    Keyword(&'static str),
+}
 
 pub enum AnnNode<'a> {
     Ident(&'a ast::Ident),
@@ -109,22 +116,21 @@ pub fn print_crate<'a>(cm: &'a SourceMap,
         is_expanded,
     };
 
-    if is_expanded && std_inject::injected_crate_name().is_some() {
+    if is_expanded && sess.injected_crate_name.try_get().is_some() {
         // We need to print `#![no_std]` (and its feature gate) so that
         // compiling pretty-printed source won't inject libstd again.
         // However we don't want these attributes in the AST because
         // of the feature gate, so we fake them up here.
 
         // #![feature(prelude_import)]
-        let pi_nested = attr::mk_nested_word_item(ast::Ident::with_empty_ctxt(sym::prelude_import));
-        let list = attr::mk_list_item(
-            DUMMY_SP, ast::Ident::with_empty_ctxt(sym::feature), vec![pi_nested]);
-        let fake_attr = attr::mk_attr_inner(DUMMY_SP, attr::mk_attr_id(), list);
+        let pi_nested = attr::mk_nested_word_item(ast::Ident::with_dummy_span(sym::prelude_import));
+        let list = attr::mk_list_item(ast::Ident::with_dummy_span(sym::feature), vec![pi_nested]);
+        let fake_attr = attr::mk_attr_inner(list);
         s.print_attribute(&fake_attr);
 
         // #![no_std]
-        let no_std_meta = attr::mk_word_item(ast::Ident::with_empty_ctxt(sym::no_std));
-        let fake_attr = attr::mk_attr_inner(DUMMY_SP, attr::mk_attr_id(), no_std_meta);
+        let no_std_meta = attr::mk_word_item(ast::Ident::with_dummy_span(sym::no_std));
+        let fake_attr = attr::mk_attr_inner(no_std_meta);
         s.print_attribute(&fake_attr);
     }
 
@@ -188,7 +194,7 @@ pub fn literal_to_string(lit: token::Lit) -> String {
 }
 
 /// Print an ident from AST, `$crate` is converted into its respective crate name.
-fn ast_ident_to_string(ident: ast::Ident, is_raw: bool) -> String {
+pub fn ast_ident_to_string(ident: ast::Ident, is_raw: bool) -> String {
     ident_to_string(ident.name, is_raw, Some(ident.span))
 }
 
@@ -281,6 +287,7 @@ fn token_kind_to_string_ext(tok: &TokenKind, convert_dollar_crate: Option<Span>)
         token::Whitespace           => " ".to_string(),
         token::Comment              => "/* */".to_string(),
         token::Shebang(s)           => format!("/* shebang: {}*/", s),
+        token::Unknown(s)           => s.to_string(),
 
         token::Interpolated(ref nt) => nonterminal_to_string(nt),
     }
@@ -377,21 +384,6 @@ pub fn vis_to_string(v: &ast::Visibility) -> String {
     to_string(|s| s.print_visibility(v))
 }
 
-#[cfg(test)]
-fn fun_to_string(decl: &ast::FnDecl,
-                     header: ast::FnHeader,
-                     name: ast::Ident,
-                     generics: &ast::Generics)
-                     -> String {
-    to_string(|s| {
-        s.head("");
-        s.print_fn(decl, header, Some(name),
-                   generics, &source_map::dummy_spanned(ast::VisibilityKind::Inherited));
-        s.end(); // Close the head box
-        s.end(); // Close the outer box
-    })
-}
-
 fn block_to_string(blk: &ast::Block) -> String {
     to_string(|s| {
         // containing cbox, will be closed by print-block at }
@@ -412,11 +404,6 @@ pub fn meta_item_to_string(mi: &ast::MetaItem) -> String {
 
 pub fn attribute_to_string(attr: &ast::Attribute) -> String {
     to_string(|s| s.print_attribute(attr))
-}
-
-#[cfg(test)]
-fn variant_to_string(var: &ast::Variant) -> String {
-    to_string(|s| s.print_variant(var))
 }
 
 pub fn arg_to_string(arg: &ast::Arg) -> String {
@@ -446,17 +433,31 @@ impl std::ops::DerefMut for State<'_> {
 
 pub trait PrintState<'a>: std::ops::Deref<Target=pp::Printer> + std::ops::DerefMut {
     fn comments(&mut self) -> &mut Option<Comments<'a>>;
+    fn print_ident(&mut self, ident: ast::Ident);
+    fn print_generic_args(&mut self, args: &ast::GenericArgs, colons_before_params: bool);
 
-    fn commasep<T, F>(&mut self, b: Breaks, elts: &[T], mut op: F)
+    fn strsep<T, F>(&mut self, sep: &'static str, space_before: bool,
+                    b: Breaks, elts: &[T], mut op: F)
         where F: FnMut(&mut Self, &T),
     {
         self.rbox(0, b);
-        let mut first = true;
-        for elt in elts {
-            if first { first = false; } else { self.word_space(","); }
-            op(self, elt);
+        if let Some((first, rest)) = elts.split_first() {
+            op(self, first);
+            for elt in rest {
+                if space_before {
+                    self.space();
+                }
+                self.word_space(sep);
+                op(self, elt);
+            }
         }
         self.end();
+    }
+
+    fn commasep<T, F>(&mut self, b: Breaks, elts: &[T], op: F)
+        where F: FnMut(&mut Self, &T),
+    {
+        self.strsep(",", false, b, elts, op)
     }
 
     fn maybe_print_comment(&mut self, pos: BytePos) {
@@ -596,17 +597,6 @@ pub trait PrintState<'a>: std::ops::Deref<Target=pp::Printer> + std::ops::DerefM
         }
     }
 
-    fn print_attribute_path(&mut self, path: &ast::Path) {
-        for (i, segment) in path.segments.iter().enumerate() {
-            if i > 0 {
-                self.word("::");
-            }
-            if segment.ident.name != kw::PathRoot {
-                self.word(ast_ident_to_string(segment.ident, segment.ident.is_raw_guess()));
-            }
-        }
-    }
-
     fn print_attribute(&mut self, attr: &ast::Attribute) {
         self.print_attribute_inline(attr, false)
     }
@@ -625,13 +615,22 @@ pub trait PrintState<'a>: std::ops::Deref<Target=pp::Printer> + std::ops::DerefM
                 ast::AttrStyle::Inner => self.word("#!["),
                 ast::AttrStyle::Outer => self.word("#["),
             }
-            if let Some(mi) = attr.meta() {
-                self.print_meta_item(&mi);
-            } else {
-                self.print_attribute_path(&attr.path);
-                self.space();
-                self.print_tts(attr.tokens.clone(), true);
+            self.ibox(0);
+            match attr.tokens.trees().next() {
+                Some(TokenTree::Delimited(_, delim, tts)) => {
+                    self.print_mac_common(
+                        Some(MacHeader::Path(&attr.path)), false, None, delim, tts, true, attr.span
+                    );
+                }
+                tree => {
+                    self.print_path(&attr.path, false, 0);
+                    if tree.is_some() {
+                        self.space();
+                        self.print_tts(attr.tokens.clone(), true);
+                    }
+                }
             }
+            self.end();
             self.word("]");
         }
     }
@@ -650,15 +649,15 @@ pub trait PrintState<'a>: std::ops::Deref<Target=pp::Printer> + std::ops::DerefM
     fn print_meta_item(&mut self, item: &ast::MetaItem) {
         self.ibox(INDENT_UNIT);
         match item.node {
-            ast::MetaItemKind::Word => self.print_attribute_path(&item.path),
+            ast::MetaItemKind::Word => self.print_path(&item.path, false, 0),
             ast::MetaItemKind::NameValue(ref value) => {
-                self.print_attribute_path(&item.path);
+                self.print_path(&item.path, false, 0);
                 self.space();
                 self.word_space("=");
                 self.print_literal(value);
             }
             ast::MetaItemKind::List(ref items) => {
-                self.print_attribute_path(&item.path);
+                self.print_path(&item.path, false, 0);
                 self.popen();
                 self.commasep(Consistent,
                               &items[..],
@@ -687,36 +686,90 @@ pub trait PrintState<'a>: std::ops::Deref<Target=pp::Printer> + std::ops::DerefM
                     _ => {}
                 }
             }
-            TokenTree::Delimited(_, delim, tts) => {
-                self.word(token_kind_to_string(&token::OpenDelim(delim)));
-                self.space();
-                self.print_tts(tts, convert_dollar_crate);
-                self.space();
-                self.word(token_kind_to_string(&token::CloseDelim(delim)))
-            },
+            TokenTree::Delimited(dspan, delim, tts) => {
+                self.print_mac_common(
+                    None, false, None, delim, tts, convert_dollar_crate, dspan.entire()
+                );
+            }
         }
     }
 
     fn print_tts(&mut self, tts: tokenstream::TokenStream, convert_dollar_crate: bool) {
-        self.ibox(0);
         for (i, tt) in tts.into_trees().enumerate() {
             if i != 0 {
                 self.space();
             }
             self.print_tt(tt, convert_dollar_crate);
         }
+    }
+
+    fn print_mac_common(
+        &mut self,
+        header: Option<MacHeader<'_>>,
+        has_bang: bool,
+        ident: Option<ast::Ident>,
+        delim: DelimToken,
+        tts: TokenStream,
+        convert_dollar_crate: bool,
+        span: Span,
+    ) {
+        if delim == DelimToken::Brace {
+            self.cbox(INDENT_UNIT);
+        }
+        match header {
+            Some(MacHeader::Path(path)) => self.print_path(path, false, 0),
+            Some(MacHeader::Keyword(kw)) => self.word(kw),
+            None => {}
+        }
+        if has_bang {
+            self.word("!");
+        }
+        if let Some(ident) = ident {
+            self.nbsp();
+            self.print_ident(ident);
+        }
+        match delim {
+            DelimToken::Brace => {
+                if header.is_some() || has_bang || ident.is_some() {
+                    self.nbsp();
+                }
+                self.word("{");
+                if !tts.is_empty() {
+                    self.space();
+                }
+            }
+            _ => self.word(token_kind_to_string(&token::OpenDelim(delim))),
+        }
+        self.ibox(0);
+        self.print_tts(tts, convert_dollar_crate);
         self.end();
+        match delim {
+            DelimToken::Brace => self.bclose(span),
+            _ => self.word(token_kind_to_string(&token::CloseDelim(delim))),
+        }
     }
-}
 
-impl<'a> PrintState<'a> for State<'a> {
-    fn comments(&mut self) -> &mut Option<Comments<'a>> {
-        &mut self.comments
+    fn print_path(&mut self, path: &ast::Path, colons_before_params: bool, depth: usize) {
+        self.maybe_print_comment(path.span.lo());
+
+        for (i, segment) in path.segments[..path.segments.len() - depth].iter().enumerate() {
+            if i > 0 {
+                self.word("::")
+            }
+            self.print_path_segment(segment, colons_before_params);
+        }
     }
-}
 
-impl<'a> State<'a> {
-    crate fn head<S: Into<Cow<'static, str>>>(&mut self, w: S) {
+    fn print_path_segment(&mut self, segment: &ast::PathSegment, colons_before_params: bool) {
+        if segment.ident.name != kw::PathRoot {
+            self.print_ident(segment.ident);
+            if let Some(ref args) = segment.args {
+                self.print_generic_args(args, colons_before_params);
+            }
+        }
+    }
+
+    fn head<S: Into<Cow<'static, str>>>(&mut self, w: S) {
         let w = w.into();
         // outer-box is consistent
         self.cbox(INDENT_UNIT);
@@ -728,37 +781,103 @@ impl<'a> State<'a> {
         }
     }
 
-    crate fn bopen(&mut self) {
-        self.s.word("{");
+    fn bopen(&mut self) {
+        self.word("{");
         self.end(); // close the head-box
     }
 
-    crate fn bclose_maybe_open(&mut self, span: syntax_pos::Span, close_box: bool) {
+    fn bclose_maybe_open(&mut self, span: syntax_pos::Span, close_box: bool) {
         self.maybe_print_comment(span.hi());
         self.break_offset_if_not_bol(1, -(INDENT_UNIT as isize));
-        self.s.word("}");
+        self.word("}");
         if close_box {
             self.end(); // close the outer-box
         }
     }
-    crate fn bclose(&mut self, span: syntax_pos::Span) {
+
+    fn bclose(&mut self, span: syntax_pos::Span) {
         self.bclose_maybe_open(span, true)
     }
 
-    crate fn break_offset_if_not_bol(&mut self, n: usize,
-                                   off: isize) {
-        if !self.s.is_beginning_of_line() {
-            self.s.break_offset(n, off)
+    fn break_offset_if_not_bol(&mut self, n: usize, off: isize) {
+        if !self.is_beginning_of_line() {
+            self.break_offset(n, off)
         } else {
-            if off != 0 && self.s.last_token().is_hardbreak_tok() {
+            if off != 0 && self.last_token().is_hardbreak_tok() {
                 // We do something pretty sketchy here: tuck the nonzero
                 // offset-adjustment we were going to deposit along with the
                 // break into the previous hardbreak.
-                self.s.replace_last_token(pp::Printer::hardbreak_tok_offset(off));
+                self.replace_last_token(pp::Printer::hardbreak_tok_offset(off));
             }
         }
     }
+}
 
+impl<'a> PrintState<'a> for State<'a> {
+    fn comments(&mut self) -> &mut Option<Comments<'a>> {
+        &mut self.comments
+    }
+
+    fn print_ident(&mut self, ident: ast::Ident) {
+        self.s.word(ast_ident_to_string(ident, ident.is_raw_guess()));
+        self.ann.post(self, AnnNode::Ident(&ident))
+    }
+
+    fn print_generic_args(&mut self, args: &ast::GenericArgs, colons_before_params: bool) {
+        if colons_before_params {
+            self.s.word("::")
+        }
+
+        match *args {
+            ast::GenericArgs::AngleBracketed(ref data) => {
+                self.s.word("<");
+
+                self.commasep(Inconsistent, &data.args, |s, generic_arg| {
+                    s.print_generic_arg(generic_arg)
+                });
+
+                let mut comma = data.args.len() != 0;
+
+                for constraint in data.constraints.iter() {
+                    if comma {
+                        self.word_space(",")
+                    }
+                    self.print_ident(constraint.ident);
+                    self.s.space();
+                    match constraint.kind {
+                        ast::AssocTyConstraintKind::Equality { ref ty } => {
+                            self.word_space("=");
+                            self.print_type(ty);
+                        }
+                        ast::AssocTyConstraintKind::Bound { ref bounds } => {
+                            self.print_type_bounds(":", &*bounds);
+                        }
+                    }
+                    comma = true;
+                }
+
+                self.s.word(">")
+            }
+
+            ast::GenericArgs::Parenthesized(ref data) => {
+                self.s.word("(");
+                self.commasep(
+                    Inconsistent,
+                    &data.inputs,
+                    |s, ty| s.print_type(ty));
+                self.s.word(")");
+
+                if let Some(ref ty) = data.output {
+                    self.space_if_not_bol();
+                    self.word_space("->");
+                    self.print_type(ty);
+                }
+            }
+        }
+    }
+}
+
+impl<'a> State<'a> {
     // Synthesizes a comment that was not textually present in the original source
     // file.
     pub fn synth_comment(&mut self, text: String) {
@@ -960,7 +1079,7 @@ impl<'a> State<'a> {
             }
             ast::ForeignItemKind::Macro(ref m) => {
                 self.print_mac(m);
-                match m.node.delim {
+                match m.delim {
                     MacDelimiter::Brace => {},
                     _ => self.s.word(";")
                 }
@@ -1101,7 +1220,7 @@ impl<'a> State<'a> {
                 self.s.word(ga.asm.as_str().to_string());
                 self.end();
             }
-            ast::ItemKind::Ty(ref ty, ref generics) => {
+            ast::ItemKind::TyAlias(ref ty, ref generics) => {
                 self.head(visibility_qualified(&item.vis, "type"));
                 self.print_ident(item.ident);
                 self.print_generic_params(&generics.params);
@@ -1114,9 +1233,10 @@ impl<'a> State<'a> {
                 self.s.word(";");
                 self.end(); // end the outer ibox
             }
-            ast::ItemKind::Existential(ref bounds, ref generics) => {
-                self.head(visibility_qualified(&item.vis, "existential type"));
+            ast::ItemKind::OpaqueTy(ref bounds, ref generics) => {
+                self.head(visibility_qualified(&item.vis, "type"));
                 self.print_ident(item.ident);
+                self.word_space("= impl");
                 self.print_generic_params(&generics.params);
                 self.end(); // end the inner ibox
 
@@ -1232,33 +1352,24 @@ impl<'a> State<'a> {
                 self.s.word(";");
             }
             ast::ItemKind::Mac(ref mac) => {
-                if item.ident.name == kw::Invalid {
-                    self.print_mac(mac);
-                    match mac.node.delim {
-                        MacDelimiter::Brace => {}
-                        _ => self.s.word(";"),
-                    }
-                } else {
-                    self.print_path(&mac.node.path, false, 0);
-                    self.s.word("! ");
-                    self.print_ident(item.ident);
-                    self.cbox(INDENT_UNIT);
-                    self.popen();
-                    self.print_tts(mac.node.stream(), true);
-                    self.pclose();
-                    self.s.word(";");
-                    self.end();
+                self.print_mac(mac);
+                match mac.delim {
+                    MacDelimiter::Brace => {}
+                    _ => self.s.word(";"),
                 }
             }
-            ast::ItemKind::MacroDef(ref tts) => {
-                self.s.word("macro_rules! ");
-                self.print_ident(item.ident);
-                self.cbox(INDENT_UNIT);
-                self.popen();
-                self.print_tts(tts.stream(), true);
-                self.pclose();
-                self.s.word(";");
-                self.end();
+            ast::ItemKind::MacroDef(ref macro_def) => {
+                let (kw, has_bang) =
+                    if macro_def.legacy { ("macro_rules", true) } else { ("macro", false) };
+                self.print_mac_common(
+                    Some(MacHeader::Keyword(kw)),
+                    has_bang,
+                    Some(item.ident),
+                    DelimToken::Brace,
+                    macro_def.stream(),
+                    true,
+                    item.span,
+                );
             }
         }
         self.ann.post(self, AnnNode::Item(item))
@@ -1303,7 +1414,7 @@ impl<'a> State<'a> {
         for v in variants {
             self.space_if_not_bol();
             self.maybe_print_comment(v.span.lo());
-            self.print_outer_attributes(&v.node.attrs);
+            self.print_outer_attributes(&v.attrs);
             self.ibox(INDENT_UNIT);
             self.print_variant(v);
             self.s.word(",");
@@ -1393,8 +1504,8 @@ impl<'a> State<'a> {
     crate fn print_variant(&mut self, v: &ast::Variant) {
         self.head("");
         let generics = ast::Generics::default();
-        self.print_struct(&v.node.data, &generics, v.node.ident, v.span, false);
-        match v.node.disr_expr {
+        self.print_struct(&v.data, &generics, v.ident, v.span, false);
+        match v.disr_expr {
             Some(ref d) => {
                 self.s.space();
                 self.word_space("=");
@@ -1455,7 +1566,7 @@ impl<'a> State<'a> {
             }
             ast::TraitItemKind::Macro(ref mac) => {
                 self.print_mac(mac);
-                match mac.node.delim {
+                match mac.delim {
                     MacDelimiter::Brace => {}
                     _ => self.s.word(";"),
                 }
@@ -1480,16 +1591,19 @@ impl<'a> State<'a> {
                 self.nbsp();
                 self.print_block_with_attrs(body, &ii.attrs);
             }
-            ast::ImplItemKind::Type(ref ty) => {
+            ast::ImplItemKind::TyAlias(ref ty) => {
                 self.print_associated_type(ii.ident, None, Some(ty));
             }
-            ast::ImplItemKind::Existential(ref bounds) => {
-                self.word_space("existential");
-                self.print_associated_type(ii.ident, Some(bounds), None);
+            ast::ImplItemKind::OpaqueTy(ref bounds) => {
+                self.word_space("type");
+                self.print_ident(ii.ident);
+                self.word_space("= impl");
+                self.print_type_bounds(":", bounds);
+                self.s.word(";");
             }
             ast::ImplItemKind::Macro(ref mac) => {
                 self.print_mac(mac);
-                match mac.node.delim {
+                match mac.delim {
                     MacDelimiter::Brace => {}
                     _ => self.s.word(";"),
                 }
@@ -1646,24 +1760,16 @@ impl<'a> State<'a> {
     }
 
     crate fn print_mac(&mut self, m: &ast::Mac) {
-        self.print_path(&m.node.path, false, 0);
-        self.s.word("!");
-        match m.node.delim {
-            MacDelimiter::Parenthesis => self.popen(),
-            MacDelimiter::Bracket => self.s.word("["),
-            MacDelimiter::Brace => {
-                self.head("");
-                self.bopen();
-            }
-        }
-        self.print_tts(m.node.stream(), true);
-        match m.node.delim {
-            MacDelimiter::Parenthesis => self.pclose(),
-            MacDelimiter::Bracket => self.s.word("]"),
-            MacDelimiter::Brace => self.bclose(m.span),
-        }
+        self.print_mac_common(
+            Some(MacHeader::Path(&m.path)),
+            true,
+            None,
+            m.delim.to_token(),
+            m.stream(),
+            true,
+            m.span,
+        );
     }
-
 
     fn print_call_post(&mut self, args: &[P<ast::Expr>]) {
         self.popen();
@@ -2013,17 +2119,9 @@ impl<'a> State<'a> {
                 self.ibox(0);
                 self.print_block_with_attrs(blk, attrs);
             }
-            ast::ExprKind::Await(origin, ref expr) => {
-                match origin {
-                    ast::AwaitOrigin::MacroLike => {
-                        self.s.word("await!");
-                        self.print_expr_maybe_paren(expr, parser::PREC_FORCE_PAREN);
-                    }
-                    ast::AwaitOrigin::FieldLike => {
-                        self.print_expr_maybe_paren(expr, parser::PREC_POSTFIX);
-                        self.s.word(".await");
-                    }
-                }
+            ast::ExprKind::Await(ref expr) => {
+                self.print_expr_maybe_paren(expr, parser::PREC_POSTFIX);
+                self.s.word(".await");
             }
             ast::ExprKind::Assign(ref lhs, ref rhs) => {
                 let prec = AssocOp::Assign.precedence() as i8;
@@ -2205,11 +2303,6 @@ impl<'a> State<'a> {
         }
     }
 
-    crate fn print_ident(&mut self, ident: ast::Ident) {
-        self.s.word(ast_ident_to_string(ident, ident.is_raw_guess()));
-        self.ann.post(self, AnnNode::Ident(&ident))
-    }
-
     crate fn print_usize(&mut self, i: usize) {
         self.s.word(i.to_string())
     }
@@ -2217,31 +2310,6 @@ impl<'a> State<'a> {
     crate fn print_name(&mut self, name: ast::Name) {
         self.s.word(name.as_str().to_string());
         self.ann.post(self, AnnNode::Name(&name))
-    }
-
-    fn print_path(&mut self,
-                  path: &ast::Path,
-                  colons_before_params: bool,
-                  depth: usize) {
-        self.maybe_print_comment(path.span.lo());
-
-        for (i, segment) in path.segments[..path.segments.len() - depth].iter().enumerate() {
-            if i > 0 {
-                self.s.word("::")
-            }
-            self.print_path_segment(segment, colons_before_params);
-        }
-    }
-
-    fn print_path_segment(&mut self,
-                          segment: &ast::PathSegment,
-                          colons_before_params: bool) {
-        if segment.ident.name != kw::PathRoot {
-            self.print_ident(segment.ident);
-            if let Some(ref args) = segment.args {
-                self.print_generic_args(args, colons_before_params);
-            }
-        }
     }
 
     fn print_qpath(&mut self,
@@ -2264,62 +2332,6 @@ impl<'a> State<'a> {
         match item_segment.args {
             Some(ref args) => self.print_generic_args(args, colons_before_params),
             None => {},
-        }
-    }
-
-    fn print_generic_args(&mut self,
-                          args: &ast::GenericArgs,
-                          colons_before_params: bool)
-    {
-        if colons_before_params {
-            self.s.word("::")
-        }
-
-        match *args {
-            ast::GenericArgs::AngleBracketed(ref data) => {
-                self.s.word("<");
-
-                self.commasep(Inconsistent, &data.args, |s, generic_arg| {
-                    s.print_generic_arg(generic_arg)
-                });
-
-                let mut comma = data.args.len() != 0;
-
-                for constraint in data.constraints.iter() {
-                    if comma {
-                        self.word_space(",")
-                    }
-                    self.print_ident(constraint.ident);
-                    self.s.space();
-                    match constraint.kind {
-                        ast::AssocTyConstraintKind::Equality { ref ty } => {
-                            self.word_space("=");
-                            self.print_type(ty);
-                        }
-                        ast::AssocTyConstraintKind::Bound { ref bounds } => {
-                            self.print_type_bounds(":", &*bounds);
-                        }
-                    }
-                    comma = true;
-                }
-
-                self.s.word(">")
-            }
-
-            ast::GenericArgs::Parenthesized(ref data) => {
-                self.s.word("(");
-                self.commasep(
-                    Inconsistent,
-                    &data.inputs,
-                    |s, ty| s.print_type(ty));
-                self.s.word(")");
-
-                if let Some(ref ty) = data.output {
-                    self.space_if_not_bol();
-                    self.word_space("->");
-                    self.print_type(ty);
-                }
-            }
         }
     }
 
@@ -2347,23 +2359,14 @@ impl<'a> State<'a> {
                     self.print_pat(p);
                 }
             }
-            PatKind::TupleStruct(ref path, ref elts, ddpos) => {
+            PatKind::TupleStruct(ref path, ref elts) => {
                 self.print_path(path, true, 0);
                 self.popen();
-                if let Some(ddpos) = ddpos {
-                    self.commasep(Inconsistent, &elts[..ddpos], |s, p| s.print_pat(p));
-                    if ddpos != 0 {
-                        self.word_space(",");
-                    }
-                    self.s.word("..");
-                    if ddpos != elts.len() {
-                        self.s.word(",");
-                        self.commasep(Inconsistent, &elts[ddpos..], |s, p| s.print_pat(p));
-                    }
-                } else {
-                    self.commasep(Inconsistent, &elts[..], |s, p| s.print_pat(p));
-                }
+                self.commasep(Inconsistent, &elts[..], |s, p| s.print_pat(p));
                 self.pclose();
+            }
+            PatKind::Or(ref pats) => {
+                self.strsep("|", true, Inconsistent, &pats[..], |s, p| s.print_pat(p));
             }
             PatKind::Path(None, ref path) => {
                 self.print_path(path, true, 0);
@@ -2379,14 +2382,14 @@ impl<'a> State<'a> {
                     Consistent, &fields[..],
                     |s, f| {
                         s.cbox(INDENT_UNIT);
-                        if !f.node.is_shorthand {
-                            s.print_ident(f.node.ident);
+                        if !f.is_shorthand {
+                            s.print_ident(f.ident);
                             s.word_nbsp(":");
                         }
-                        s.print_pat(&f.node.pat);
+                        s.print_pat(&f.pat);
                         s.end();
                     },
-                    |f| f.node.pat.span);
+                    |f| f.pat.span);
                 if etc {
                     if !fields.is_empty() { self.word_space(","); }
                     self.s.word("..");
@@ -2394,23 +2397,11 @@ impl<'a> State<'a> {
                 self.s.space();
                 self.s.word("}");
             }
-            PatKind::Tuple(ref elts, ddpos) => {
+            PatKind::Tuple(ref elts) => {
                 self.popen();
-                if let Some(ddpos) = ddpos {
-                    self.commasep(Inconsistent, &elts[..ddpos], |s, p| s.print_pat(p));
-                    if ddpos != 0 {
-                        self.word_space(",");
-                    }
-                    self.s.word("..");
-                    if ddpos != elts.len() {
-                        self.s.word(",");
-                        self.commasep(Inconsistent, &elts[ddpos..], |s, p| s.print_pat(p));
-                    }
-                } else {
-                    self.commasep(Inconsistent, &elts[..], |s, p| s.print_pat(p));
-                    if elts.len() == 1 {
-                        self.s.word(",");
-                    }
+                self.commasep(Inconsistent, &elts[..], |s, p| s.print_pat(p));
+                if elts.len() == 1 {
+                    self.s.word(",");
                 }
                 self.pclose();
             }
@@ -2436,26 +2427,12 @@ impl<'a> State<'a> {
                 }
                 self.print_expr(end);
             }
-            PatKind::Slice(ref before, ref slice, ref after) => {
+            PatKind::Slice(ref elts) => {
                 self.s.word("[");
-                self.commasep(Inconsistent,
-                                   &before[..],
-                                   |s, p| s.print_pat(p));
-                if let Some(ref p) = *slice {
-                    if !before.is_empty() { self.word_space(","); }
-                    if let PatKind::Wild = p.node {
-                        // Print nothing
-                    } else {
-                        self.print_pat(p);
-                    }
-                    self.s.word("..");
-                    if !after.is_empty() { self.word_space(","); }
-                }
-                self.commasep(Inconsistent,
-                                   &after[..],
-                                   |s, p| s.print_pat(p));
+                self.commasep(Inconsistent, &elts[..], |s, p| s.print_pat(p));
                 self.s.word("]");
             }
+            PatKind::Rest => self.s.word(".."),
             PatKind::Paren(ref inner) => {
                 self.popen();
                 self.print_pat(inner);
@@ -2467,16 +2444,7 @@ impl<'a> State<'a> {
     }
 
     fn print_pats(&mut self, pats: &[P<ast::Pat>]) {
-        let mut first = true;
-        for p in pats {
-            if first {
-                first = false;
-            } else {
-                self.s.space();
-                self.word_space("|");
-            }
-            self.print_pat(p);
-        }
+        self.strsep("|", true, Inconsistent, pats, |s, p| s.print_pat(p));
     }
 
     fn print_arm(&mut self, arm: &ast::Arm) {
@@ -2664,27 +2632,23 @@ impl<'a> State<'a> {
         self.s.word("<");
 
         self.commasep(Inconsistent, &generic_params, |s, param| {
+            s.print_outer_attributes_inline(&param.attrs);
+
             match param.kind {
                 ast::GenericParamKind::Lifetime => {
-                    s.print_outer_attributes_inline(&param.attrs);
                     let lt = ast::Lifetime { id: param.id, ident: param.ident };
                     s.print_lifetime_bounds(lt, &param.bounds)
                 }
                 ast::GenericParamKind::Type { ref default } => {
-                    s.print_outer_attributes_inline(&param.attrs);
                     s.print_ident(param.ident);
                     s.print_type_bounds(":", &param.bounds);
-                    match default {
-                        Some(ref default) => {
-                            s.s.space();
-                            s.word_space("=");
-                            s.print_type(default)
-                        }
-                        _ => {}
+                    if let Some(ref default) = default {
+                        s.s.space();
+                        s.word_space("=");
+                        s.print_type(default)
                     }
                 }
                 ast::GenericParamKind::Const { ref ty } => {
-                    s.print_outer_attributes_inline(&param.attrs);
                     s.word_space("const");
                     s.print_ident(param.ident);
                     s.s.space();
@@ -2785,6 +2749,9 @@ impl<'a> State<'a> {
 
     crate fn print_arg(&mut self, input: &ast::Arg, is_closure: bool) {
         self.ibox(INDENT_UNIT);
+
+        self.print_outer_attributes_inline(&input.attrs);
+
         match input.ty.node {
             ast::TyKind::Infer if is_closure => self.print_pat(&input.pat),
             _ => {
@@ -2911,62 +2878,5 @@ impl<'a> State<'a> {
             ast::IsAuto::Yes => self.word_nbsp("auto"),
             ast::IsAuto::No => {}
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::ast;
-    use crate::source_map;
-    use crate::with_default_globals;
-    use syntax_pos;
-
-    #[test]
-    fn test_fun_to_string() {
-        with_default_globals(|| {
-            let abba_ident = ast::Ident::from_str("abba");
-
-            let decl = ast::FnDecl {
-                inputs: Vec::new(),
-                output: ast::FunctionRetTy::Default(syntax_pos::DUMMY_SP),
-                c_variadic: false
-            };
-            let generics = ast::Generics::default();
-            assert_eq!(
-                fun_to_string(
-                    &decl,
-                    ast::FnHeader {
-                        unsafety: ast::Unsafety::Normal,
-                        constness: source_map::dummy_spanned(ast::Constness::NotConst),
-                        asyncness: source_map::dummy_spanned(ast::IsAsync::NotAsync),
-                        abi: Abi::Rust,
-                    },
-                    abba_ident,
-                    &generics
-                ),
-                "fn abba()"
-            );
-        })
-    }
-
-    #[test]
-    fn test_variant_to_string() {
-        with_default_globals(|| {
-            let ident = ast::Ident::from_str("principal_skinner");
-
-            let var = source_map::respan(syntax_pos::DUMMY_SP, ast::Variant_ {
-                ident,
-                attrs: Vec::new(),
-                id: ast::DUMMY_NODE_ID,
-                // making this up as I go.... ?
-                data: ast::VariantData::Unit(ast::DUMMY_NODE_ID),
-                disr_expr: None,
-            });
-
-            let varstr = variant_to_string(&var);
-            assert_eq!(varstr, "principal_skinner");
-        })
     }
 }

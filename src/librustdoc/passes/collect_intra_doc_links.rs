@@ -4,8 +4,10 @@ use rustc::hir::def_id::DefId;
 use rustc::hir;
 use rustc::lint as lint;
 use rustc::ty;
+use rustc_resolve::ParentScope;
 use syntax;
 use syntax::ast::{self, Ident};
+use syntax::ext::base::SyntaxExtensionKind;
 use syntax::feature_gate::UnstableFeatures;
 use syntax::symbol::Symbol;
 use syntax_pos::DUMMY_SP;
@@ -60,16 +62,16 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
     {
         let cx = self.cx;
 
-        // In case we're in a module, try to resolve the relative
-        // path.
-        if let Some(id) = parent_id.or(self.mod_ids.last().cloned()) {
-            // FIXME: `with_scope` requires the `NodeId` of a module.
-            let node_id = cx.tcx.hir().hir_to_node_id(id);
+        // In case we're in a module, try to resolve the relative path.
+        if let Some(module_id) = parent_id.or(self.mod_ids.last().cloned()) {
+            let module_id = cx.tcx.hir().hir_to_node_id(module_id);
             let result = cx.enter_resolver(|resolver| {
-                resolver.with_scope(node_id, |resolver| {
-                    resolver.resolve_str_path_error(DUMMY_SP, &path_str, ns == ValueNS)
-                })
+                resolver.resolve_str_path_error(DUMMY_SP, &path_str, ns, module_id)
             });
+            let result = match result {
+                Ok((_, Res::Err)) => Err(()),
+                _ => result,
+            };
 
             if let Ok((_, res)) = result {
                 let res = res.map_id(|_| panic!("unexpected node_id"));
@@ -80,6 +82,7 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
                     Res::Def(DefKind::AssocTy, _) => false,
                     Res::Def(DefKind::Variant, _) => return handle_variant(cx, res),
                     // Not a trait item; just return what we found.
+                    Res::PrimTy(..) => return Ok((res, Some(path_str.to_owned()))),
                     _ => return Ok((res, None))
                 };
 
@@ -128,11 +131,12 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
                     .ok_or(());
             }
 
-            // FIXME: `with_scope` requires the `NodeId` of a module.
-            let node_id = cx.tcx.hir().hir_to_node_id(id);
-            let (_, ty_res) = cx.enter_resolver(|resolver| resolver.with_scope(node_id, |resolver| {
-                    resolver.resolve_str_path_error(DUMMY_SP, &path, false)
-            }))?;
+            let (_, ty_res) = cx.enter_resolver(|resolver| {
+                resolver.resolve_str_path_error(DUMMY_SP, &path, TypeNS, module_id)
+            })?;
+            if let Res::Err = ty_res {
+                return Err(());
+            }
             let ty_res = ty_res.map_id(|_| panic!("unexpected node_id"));
             match ty_res {
                 Res::Def(DefKind::Struct, did)
@@ -425,12 +429,10 @@ impl<'a, 'tcx> DocFolder for LinkCollector<'a, 'tcx> {
 
 /// Resolves a string as a macro.
 fn macro_resolve(cx: &DocContext<'_>, path_str: &str) -> Option<Res> {
-    use syntax::ext::base::{MacroKind, SyntaxExtensionKind};
-    let segment = ast::PathSegment::from_ident(Ident::from_str(path_str));
-    let path = ast::Path { segments: vec![segment], span: DUMMY_SP };
+    let path = ast::Path::from_ident(Ident::from_str(path_str));
     cx.enter_resolver(|resolver| {
         if let Ok((Some(ext), res)) = resolver.resolve_macro_path(
-            &path, MacroKind::Bang, &resolver.dummy_parent_scope(), false, false
+            &path, None, &ParentScope::module(resolver.graph_root), false, false
         ) {
             if let SyntaxExtensionKind::LegacyBang { .. } = ext.kind {
                 return Some(res.map_id(|_| panic!("unexpected id")));

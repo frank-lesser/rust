@@ -73,7 +73,9 @@ fn lint_overflowing_range_endpoint<'a, 'tcx>(
     // We only want to handle exclusive (`..`) ranges,
     // which are represented as `ExprKind::Struct`.
     if let ExprKind::Struct(_, eps, _) = &parent_expr.node {
-        debug_assert_eq!(eps.len(), 2);
+        if eps.len() != 2 {
+            return false;
+        }
         // We can suggest using an inclusive range
         // (`..=`) instead only if it is the `end` that is
         // overflowing and only by 1.
@@ -974,7 +976,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for VariantSizeDifferences {
                     let bytes = variant_layout.size.bytes().saturating_sub(discr_size);
 
                     debug!("- variant `{}` is {} bytes large",
-                           variant.node.ident,
+                           variant.ident,
                            bytes);
                     bytes
                 })

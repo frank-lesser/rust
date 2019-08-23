@@ -7,15 +7,18 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::indexed_vec::Idx;
 use rustc_data_structures::newtype_index;
 use rustc_macros::symbols;
-use serialize::{Decodable, Decoder, Encodable, Encoder};
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
+use rustc_serialize::{UseSpecializedDecodable, UseSpecializedEncodable};
 
 use std::cmp::{PartialEq, Ordering, PartialOrd, Ord};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str;
 
-use crate::hygiene::SyntaxContext;
 use crate::{Span, DUMMY_SP, GLOBALS};
+
+#[cfg(test)]
+mod tests;
 
 symbols! {
     // After modifying this list adjust `is_special`, `is_used_keyword`/`is_unused_keyword`,
@@ -95,7 +98,6 @@ symbols! {
         Auto:               "auto",
         Catch:              "catch",
         Default:            "default",
-        Existential:        "existential",
         Union:              "union",
     }
 
@@ -199,6 +201,7 @@ symbols! {
         const_fn_union,
         const_generics,
         const_indexing,
+        const_in_array_repeat_expressions,
         const_let,
         const_panic,
         const_raw_ptr_deref,
@@ -409,6 +412,7 @@ symbols! {
         match_beginning_vert,
         match_default_bindings,
         may_dangle,
+        mem,
         member_constraints,
         message,
         meta,
@@ -466,6 +470,7 @@ symbols! {
         option_env,
         opt_out_copy,
         or,
+        or_patterns,
         Ord,
         Ordering,
         Output,
@@ -562,7 +567,6 @@ symbols! {
         rustc_clean,
         rustc_const_unstable,
         rustc_conversion_suggestion,
-        rustc_copy_clone_marker,
         rustc_def_path,
         rustc_deprecated,
         rustc_diagnostic_macros,
@@ -603,10 +607,10 @@ symbols! {
         rustc_then_this_would_need,
         rustc_variance,
         rustdoc,
+        rustfmt,
         rust_eh_personality,
         rust_eh_unwind_resume,
         rust_oom,
-        __rust_unstable_column,
         rvalue_static_promotion,
         sanitizer_runtime,
         _Self,
@@ -675,6 +679,7 @@ symbols! {
         tuple_indexing,
         Ty,
         ty,
+        type_alias_impl_trait,
         TyCtxt,
         TyKind,
         type_alias_enum_variants,
@@ -691,6 +696,7 @@ symbols! {
         underscore_imports,
         underscore_lifetimes,
         uniform_paths,
+        uninitialized,
         universal_impl_trait,
         unmarked_api,
         unreachable_code,
@@ -722,6 +728,7 @@ symbols! {
         windows,
         windows_subsystem,
         Yield,
+        zeroed,
     }
 }
 
@@ -738,25 +745,25 @@ impl Ident {
         Ident { name, span }
     }
 
-    /// Constructs a new identifier with an empty syntax context.
+    /// Constructs a new identifier with a dummy span.
     #[inline]
-    pub const fn with_empty_ctxt(name: Symbol) -> Ident {
+    pub const fn with_dummy_span(name: Symbol) -> Ident {
         Ident::new(name, DUMMY_SP)
     }
 
     #[inline]
     pub fn invalid() -> Ident {
-        Ident::with_empty_ctxt(kw::Invalid)
+        Ident::with_dummy_span(kw::Invalid)
     }
 
     /// Maps an interned string to an identifier with an empty syntax context.
     pub fn from_interned_str(string: InternedString) -> Ident {
-        Ident::with_empty_ctxt(string.as_symbol())
+        Ident::with_dummy_span(string.as_symbol())
     }
 
     /// Maps a string to an identifier with an empty span.
     pub fn from_str(string: &str) -> Ident {
-        Ident::with_empty_ctxt(Symbol::intern(string))
+        Ident::with_dummy_span(Symbol::intern(string))
     }
 
     /// Maps a string and a span to an identifier.
@@ -842,28 +849,9 @@ impl fmt::Display for Ident {
     }
 }
 
-impl Encodable for Ident {
-    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
-        if self.span.ctxt().modern() == SyntaxContext::empty() {
-            s.emit_str(&self.as_str())
-        } else { // FIXME(jseyfried): intercrate hygiene
-            let mut string = "#".to_owned();
-            string.push_str(&self.as_str());
-            s.emit_str(&string)
-        }
-    }
-}
+impl UseSpecializedEncodable for Ident {}
 
-impl Decodable for Ident {
-    fn decode<D: Decoder>(d: &mut D) -> Result<Ident, D::Error> {
-        let string = d.read_str()?;
-        Ok(if !string.starts_with('#') {
-            Ident::from_str(&string)
-        } else { // FIXME(jseyfried): intercrate hygiene
-            Ident::from_str(&string[1..]).gensym()
-        })
-    }
-}
+impl UseSpecializedDecodable for Ident {}
 
 /// A symbol is an interned or gensymed string. A gensym is a symbol that is
 /// never equal to any other symbol.
@@ -1341,41 +1329,5 @@ impl Decodable for InternedString {
 impl Encodable for InternedString {
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
         self.with(|string| s.emit_str(string))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Globals;
-    use crate::edition;
-
-    #[test]
-    fn interner_tests() {
-        let mut i: Interner = Interner::default();
-        // first one is zero:
-        assert_eq!(i.intern("dog"), Symbol::new(0));
-        // re-use gets the same entry:
-        assert_eq!(i.intern("dog"), Symbol::new(0));
-        // different string gets a different #:
-        assert_eq!(i.intern("cat"), Symbol::new(1));
-        assert_eq!(i.intern("cat"), Symbol::new(1));
-        // dog is still at zero
-        assert_eq!(i.intern("dog"), Symbol::new(0));
-        let z = i.intern("zebra");
-        assert_eq!(i.gensymed(z), Symbol::new(SymbolIndex::MAX_AS_U32));
-        // gensym of same string gets new number:
-        assert_eq!(i.gensymed(z), Symbol::new(SymbolIndex::MAX_AS_U32 - 1));
-        // gensym of *existing* string gets new number:
-        let d = i.intern("dog");
-        assert_eq!(i.gensymed(d), Symbol::new(SymbolIndex::MAX_AS_U32 - 2));
-    }
-
-    #[test]
-    fn without_first_quote_test() {
-        GLOBALS.set(&Globals::new(edition::DEFAULT_EDITION), || {
-            let i = Ident::from_str("'break");
-            assert_eq!(i.without_first_quote().name, kw::Break);
-        });
     }
 }

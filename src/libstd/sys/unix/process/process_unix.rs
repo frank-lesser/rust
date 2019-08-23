@@ -178,7 +178,8 @@ impl Command {
             cvt_r(|| libc::dup2(fd, libc::STDERR_FILENO))?;
         }
 
-        if cfg!(not(any(target_os = "l4re"))) {
+        #[cfg(not(target_os = "l4re"))]
+        {
             if let Some(u) = self.get_gid() {
                 cvt(libc::setgid(u as gid_t))?;
             }
@@ -190,8 +191,9 @@ impl Command {
                 // fail if we aren't root, so don't bother checking the
                 // return value, this is just done as an optimistic
                 // privilege dropping function.
+                //FIXME: Redox kernel does not support setgroups yet
+                #[cfg(not(target_os = "redox"))]
                 let _ = libc::setgroups(0, ptr::null());
-
                 cvt(libc::setuid(u as uid_t))?;
             }
         }
@@ -200,7 +202,7 @@ impl Command {
         }
 
         // emscripten has no signal support.
-        #[cfg(not(any(target_os = "emscripten")))]
+        #[cfg(not(target_os = "emscripten"))]
         {
             use crate::mem::MaybeUninit;
             // Reset signal handling so the child process starts in a
@@ -211,14 +213,7 @@ impl Command {
             // need to clean things up now to avoid confusing the program
             // we're about to run.
             let mut set = MaybeUninit::<libc::sigset_t>::uninit();
-            if cfg!(target_os = "android") {
-                // Implementing sigemptyset allow us to support older Android
-                // versions. See the comment about Android and sig* functions in
-                // process_common.rs
-                set.as_mut_ptr().write_bytes(0u8, 1);
-            } else {
-                cvt(libc::sigemptyset(set.as_mut_ptr()))?;
-            }
+            cvt(sigemptyset(set.as_mut_ptr()))?;
             cvt(libc::pthread_sigmask(libc::SIG_SETMASK, set.as_ptr(),
                                          ptr::null_mut()))?;
             let ret = sys::signal(libc::SIGPIPE, libc::SIG_DFL);
@@ -277,7 +272,7 @@ impl Command {
         if self.get_gid().is_some() ||
             self.get_uid().is_some() ||
             self.env_saw_path() ||
-            self.get_closures().len() != 0 {
+            !self.get_closures().is_empty() {
             return Ok(None)
         }
 
@@ -360,10 +355,10 @@ impl Command {
             }
 
             let mut set = MaybeUninit::<libc::sigset_t>::uninit();
-            cvt(libc::sigemptyset(set.as_mut_ptr()))?;
+            cvt(sigemptyset(set.as_mut_ptr()))?;
             cvt(libc::posix_spawnattr_setsigmask(attrs.0.as_mut_ptr(),
                                                  set.as_ptr()))?;
-            cvt(libc::sigaddset(set.as_mut_ptr(), libc::SIGPIPE))?;
+            cvt(sigaddset(set.as_mut_ptr(), libc::SIGPIPE))?;
             cvt(libc::posix_spawnattr_setsigdefault(attrs.0.as_mut_ptr(),
                                                     set.as_ptr()))?;
 

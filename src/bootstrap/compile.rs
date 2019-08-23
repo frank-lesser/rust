@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio, exit};
 use std::str;
 
-use build_helper::{output, mtime, t, up_to_date};
+use build_helper::{output, t, up_to_date};
 use filetime::FileTime;
 use serde::Deserialize;
 use serde_json;
@@ -95,7 +95,6 @@ impl Step for Std {
         let mut cargo = builder.cargo(compiler, Mode::Std, target, "build");
         std_cargo(builder, &compiler, target, &mut cargo);
 
-        let _folder = builder.fold_output(|| format!("stage{}-std", compiler.stage));
         builder.info(&format!("Building stage{} std artifacts ({} -> {})", compiler.stage,
                 &compiler.host, target));
         run_cargo(builder,
@@ -275,8 +274,6 @@ impl Step for StdLink {
             // for reason why the sanitizers are not built in stage0.
             copy_apple_sanitizer_dylibs(builder, &builder.native_dir(target), "osx", &libdir);
         }
-
-        builder.cargo(target_compiler, Mode::ToolStd, target, "clean");
     }
 }
 
@@ -326,7 +323,7 @@ impl Step for StartupObjects {
     fn run(self, builder: &Builder<'_>) {
         let for_compiler = self.compiler;
         let target = self.target;
-        if !target.contains("pc-windows-gnu") {
+        if !target.contains("windows-gnu") {
             return
         }
 
@@ -422,7 +419,6 @@ impl Step for Test {
         let mut cargo = builder.cargo(compiler, Mode::Test, target, "build");
         test_cargo(builder, &compiler, target, &mut cargo);
 
-        let _folder = builder.fold_output(|| format!("stage{}-test", compiler.stage));
         builder.info(&format!("Building stage{} test artifacts ({} -> {})", compiler.stage,
                 &compiler.host, target));
         run_cargo(builder,
@@ -482,8 +478,6 @@ impl Step for TestLink {
             &builder.sysroot_libdir(target_compiler, compiler.host),
             &libtest_stamp(builder, compiler, target)
         );
-
-        builder.cargo(target_compiler, Mode::ToolTest, target, "clean");
     }
 }
 
@@ -555,7 +549,6 @@ impl Step for Rustc {
         let mut cargo = builder.cargo(compiler, Mode::Rustc, target, "build");
         rustc_cargo(builder, &mut cargo);
 
-        let _folder = builder.fold_output(|| format!("stage{}-rustc", compiler.stage));
         builder.info(&format!("Building stage{} compiler artifacts ({} -> {})",
                  compiler.stage, &compiler.host, target));
         run_cargo(builder,
@@ -642,7 +635,6 @@ impl Step for RustcLink {
             &builder.sysroot_libdir(target_compiler, compiler.host),
             &librustc_stamp(builder, compiler, target)
         );
-        builder.cargo(target_compiler, Mode::ToolRustc, target, "clean");
     }
 }
 
@@ -710,7 +702,6 @@ impl Step for CodegenBackend {
 
         let tmp_stamp = out_dir.join(".tmp.stamp");
 
-        let _folder = builder.fold_output(|| format!("stage{}-rustc_codegen_llvm", compiler.stage));
         let files = run_cargo(builder,
                               cargo.arg("--features").arg(features),
                               vec![],
@@ -798,6 +789,9 @@ pub fn build_codegen_backend(builder: &Builder<'_>,
             }
             if builder.config.llvm_use_libcxx {
                 cargo.env("LLVM_USE_LIBCXX", "1");
+            }
+            if builder.config.llvm_optimize && !builder.config.llvm_release_debuginfo {
+                cargo.env("LLVM_NDEBUG", "1");
             }
         }
         _ => panic!("unknown backend: {}", backend),
@@ -1120,16 +1114,13 @@ pub fn run_cargo(builder: &Builder<'_>,
                 },
                 ..
             } => (filenames, crate_types),
-            CargoMessage::CompilerMessage { message } => {
-                eprintln!("{}", message.rendered);
-                return;
-            }
             _ => return,
         };
         for filename in filenames {
             // Skip files like executables
             if !filename.ends_with(".rlib") &&
                !filename.ends_with(".lib") &&
+               !filename.ends_with(".a") &&
                !is_dylib(&filename) &&
                !(is_check && filename.ends_with(".rmeta")) {
                 continue;
@@ -1209,40 +1200,12 @@ pub fn run_cargo(builder: &Builder<'_>,
         deps.push((path_to_add.into(), false));
     }
 
-    // Now we want to update the contents of the stamp file, if necessary. First
-    // we read off the previous contents along with its mtime. If our new
-    // contents (the list of files to copy) is different or if any dep's mtime
-    // is newer then we rewrite the stamp file.
     deps.sort();
-    let stamp_contents = fs::read(stamp);
-    let stamp_mtime = mtime(&stamp);
     let mut new_contents = Vec::new();
-    let mut max = None;
-    let mut max_path = None;
     for (dep, proc_macro) in deps.iter() {
-        let mtime = mtime(dep);
-        if Some(mtime) > max {
-            max = Some(mtime);
-            max_path = Some(dep.clone());
-        }
         new_contents.extend(if *proc_macro { b"h" } else { b"t" });
         new_contents.extend(dep.to_str().unwrap().as_bytes());
         new_contents.extend(b"\0");
-    }
-    let max = max.unwrap();
-    let max_path = max_path.unwrap();
-    let contents_equal = stamp_contents
-        .map(|contents| contents == new_contents)
-        .unwrap_or_default();
-    if contents_equal && max <= stamp_mtime {
-        builder.verbose(&format!("not updating {:?}; contents equal and {:?} <= {:?}",
-                stamp, max, stamp_mtime));
-        return deps.into_iter().map(|(d, _)| d).collect()
-    }
-    if max > stamp_mtime {
-        builder.verbose(&format!("updating {:?} as {:?} changed", stamp, max_path));
-    } else {
-        builder.verbose(&format!("updating {:?} as deps changed", stamp));
     }
     t!(fs::write(&stamp, &new_contents));
     deps.into_iter().map(|(d, _)| d).collect()
@@ -1259,8 +1222,12 @@ pub fn stream_cargo(
     }
     // Instruct Cargo to give us json messages on stdout, critically leaving
     // stderr as piped so we can get those pretty colors.
-    cargo.arg("--message-format").arg("json")
-         .stdout(Stdio::piped());
+    let mut message_format = String::from("json-render-diagnostics");
+    if let Some(s) = &builder.config.rustc_error_format  {
+        message_format.push_str(",json-diagnostic-");
+        message_format.push_str(s);
+    }
+    cargo.arg("--message-format").arg(message_format).stdout(Stdio::piped());
 
     for arg in tail_args {
         cargo.arg(arg);
@@ -1313,12 +1280,4 @@ pub enum CargoMessage<'a> {
     BuildScriptExecuted {
         package_id: Cow<'a, str>,
     },
-    CompilerMessage {
-        message: ClippyMessage<'a>
-    }
-}
-
-#[derive(Deserialize)]
-pub struct ClippyMessage<'a> {
-    rendered: Cow<'a, str>,
 }

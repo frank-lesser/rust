@@ -8,7 +8,7 @@ use rustc::ty::subst::{Subst, InternalSubsts};
 use rustc::util::nodemap::{FxHashSet, FxHashMap};
 use rustc::mir::interpret::ConstValue;
 use rustc::middle::lang_items;
-use rustc::infer::opaque_types::may_define_existential_type;
+use rustc::infer::opaque_types::may_define_opaque_type;
 
 use syntax::ast;
 use syntax::feature_gate::{self, GateIssue};
@@ -191,7 +191,7 @@ fn check_associated_item(
         let item = fcx.tcx.associated_item(fcx.tcx.hir().local_def_id(item_id));
 
         let (mut implied_bounds, self_ty) = match item.container {
-            ty::TraitContainer(_) => (vec![], fcx.tcx.mk_self_type()),
+            ty::TraitContainer(_) => (vec![], fcx.tcx.types.self_param),
             ty::ImplContainer(def_id) => (fcx.impl_implied_bounds(def_id, span),
                                           fcx.tcx.type_of(def_id))
         };
@@ -203,7 +203,6 @@ fn check_associated_item(
                 fcx.register_wf_obligation(ty, span, code.clone());
             }
             ty::AssocKind::Method => {
-                reject_shadowing_parameters(fcx.tcx, item.def_id);
                 let sig = fcx.tcx.fn_sig(item.def_id);
                 let sig = fcx.normalize_associated_types_in(span, &sig);
                 check_fn_or_method(tcx, fcx, span, sig,
@@ -218,8 +217,8 @@ fn check_associated_item(
                     fcx.register_wf_obligation(ty, span, code.clone());
                 }
             }
-            ty::AssocKind::Existential => {
-                // do nothing, existential types check themselves
+            ty::AssocKind::OpaqueTy => {
+                // Do nothing: opaque types check themselves.
             }
         }
 
@@ -366,7 +365,8 @@ fn check_item_type(
 
         let mut forbid_unsized = true;
         if allow_foreign_ty {
-            if let ty::Foreign(_) = fcx.tcx.struct_tail(item_ty).sty {
+            let tail = fcx.tcx.struct_tail_erasing_lifetimes(item_ty, fcx.param_env);
+            if let ty::Foreign(_) = tail.sty {
                 forbid_unsized = false;
             }
         }
@@ -559,7 +559,7 @@ fn check_where_clauses<'tcx, 'fcx>(
     let mut predicates = predicates.instantiate_identity(fcx.tcx);
 
     if let Some(return_ty) = return_ty {
-        predicates.predicates.extend(check_existential_types(tcx, fcx, def_id, span, return_ty));
+        predicates.predicates.extend(check_opaque_types(tcx, fcx, def_id, span, return_ty));
     }
 
     let predicates = fcx.normalize_associated_types_in(span, &predicates);
@@ -604,14 +604,14 @@ fn check_fn_or_method<'fcx, 'tcx>(
     check_where_clauses(tcx, fcx, span, def_id, Some(sig.output()));
 }
 
-/// Checks "defining uses" of existential types to ensure that they meet the restrictions laid for
-/// "higher-order pattern unification".
+/// Checks "defining uses" of opaque `impl Trait` types to ensure that they meet the restrictions
+/// laid for "higher-order pattern unification".
 /// This ensures that inference is tractable.
-/// In particular, definitions of existential types can only use other generics as arguments,
+/// In particular, definitions of opaque types can only use other generics as arguments,
 /// and they cannot repeat an argument. Example:
 ///
 /// ```rust
-/// existential type Foo<A, B>;
+/// type Foo<A, B> = impl Bar<A, B>;
 ///
 /// // Okay -- `Foo` is applied to two distinct, generic types.
 /// fn a<T, U>() -> Foo<T, U> { .. }
@@ -623,26 +623,26 @@ fn check_fn_or_method<'fcx, 'tcx>(
 /// fn b<T>() -> Foo<T, u32> { .. }
 /// ```
 ///
-fn check_existential_types<'fcx, 'tcx>(
+fn check_opaque_types<'fcx, 'tcx>(
     tcx: TyCtxt<'tcx>,
     fcx: &FnCtxt<'fcx, 'tcx>,
     fn_def_id: DefId,
     span: Span,
     ty: Ty<'tcx>,
 ) -> Vec<ty::Predicate<'tcx>> {
-    trace!("check_existential_types(ty={:?})", ty);
+    trace!("check_opaque_types(ty={:?})", ty);
     let mut substituted_predicates = Vec::new();
     ty.fold_with(&mut ty::fold::BottomUpFolder {
         tcx: fcx.tcx,
         ty_op: |ty| {
             if let ty::Opaque(def_id, substs) = ty.sty {
-                trace!("check_existential_types: opaque_ty, {:?}, {:?}", def_id, substs);
+                trace!("check_opaque_types: opaque_ty, {:?}, {:?}", def_id, substs);
                 let generics = tcx.generics_of(def_id);
-                // Only check named existential types defined in this crate.
+                // Only check named `impl Trait` types defined in this crate.
                 if generics.parent.is_none() && def_id.is_local() {
                     let opaque_hir_id = tcx.hir().as_local_hir_id(def_id).unwrap();
-                    if may_define_existential_type(tcx, fn_def_id, opaque_hir_id) {
-                        trace!("check_existential_types: may define, generics={:#?}", generics);
+                    if may_define_opaque_type(tcx, fn_def_id, opaque_hir_id) {
+                        trace!("check_opaque_types: may define, generics={:#?}", generics);
                         let mut seen: FxHashMap<_, Vec<_>> = FxHashMap::default();
                         for (subst, param) in substs.iter().zip(&generics.params) {
                             match subst.unpack() {
@@ -653,7 +653,7 @@ fn check_existential_types<'fcx, 'tcx>(
                                         tcx.sess
                                             .struct_span_err(
                                                 span,
-                                                "non-defining existential type use \
+                                                "non-defining opaque type use \
                                                  in defining scope",
                                             )
                                             .span_note(
@@ -675,14 +675,14 @@ fn check_existential_types<'fcx, 'tcx>(
                                             .sess
                                             .struct_span_err(
                                                 span,
-                                                "non-defining existential type use \
+                                                "non-defining opaque type use \
                                                     in defining scope",
                                             )
                                             .span_label(
                                                 param_span,
-                                                "cannot use static lifetime, use a bound lifetime \
+                                                "cannot use static lifetime; use a bound lifetime \
                                                 instead or remove the lifetime parameter from the \
-                                                existential type",
+                                                opaque type",
                                             )
                                             .emit();
                                     } else {
@@ -696,7 +696,7 @@ fn check_existential_types<'fcx, 'tcx>(
                                         tcx.sess
                                             .struct_span_err(
                                                 span,
-                                                "non-defining existential type use \
+                                                "non-defining opaque type use \
                                                 in defining scope",
                                             )
                                             .span_note(
@@ -718,7 +718,7 @@ fn check_existential_types<'fcx, 'tcx>(
                                     .sess
                                     .struct_span_err(
                                         span,
-                                        "non-defining existential type use \
+                                        "non-defining opaque type use \
                                             in defining scope",
                                     ).
                                     span_note(
@@ -728,21 +728,21 @@ fn check_existential_types<'fcx, 'tcx>(
                                     .emit();
                             }
                         }
-                    } // if may_define_existential_type
+                    } // if may_define_opaque_type
 
-                    // Now register the bounds on the parameters of the existential type
+                    // Now register the bounds on the parameters of the opaque type
                     // so the parameters given by the function need to fulfill them.
                     //
-                    //     existential type Foo<T: Bar>: 'static;
+                    //     type Foo<T: Bar> = impl Baz + 'static;
                     //     fn foo<U>() -> Foo<U> { .. *}
                     //
                     // becomes
                     //
-                    //     existential type Foo<T: Bar>: 'static;
+                    //     type Foo<T: Bar> = impl Baz + 'static;
                     //     fn foo<U: Bar>() -> Foo<U> { .. *}
                     let predicates = tcx.predicates_of(def_id);
                     trace!(
-                        "check_existential_types: may define, predicates={:#?}",
+                        "check_opaque_types: may define, predicates={:#?}",
                         predicates,
                     );
                     for &(pred, _) in predicates.predicates.iter() {
@@ -752,7 +752,7 @@ fn check_existential_types<'fcx, 'tcx>(
                             substituted_predicates.push(substituted_pred);
                         }
                     }
-                } // if is_named_existential_type
+                } // if is_named_opaque_type
             } // if let Opaque
             ty
         },
@@ -768,6 +768,10 @@ fn check_method_receiver<'fcx, 'tcx>(
     method: &ty::AssocItem,
     self_ty: Ty<'tcx>,
 ) {
+    const HELP_FOR_SELF_TYPE: &str =
+        "consider changing to `self`, `&self`, `&mut self`, `self: Box<Self>`, \
+         `self: Rc<Self>`, `self: Arc<Self>`, or `self: Pin<P>` (where P is one \
+         of the previous types except `Self`)";
     // Check that the method has a valid receiver type, given the type `Self`.
     debug!("check_method_receiver({:?}, self_ty={:?})",
            method, self_ty);
@@ -804,7 +808,7 @@ fn check_method_receiver<'fcx, 'tcx>(
             fcx.tcx.sess.diagnostic().mut_span_err(
                 span, &format!("invalid method receiver type: {:?}", receiver_ty)
             ).note("type of `self` must be `Self` or a type that dereferences to it")
-            .help("consider changing to `self`, `&self`, `&mut self`, or `self: Box<Self>`")
+            .help(HELP_FOR_SELF_TYPE)
             .code(DiagnosticId::Error("E0307".into()))
             .emit();
         }
@@ -822,14 +826,14 @@ fn check_method_receiver<'fcx, 'tcx>(
                             the `arbitrary_self_types` feature",
                         receiver_ty,
                     ),
-                ).help("consider changing to `self`, `&self`, `&mut self`, or `self: Box<Self>`")
+                ).help(HELP_FOR_SELF_TYPE)
                 .emit();
             } else {
                 // Report error; would not have worked with `arbitrary_self_types`.
                 fcx.tcx.sess.diagnostic().mut_span_err(
                     span, &format!("invalid method receiver type: {:?}", receiver_ty)
                 ).note("type must be `Self` or a type that dereferences to it")
-                .help("consider changing to `self`, `&self`, `&mut self`, or `self: Box<Self>`")
+                .help(HELP_FOR_SELF_TYPE)
                 .code(DiagnosticId::Error("E0307".into()))
                 .emit();
             }
@@ -993,34 +997,6 @@ fn report_bivariance(tcx: TyCtxt<'_>, span: Span, param_name: ast::Name) {
     err.emit();
 }
 
-fn reject_shadowing_parameters(tcx: TyCtxt<'_>, def_id: DefId) {
-    let generics = tcx.generics_of(def_id);
-    let parent = tcx.generics_of(generics.parent.unwrap());
-    let impl_params: FxHashMap<_, _> = parent.params.iter().flat_map(|param| match param.kind {
-        GenericParamDefKind::Lifetime => None,
-        GenericParamDefKind::Type { .. } | GenericParamDefKind::Const => {
-            Some((param.name, param.def_id))
-        }
-    }).collect();
-
-    for method_param in &generics.params {
-        // Shadowing is checked in `resolve_lifetime`.
-        if let GenericParamDefKind::Lifetime = method_param.kind {
-            continue
-        }
-        if impl_params.contains_key(&method_param.name) {
-            // Tighten up the span to focus on only the shadowing type.
-            let type_span = tcx.def_span(method_param.def_id);
-
-            // The expectation here is that the original trait declaration is
-            // local so it should be okay to just unwrap everything.
-            let trait_def_id = impl_params[&method_param.name];
-            let trait_decl_span = tcx.def_span(trait_def_id);
-            error_194(tcx, type_span, trait_decl_span, &method_param.name.as_str()[..]);
-        }
-    }
-}
-
 /// Feature gates RFC 2056 -- trivial bounds, checking for global bounds that
 /// aren't true.
 fn check_false_global_bounds(fcx: &FnCtxt<'_, '_>, span: Span, id: hir::HirId) {
@@ -1114,7 +1090,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     fn enum_variants(&self, enum_def: &hir::EnumDef) -> Vec<AdtVariant<'tcx>> {
         enum_def.variants.iter()
-            .map(|variant| self.non_enum_variant(&variant.node.data))
+            .map(|variant| self.non_enum_variant(&variant.data))
             .collect()
     }
 
@@ -1146,13 +1122,4 @@ fn error_392(
                   "parameter `{}` is never used", param_name);
     err.span_label(span, "unused parameter");
     err
-}
-
-fn error_194(tcx: TyCtxt<'_>, span: Span, trait_decl_span: Span, name: &str) {
-    struct_span_err!(tcx.sess, span, E0194,
-                     "type parameter `{}` shadows another type parameter of the same name",
-                     name)
-        .span_label(span, "shadows another type parameter")
-        .span_label(trait_decl_span, format!("first `{}` declared here", name))
-        .emit();
 }

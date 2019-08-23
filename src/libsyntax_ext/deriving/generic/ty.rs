@@ -6,7 +6,6 @@ pub use Ty::*;
 
 use syntax::ast::{self, Expr, GenericParamKind, Generics, Ident, SelfKind, GenericArg};
 use syntax::ext::base::ExtCtxt;
-use syntax::ext::build::AstBuilder;
 use syntax::source_map::{respan, DUMMY_SP};
 use syntax::ptr::P;
 use syntax_pos::Span;
@@ -18,6 +17,7 @@ pub enum PtrTy<'a> {
     /// &'lifetime mut
     Borrowed(Option<&'a str>, ast::Mutability),
     /// *mut
+    #[allow(dead_code)]
     Raw(ast::Mutability),
 }
 
@@ -72,7 +72,7 @@ impl<'a> Path<'a> {
                    self_ty: Ident,
                    self_generics: &Generics)
                    -> ast::Path {
-        let mut idents = self.path.iter().map(|s| cx.ident_of(*s)).collect();
+        let mut idents = self.path.iter().map(|s| Ident::from_str_and_span(*s, span)).collect();
         let lt = mk_lifetimes(cx, span, &self.lifetime);
         let tys: Vec<P<ast::Ty>> =
             self.params.iter().map(|t| t.to_ty(cx, span, self_ty, self_generics)).collect();
@@ -85,7 +85,7 @@ impl<'a> Path<'a> {
             PathKind::Global => cx.path_all(span, true, idents, params, Vec::new()),
             PathKind::Local => cx.path_all(span, false, idents, params, Vec::new()),
             PathKind::Std => {
-                let def_site = DUMMY_SP.apply_mark(cx.current_expansion.mark);
+                let def_site = DUMMY_SP.apply_mark(cx.current_expansion.id);
                 idents.insert(0, Ident::new(kw::DollarCrate, def_site));
                 cx.path_all(span, false, idents, params, Vec::new())
             }
@@ -105,13 +105,6 @@ pub enum Ty<'a> {
     Literal(Path<'a>),
     /// includes unit
     Tuple(Vec<Ty<'a>>),
-}
-
-/// A const expression. Supports literals and blocks.
-#[derive(Clone, Eq, PartialEq)]
-pub enum Const {
-    Literal,
-    Block,
 }
 
 pub fn borrowed_ptrty<'r>() -> PtrTy<'r> {
@@ -216,7 +209,7 @@ fn mk_ty_param(cx: &ExtCtxt<'_>,
             cx.trait_bound(path)
         })
         .collect();
-    cx.typaram(span, cx.ident_of(name), attrs.to_owned(), bounds, None)
+    cx.typaram(span, ast::Ident::from_str_and_span(name, span), attrs.to_owned(), bounds, None)
 }
 
 fn mk_generics(params: Vec<ast::GenericParam>, span: Span) -> Generics {

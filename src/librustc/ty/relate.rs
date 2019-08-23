@@ -8,7 +8,7 @@ use crate::hir::def_id::DefId;
 use crate::ty::subst::{Kind, UnpackedKind, SubstsRef};
 use crate::ty::{self, Ty, TyCtxt, TypeFoldable};
 use crate::ty::error::{ExpectedFound, TypeError};
-use crate::mir::interpret::{ConstValue, Scalar, GlobalId};
+use crate::mir::interpret::{ConstValue, Scalar};
 use std::rc::Rc;
 use std::iter;
 use rustc_target::spec::abi;
@@ -24,6 +24,8 @@ pub enum Cause {
 
 pub trait TypeRelation<'tcx>: Sized {
     fn tcx(&self) -> TyCtxt<'tcx>;
+
+    fn param_env(&self) -> ty::ParamEnv<'tcx>;
 
     /// Returns a static string we can use for printouts.
     fn tag(&self) -> &'static str;
@@ -466,7 +468,9 @@ pub fn super_relate_tys<R: TypeRelation<'tcx>>(
                 Err(err) => {
                     // Check whether the lengths are both concrete/known values,
                     // but are unequal, for better diagnostics.
-                    match (sz_a.assert_usize(tcx), sz_b.assert_usize(tcx)) {
+                    let sz_a = sz_a.try_eval_usize(tcx, relation.param_env());
+                    let sz_b = sz_b.try_eval_usize(tcx, relation.param_env());
+                    match (sz_a, sz_b) {
                         (Some(sz_a_val), Some(sz_b_val)) => {
                             Err(TypeError::FixedArraySize(
                                 expected_found(relation, &sz_a_val, &sz_b_val)
@@ -547,26 +551,8 @@ pub fn super_relate_consts<R: TypeRelation<'tcx>>(
     let tcx = relation.tcx();
 
     let eagerly_eval = |x: &'tcx ty::Const<'tcx>| {
-        if let ConstValue::Unevaluated(def_id, substs) = x.val {
-            // FIXME(eddyb) get the right param_env.
-            let param_env = ty::ParamEnv::empty();
-            if !substs.has_local_value() {
-                let instance = ty::Instance::resolve(
-                    tcx.global_tcx(),
-                    param_env,
-                    def_id,
-                    substs,
-                );
-                if let Some(instance) = instance {
-                    let cid = GlobalId {
-                        instance,
-                        promoted: None,
-                    };
-                    if let Ok(ct) = tcx.const_eval(param_env.and(cid)) {
-                        return ct.val;
-                    }
-                }
-            }
+        if !x.val.has_local_value() {
+            return x.eval(tcx, relation.param_env()).val;
         }
         x.val
     };
@@ -594,13 +580,11 @@ pub fn super_relate_consts<R: TypeRelation<'tcx>>(
                 ty: a.ty,
             }))
         }
-        (ConstValue::ByRef { .. }, _) => {
-            bug!(
-                "non-Scalar ConstValue encountered in super_relate_consts {:?} {:?}",
-                a,
-                b,
-            );
-        }
+
+        // FIXME(const_generics): we should either handle `Scalar::Ptr` or add a comment
+        // saying that we're not handling it intentionally.
+
+        // FIXME(const_generics): handle `ConstValue::ByRef` and `ConstValue::Slice`.
 
         // FIXME(const_generics): this is wrong, as it is a projection
         (ConstValue::Unevaluated(a_def_id, a_substs),

@@ -47,18 +47,6 @@ LL | #[MyTrait]
    |   ^^^^^^^ not an attribute
 
 error: can't use a procedural macro from the same crate that defines it
-  --> $DIR/macro-namespace-reserved-2.rs:49:10
-   |
-LL | #[derive(crate::my_macro)]
-   |          ^^^^^^^^^^^^^^^
-
-error: expected derive macro, found macro `crate::my_macro`
-  --> $DIR/macro-namespace-reserved-2.rs:49:10
-   |
-LL | #[derive(crate::my_macro)]
-   |          ^^^^^^^^^^^^^^^ not a derive macro
-
-error: can't use a procedural macro from the same crate that defines it
   --> $DIR/macro-namespace-reserved-2.rs:52:10
    |
 LL | #[derive(my_macro_attr)]
@@ -76,15 +64,6 @@ error: can't use a procedural macro from the same crate that defines it
 LL | #[derive(MyTrait)]
    |          ^^^^^^^
 
-error[E0658]: The attribute `my_macro` is currently unknown to the compiler and may have meaning added to it in the future
-  --> $DIR/macro-namespace-reserved-2.rs:38:3
-   |
-LL | #[my_macro]
-   |   ^^^^^^^^
-   |
-   = note: for more information, see https://github.com/rust-lang/rust/issues/29642
-   = help: add `#![feature(custom_attribute)]` to the crate attributes to enable
-
 error: can't use a procedural macro from the same crate that defines it
   --> $DIR/macro-namespace-reserved-2.rs:39:3
    |
@@ -97,11 +76,17 @@ error: expected attribute, found macro `crate::my_macro`
 LL | #[crate::my_macro]
    |   ^^^^^^^^^^^^^^^ not an attribute
 
-error: cannot find derive macro `my_macro` in this scope
-  --> $DIR/macro-namespace-reserved-2.rs:48:10
+error: can't use a procedural macro from the same crate that defines it
+  --> $DIR/macro-namespace-reserved-2.rs:49:10
    |
-LL | #[derive(my_macro)]
-   |          ^^^^^^^^
+LL | #[derive(crate::my_macro)]
+   |          ^^^^^^^^^^^^^^^
+
+error: expected derive macro, found macro `crate::my_macro`
+  --> $DIR/macro-namespace-reserved-2.rs:49:10
+   |
+LL | #[derive(crate::my_macro)]
+   |          ^^^^^^^^^^^^^^^ not a derive macro
 
 error: cannot find macro `my_macro_attr!` in this scope
   --> $DIR/macro-namespace-reserved-2.rs:28:5
@@ -115,6 +100,17 @@ error: cannot find macro `MyTrait!` in this scope
 LL |     MyTrait!();
    |     ^^^^^^^
 
+error: cannot find attribute macro `my_macro` in this scope
+  --> $DIR/macro-namespace-reserved-2.rs:38:3
+   |
+LL | #[my_macro]
+   |   ^^^^^^^^
+
+error: cannot find derive macro `my_macro` in this scope
+  --> $DIR/macro-namespace-reserved-2.rs:48:10
+   |
+LL | #[derive(my_macro)]
+   |          ^^^^^^^^
+
 error: aborting due to 19 previous errors
 
-For more information about this error, try `rustc --explain E0658`.

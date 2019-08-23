@@ -35,7 +35,6 @@ use rustc_target::spec::abi;
 use syntax::ast;
 use syntax::ast::{Ident, MetaItemKind};
 use syntax::attr::{InlineAttr, OptimizeAttr, list_contains_name, mark_used};
-use syntax::source_map::Spanned;
 use syntax::feature_gate;
 use syntax::symbol::{InternedString, kw, Symbol, sym};
 use syntax_pos::{Span, DUMMY_SP};
@@ -48,8 +47,6 @@ use rustc::hir::GenericParamKind;
 use rustc::hir::{self, CodegenFnAttrFlags, CodegenFnAttrs, Unsafety};
 
 use errors::{Applicability, DiagnosticId};
-
-use std::iter;
 
 struct OnlySelfBounds(bool);
 
@@ -160,6 +157,16 @@ impl Visitor<'tcx> for CollectItemTypesVisitor<'tcx> {
 ///////////////////////////////////////////////////////////////////////////
 // Utility types and common code for the above passes.
 
+fn bad_placeholder_type(tcx: TyCtxt<'tcx>, span: Span) -> errors::DiagnosticBuilder<'tcx> {
+    let mut diag = tcx.sess.struct_span_err_with_code(
+        span,
+        "the type placeholder `_` is not allowed within types on item signatures",
+        DiagnosticId::Error("E0121".into()),
+    );
+    diag.span_label(span, "not allowed in type signatures");
+    diag
+}
+
 impl ItemCtxt<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>, item_def_id: DefId) -> ItemCtxt<'tcx> {
         ItemCtxt { tcx, item_def_id }
@@ -191,12 +198,7 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
     }
 
     fn ty_infer(&self, _: Option<&ty::GenericParamDef>, span: Span) -> Ty<'tcx> {
-        self.tcx().sess.struct_span_err_with_code(
-            span,
-            "the type placeholder `_` is not allowed within types on item signatures",
-            DiagnosticId::Error("E0121".into()),
-        ).span_label(span, "not allowed in type signatures")
-         .emit();
+        bad_placeholder_type(self.tcx(), span).emit();
 
         self.tcx().types.err
     }
@@ -207,12 +209,7 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
         _: Option<&ty::GenericParamDef>,
         span: Span,
     ) -> &'tcx Const<'tcx> {
-        self.tcx().sess.struct_span_err_with_code(
-            span,
-            "the const placeholder `_` is not allowed within types on item signatures",
-            DiagnosticId::Error("E0121".into()),
-        ).span_label(span, "not allowed in type signatures")
-         .emit();
+        bad_placeholder_type(self.tcx(), span).emit();
 
         self.tcx().consts.err
     }
@@ -226,7 +223,7 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
         if let Some(trait_ref) = poly_trait_ref.no_bound_vars() {
             self.tcx().mk_projection(item_def_id, trait_ref.substs)
         } else {
-            // no late-bound regions, we can just ignore the binder
+            // There are no late-bound regions; we can just ignore the binder.
             span_err!(
                 self.tcx().sess,
                 span,
@@ -239,20 +236,21 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
     }
 
     fn normalize_ty(&self, _span: Span, ty: Ty<'tcx>) -> Ty<'tcx> {
-        // types in item signatures are not normalized, to avoid undue
-        // dependencies.
+        // Types in item signatures are not normalized to avoid undue dependencies.
         ty
     }
 
     fn set_tainted_by_errors(&self) {
-        // no obvious place to track this, so just let it go
+        // There's no obvious place to track this, so just let it go.
     }
 
     fn record_ty(&self, _hir_id: hir::HirId, _ty: Ty<'tcx>, _span: Span) {
-        // no place to record types from signatures?
+        // There's no place to record types from signatures?
     }
 }
 
+/// Returns the predicates defined on `item_def_id` of the form
+/// `X: Foo` where `X` is the type parameter `def_id`.
 fn type_param_predicates(
     tcx: TyCtxt<'_>,
     (item_def_id, def_id): (DefId, DefId),
@@ -260,8 +258,8 @@ fn type_param_predicates(
     use rustc::hir::*;
 
     // In the AST, bounds can derive from two places. Either
-    // written inline like `<T : Foo>` or in a where clause like
-    // `where T : Foo`.
+    // written inline like `<T: Foo>` or in a where-clause like
+    // `where T: Foo`.
 
     let param_id = tcx.hir().as_local_hir_id(def_id).unwrap();
     let param_owner = tcx.hir().ty_param_owner(param_id);
@@ -293,8 +291,8 @@ fn type_param_predicates(
             match item.node {
                 ItemKind::Fn(.., ref generics, _)
                 | ItemKind::Impl(_, _, _, ref generics, ..)
-                | ItemKind::Ty(_, ref generics)
-                | ItemKind::Existential(ExistTy {
+                | ItemKind::TyAlias(_, ref generics)
+                | ItemKind::OpaqueTy(OpaqueTy {
                     ref generics,
                     impl_trait_fn: None,
                     ..
@@ -325,16 +323,23 @@ fn type_param_predicates(
     let icx = ItemCtxt::new(tcx, item_def_id);
     let mut result = (*result).clone();
     result.predicates.extend(extend.into_iter());
-    result.predicates
-          .extend(icx.type_parameter_bounds_in_generics(ast_generics, param_id, ty,
-                  OnlySelfBounds(true)));
+    result.predicates.extend(
+        icx.type_parameter_bounds_in_generics(ast_generics, param_id, ty, OnlySelfBounds(true))
+            .into_iter()
+            .filter(|(predicate, _)| {
+                match predicate {
+                    ty::Predicate::Trait(ref data) => data.skip_binder().self_ty().is_param(index),
+                    _ => false,
+                }
+            })
+    );
     tcx.arena.alloc(result)
 }
 
 impl ItemCtxt<'tcx> {
     /// Finds bounds from `hir::Generics`. This requires scanning through the
     /// AST. We do this to avoid having to convert *all* the bounds, which
-    /// would create artificial cycles. Instead we can only convert the
+    /// would create artificial cycles. Instead, we can only convert the
     /// bounds for a type parameter `X` if `X::Foo` is used.
     fn type_parameter_bounds_in_generics(
         &self,
@@ -456,13 +461,13 @@ fn convert_item(tcx: TyCtxt<'_>, item_id: hir::HirId) {
         }
 
         // Desugared from `impl Trait`, so visited by the function's return type.
-        hir::ItemKind::Existential(hir::ExistTy {
+        hir::ItemKind::OpaqueTy(hir::OpaqueTy {
             impl_trait_fn: Some(_),
             ..
         }) => {}
 
-        hir::ItemKind::Existential(..)
-        | hir::ItemKind::Ty(..)
+        hir::ItemKind::OpaqueTy(..)
+        | hir::ItemKind::TyAlias(..)
         | hir::ItemKind::Static(..)
         | hir::ItemKind::Const(..)
         | hir::ItemKind::Fn(..) => {
@@ -514,7 +519,11 @@ fn convert_variant_ctor(tcx: TyCtxt<'_>, ctor_id: hir::HirId) {
     tcx.predicates_of(def_id);
 }
 
-fn convert_enum_variant_types<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, variants: &[hir::Variant]) {
+fn convert_enum_variant_types<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    variants: &[hir::Variant]
+) {
     let def = tcx.adt_def(def_id);
     let repr_type = def.repr.discr_type();
     let initial = repr_type.initial_discriminant(tcx);
@@ -524,7 +533,7 @@ fn convert_enum_variant_types<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, variants: 
     for variant in variants {
         let wrapped_discr = prev_discr.map_or(initial, |d| d.wrap_incr(tcx));
         prev_discr = Some(
-            if let Some(ref e) = variant.node.disr_expr {
+            if let Some(ref e) = variant.disr_expr {
                 let expr_did = tcx.hir().local_def_id(e.hir_id);
                 def.eval_explicit_discr(tcx, expr_did)
             } else if let Some(discr) = repr_type.disr_incr(tcx, prev_discr) {
@@ -540,14 +549,14 @@ fn convert_enum_variant_types<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, variants: 
                     format!("overflowed on value after {}", prev_discr.unwrap()),
                 ).note(&format!(
                     "explicitly set `{} = {}` if that is desired outcome",
-                    variant.node.ident, wrapped_discr
+                    variant.ident, wrapped_discr
                 ))
                 .emit();
                 None
             }.unwrap_or(wrapped_discr),
         );
 
-        for f in variant.node.data.fields() {
+        for f in variant.data.fields() {
             let def_id = tcx.hir().local_def_id(f.hir_id);
             tcx.generics_of(def_id);
             tcx.type_of(def_id);
@@ -556,7 +565,7 @@ fn convert_enum_variant_types<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, variants: 
 
         // Convert the ctor, if any. This also registers the variant as
         // an item.
-        if let Some(ctor_hir_id) = variant.node.data.ctor_hir_id() {
+        if let Some(ctor_hir_id) = variant.data.ctor_hir_id() {
             convert_variant_ctor(tcx, ctor_hir_id);
         }
     }
@@ -635,11 +644,11 @@ fn adt_def(tcx: TyCtxt<'_>, def_id: DefId) -> &ty::AdtDef {
             let variants = def.variants
                 .iter()
                 .map(|v| {
-                    let variant_did = Some(tcx.hir().local_def_id(v.node.id));
-                    let ctor_did = v.node.data.ctor_hir_id()
+                    let variant_did = Some(tcx.hir().local_def_id(v.id));
+                    let ctor_did = v.data.ctor_hir_id()
                         .map(|hir_id| tcx.hir().local_def_id(hir_id));
 
-                    let discr = if let Some(ref e) = v.node.disr_expr {
+                    let discr = if let Some(ref e) = v.disr_expr {
                         distance_from_explicit = 0;
                         ty::VariantDiscr::Explicit(tcx.hir().local_def_id(e.hir_id))
                     } else {
@@ -647,8 +656,8 @@ fn adt_def(tcx: TyCtxt<'_>, def_id: DefId) -> &ty::AdtDef {
                     };
                     distance_from_explicit += 1;
 
-                    convert_variant(tcx, variant_did, ctor_did, v.node.ident, discr,
-                                    &v.node.data, AdtKind::Enum, def_id)
+                    convert_variant(tcx, variant_did, ctor_did, v.ident, discr,
+                                    &v.data, AdtKind::Enum, def_id)
                 })
                 .collect();
 
@@ -707,7 +716,7 @@ fn super_predicates_of(
     let icx = ItemCtxt::new(tcx, trait_def_id);
 
     // Convert the bounds that follow the colon, e.g., `Bar + Zed` in `trait Foo: Bar + Zed`.
-    let self_param_ty = tcx.mk_self_type();
+    let self_param_ty = tcx.types.self_param;
     let superbounds1 = AstConv::compute_bounds(&icx, self_param_ty, bounds, SizedByDefault::No,
         item.span);
 
@@ -891,12 +900,26 @@ fn generics_of(tcx: TyCtxt<'_>, def_id: DefId) -> &ty::Generics {
             let parent_id = tcx.hir().get_parent_item(hir_id);
             Some(tcx.hir().local_def_id(parent_id))
         }
+        // FIXME(#43408) enable this in all cases when we get lazy normalization.
+        Node::AnonConst(&anon_const) => {
+            // HACK(eddyb) this provides the correct generics when the workaround
+            // for a const parameter `AnonConst` is being used elsewhere, as then
+            // there won't be the kind of cyclic dependency blocking #43408.
+            let expr = &tcx.hir().body(anon_const.body).value;
+            let icx = ItemCtxt::new(tcx, def_id);
+            if AstConv::const_param_def_id(&icx, expr).is_some() {
+                let parent_id = tcx.hir().get_parent_item(hir_id);
+                Some(tcx.hir().local_def_id(parent_id))
+            } else {
+                None
+            }
+        }
         Node::Expr(&hir::Expr {
             node: hir::ExprKind::Closure(..),
             ..
         }) => Some(tcx.closure_base_def_id(def_id)),
         Node::Item(item) => match item.node {
-            ItemKind::Existential(hir::ExistTy { impl_trait_fn, .. }) => impl_trait_fn,
+            ItemKind::OpaqueTy(hir::OpaqueTy { impl_trait_fn, .. }) => impl_trait_fn,
             _ => None,
         },
         _ => None,
@@ -917,10 +940,10 @@ fn generics_of(tcx: TyCtxt<'_>, def_id: DefId) -> &ty::Generics {
                     generics
                 }
 
-                ItemKind::Ty(_, ref generics)
+                ItemKind::TyAlias(_, ref generics)
                 | ItemKind::Enum(_, ref generics)
                 | ItemKind::Struct(_, ref generics)
-                | ItemKind::Existential(hir::ExistTy { ref generics, .. })
+                | ItemKind::OpaqueTy(hir::OpaqueTy { ref generics, .. })
                 | ItemKind::Union(_, ref generics) => {
                     allow_defaults = true;
                     generics
@@ -1005,13 +1028,6 @@ fn generics_of(tcx: TyCtxt<'_>, def_id: DefId) -> &ty::Generics {
                         synthetic,
                         ..
                     } => {
-                        if param.name.ident().name == kw::SelfUpper {
-                            span_bug!(
-                                param.span,
-                                "`Self` should not be the name of a regular parameter"
-                            );
-                        }
-
                         if !allow_defaults && default.is_some() {
                             if !tcx.features().default_type_parameter_fallback {
                                 tcx.lint_hir(
@@ -1035,13 +1051,6 @@ fn generics_of(tcx: TyCtxt<'_>, def_id: DefId) -> &ty::Generics {
                         }
                     }
                     GenericParamKind::Const { .. } => {
-                        if param.name.ident().name == kw::SelfUpper {
-                            span_bug!(
-                                param.span,
-                                "`Self` should not be the name of a regular parameter",
-                            );
-                        }
-
                         ty::GenericParamDefKind::Const
                     }
                     _ => return None,
@@ -1135,6 +1144,26 @@ fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
     checked_type_of(tcx, def_id, true).unwrap()
 }
 
+fn infer_placeholder_type(
+    tcx: TyCtxt<'_>,
+    def_id: DefId,
+    body_id: hir::BodyId,
+    span: Span,
+) -> Ty<'_> {
+    let ty = tcx.typeck_tables_of(def_id).node_type(body_id.hir_id);
+    let mut diag = bad_placeholder_type(tcx, span);
+    if ty != tcx.types.err {
+        diag.span_suggestion(
+            span,
+            "replace `_` with the correct type",
+            ty.to_string(),
+            Applicability::MaybeIncorrect,
+        );
+    }
+    diag.emit();
+    ty
+}
+
 /// Same as [`type_of`] but returns [`Option`] instead of failing.
 ///
 /// If you want to fail anyway, you can set the `fail` parameter to true, but in this case,
@@ -1160,7 +1189,16 @@ pub fn checked_type_of(tcx: TyCtxt<'_>, def_id: DefId, fail: bool) -> Option<Ty<
                 let substs = InternalSubsts::identity_for_item(tcx, def_id);
                 tcx.mk_fn_def(def_id, substs)
             }
-            TraitItemKind::Const(ref ty, _) | TraitItemKind::Type(_, Some(ref ty)) => icx.to_ty(ty),
+            TraitItemKind::Const(ref ty, body_id)  => {
+                body_id.and_then(|body_id| {
+                    if let hir::TyKind::Infer = ty.node {
+                        Some(infer_placeholder_type(tcx, def_id, body_id, ty.span))
+                    } else {
+                        None
+                    }
+                }).unwrap_or_else(|| icx.to_ty(ty))
+            },
+            TraitItemKind::Type(_, Some(ref ty)) => icx.to_ty(ty),
             TraitItemKind::Type(_, None) => {
                 if !fail {
                     return None;
@@ -1174,8 +1212,14 @@ pub fn checked_type_of(tcx: TyCtxt<'_>, def_id: DefId, fail: bool) -> Option<Ty<
                 let substs = InternalSubsts::identity_for_item(tcx, def_id);
                 tcx.mk_fn_def(def_id, substs)
             }
-            ImplItemKind::Const(ref ty, _) => icx.to_ty(ty),
-            ImplItemKind::Existential(_) => {
+            ImplItemKind::Const(ref ty, body_id) => {
+                if let hir::TyKind::Infer = ty.node {
+                    infer_placeholder_type(tcx, def_id, body_id, ty.span)
+                } else {
+                    icx.to_ty(ty)
+                }
+            },
+            ImplItemKind::OpaqueTy(_) => {
                 if tcx
                     .impl_trait_ref(tcx.hir().get_parent_did(hir_id))
                     .is_none()
@@ -1183,9 +1227,9 @@ pub fn checked_type_of(tcx: TyCtxt<'_>, def_id: DefId, fail: bool) -> Option<Ty<
                     report_assoc_ty_on_inherent_impl(tcx, item.span);
                 }
 
-                find_existential_constraints(tcx, def_id)
+                find_opaque_ty_constraints(tcx, def_id)
             }
-            ImplItemKind::Type(ref ty) => {
+            ImplItemKind::TyAlias(ref ty) => {
                 if tcx
                     .impl_trait_ref(tcx.hir().get_parent_did(hir_id))
                     .is_none()
@@ -1199,10 +1243,16 @@ pub fn checked_type_of(tcx: TyCtxt<'_>, def_id: DefId, fail: bool) -> Option<Ty<
 
         Node::Item(item) => {
             match item.node {
-                ItemKind::Static(ref t, ..)
-                | ItemKind::Const(ref t, _)
-                | ItemKind::Ty(ref t, _)
-                | ItemKind::Impl(.., ref t, _) => icx.to_ty(t),
+                ItemKind::Static(ref ty, .., body_id)
+                | ItemKind::Const(ref ty, body_id) => {
+                    if let hir::TyKind::Infer = ty.node {
+                        infer_placeholder_type(tcx, def_id, body_id, ty.span)
+                    } else {
+                        icx.to_ty(ty)
+                    }
+                },
+                ItemKind::TyAlias(ref ty, _)
+                | ItemKind::Impl(.., ref ty, _) => icx.to_ty(ty),
                 ItemKind::Fn(..) => {
                     let substs = InternalSubsts::identity_for_item(tcx, def_id);
                     tcx.mk_fn_def(def_id, substs)
@@ -1212,27 +1262,27 @@ pub fn checked_type_of(tcx: TyCtxt<'_>, def_id: DefId, fail: bool) -> Option<Ty<
                     let substs = InternalSubsts::identity_for_item(tcx, def_id);
                     tcx.mk_adt(def, substs)
                 }
-                ItemKind::Existential(hir::ExistTy {
+                ItemKind::OpaqueTy(hir::OpaqueTy {
                     impl_trait_fn: None,
                     ..
-                }) => find_existential_constraints(tcx, def_id),
-                // Existential types desugared from `impl Trait`.
-                ItemKind::Existential(hir::ExistTy {
+                }) => find_opaque_ty_constraints(tcx, def_id),
+                // Opaque types desugared from `impl Trait`.
+                ItemKind::OpaqueTy(hir::OpaqueTy {
                     impl_trait_fn: Some(owner),
                     ..
                 }) => {
                     tcx.typeck_tables_of(owner)
-                        .concrete_existential_types
+                        .concrete_opaque_types
                         .get(&def_id)
                         .map(|opaque| opaque.concrete_type)
                         .unwrap_or_else(|| {
                             // This can occur if some error in the
                             // owner fn prevented us from populating
-                            // the `concrete_existential_types` table.
+                            // the `concrete_opaque_types` table.
                             tcx.sess.delay_span_bug(
                                 DUMMY_SP,
                                 &format!(
-                                    "owner {:?} has no existential type for {:?} in its tables",
+                                    "owner {:?} has no opaque type for {:?} in its tables",
                                     owner, def_id,
                                 ),
                             );
@@ -1267,10 +1317,9 @@ pub fn checked_type_of(tcx: TyCtxt<'_>, def_id: DefId, fail: bool) -> Option<Ty<
             ForeignItemKind::Type => tcx.mk_foreign(def_id),
         },
 
-        Node::Ctor(&ref def) | Node::Variant(&Spanned {
-            node: hir::VariantKind { data: ref def, .. },
-            ..
-        }) => match *def {
+        Node::Ctor(&ref def) | Node::Variant(
+            hir::Variant { data: ref def, .. }
+        ) => match *def {
             VariantData::Unit(..) | VariantData::Struct(..) => {
                 tcx.type_of(tcx.hir().get_parent_did(hir_id))
             }
@@ -1316,12 +1365,8 @@ pub fn checked_type_of(tcx: TyCtxt<'_>, def_id: DefId, fail: bool) -> Option<Ty<
                     tcx.types.usize
                 }
 
-                Node::Variant(&Spanned {
-                    node:
-                        VariantKind {
-                            disr_expr: Some(ref e),
-                            ..
-                        },
+                Node::Variant(Variant {
+                    disr_expr: Some(ref e),
                     ..
                 }) if e.hir_id == hir_id =>
                 {
@@ -1464,20 +1509,20 @@ pub fn checked_type_of(tcx: TyCtxt<'_>, def_id: DefId, fail: bool) -> Option<Ty<
     })
 }
 
-fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
+fn find_opaque_ty_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
     use rustc::hir::{ImplItem, Item, TraitItem};
 
-    debug!("find_existential_constraints({:?})", def_id);
+    debug!("find_opaque_ty_constraints({:?})", def_id);
 
     struct ConstraintLocator<'tcx> {
         tcx: TyCtxt<'tcx>,
         def_id: DefId,
-        // (first found type span, actual type, mapping from the existential type's generic
+        // (first found type span, actual type, mapping from the opaque type's generic
         // parameters to the concrete type's generic parameters)
         //
         // The mapping is an index for each use site of a generic parameter in the concrete type
         //
-        // The indices index into the generic parameters on the existential type.
+        // The indices index into the generic parameters on the opaque type.
         found: Option<(Span, Ty<'tcx>, Vec<usize>)>,
     }
 
@@ -1486,7 +1531,7 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
             // Don't try to check items that cannot possibly constrain the type.
             if !self.tcx.has_typeck_tables(def_id) {
                 debug!(
-                    "find_existential_constraints: no constraint for `{:?}` at `{:?}`: no tables",
+                    "find_opaque_ty_constraints: no constraint for `{:?}` at `{:?}`: no tables",
                     self.def_id,
                     def_id,
                 );
@@ -1495,11 +1540,11 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
             let ty = self
                 .tcx
                 .typeck_tables_of(def_id)
-                .concrete_existential_types
+                .concrete_opaque_types
                 .get(&self.def_id);
             if let Some(ty::ResolvedOpaqueTy { concrete_type, substs }) = ty {
                 debug!(
-                    "find_existential_constraints: found constraint for `{:?}` at `{:?}`: {:?}",
+                    "find_opaque_ty_constraints: found constraint for `{:?}` at `{:?}`: {:?}",
                     self.def_id,
                     def_id,
                     ty,
@@ -1520,9 +1565,9 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                                 self.tcx.sess.span_err(
                                     span,
                                     &format!(
-                                        "defining existential type use restricts existential \
+                                        "defining opaque type use restricts opaque \
                                          type by using the generic parameter `{}` twice",
-                                        p.name
+                                        p,
                                     ),
                                 );
                                 return;
@@ -1531,14 +1576,14 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                             self.tcx.sess.delay_span_bug(
                                 span,
                                 &format!(
-                                    "non-defining exist ty use in defining scope: {:?}, {:?}",
+                                    "non-defining opaque ty use in defining scope: {:?}, {:?}",
                                     concrete_type, substs,
                                 ),
                             );
                         }
                     }
                 }
-                // Compute the index within the existential type for each generic parameter used in
+                // Compute the index within the opaque type for each generic parameter used in
                 // the concrete type.
                 let indices = concrete_type
                     .subst(self.tcx, substs)
@@ -1554,7 +1599,7 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                 if !substs.types().all(is_param) {
                     self.tcx.sess.span_err(
                         span,
-                        "defining existential type use does not fully define existential type",
+                        "defining opaque type use does not fully define opaque type",
                     );
                 } else if let Some((prev_span, prev_ty, ref prev_indices)) = self.found {
                     let mut ty = concrete_type.walk().fuse();
@@ -1567,11 +1612,11 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                         _ => t == p,
                     });
                     if !iter_eq || ty.next().is_some() || p_ty.next().is_some() {
-                        debug!("find_existential_constraints: span={:?}", span);
-                        // Found different concrete types for the existential type.
+                        debug!("find_opaque_ty_constraints: span={:?}", span);
+                        // Found different concrete types for the opaque type.
                         let mut err = self.tcx.sess.struct_span_err(
                             span,
-                            "concrete type differs from previous defining existential type use",
+                            "concrete type differs from previous defining opaque type use",
                         );
                         err.span_label(
                             span,
@@ -1610,7 +1655,7 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                 }
             } else {
                 debug!(
-                    "find_existential_constraints: no constraint for `{:?}` at `{:?}`",
+                    "find_opaque_ty_constraints: no constraint for `{:?}` at `{:?}`",
                     self.def_id,
                     def_id,
                 );
@@ -1623,22 +1668,25 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
             intravisit::NestedVisitorMap::All(&self.tcx.hir())
         }
         fn visit_item(&mut self, it: &'tcx Item) {
+            debug!("find_existential_constraints: visiting {:?}", it);
             let def_id = self.tcx.hir().local_def_id(it.hir_id);
-            // The existential type itself or its children are not within its reveal scope.
+            // The opaque type itself or its children are not within its reveal scope.
             if def_id != self.def_id {
                 self.check(def_id);
                 intravisit::walk_item(self, it);
             }
         }
         fn visit_impl_item(&mut self, it: &'tcx ImplItem) {
+            debug!("find_existential_constraints: visiting {:?}", it);
             let def_id = self.tcx.hir().local_def_id(it.hir_id);
-            // The existential type itself or its children are not within its reveal scope.
+            // The opaque type itself or its children are not within its reveal scope.
             if def_id != self.def_id {
                 self.check(def_id);
                 intravisit::walk_impl_item(self, it);
             }
         }
         fn visit_trait_item(&mut self, it: &'tcx TraitItem) {
+            debug!("find_existential_constraints: visiting {:?}", it);
             let def_id = self.tcx.hir().local_def_id(it.hir_id);
             self.check(def_id);
             intravisit::walk_trait_item(self, it);
@@ -1655,18 +1703,32 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
         found: None,
     };
 
-    debug!("find_existential_constraints: scope={:?}", scope);
+    debug!("find_opaque_ty_constraints: scope={:?}", scope);
 
     if scope == hir::CRATE_HIR_ID {
         intravisit::walk_crate(&mut locator, tcx.hir().krate());
     } else {
-        debug!("find_existential_constraints: scope={:?}", tcx.hir().get(scope));
+        debug!("find_opaque_ty_constraints: scope={:?}", tcx.hir().get(scope));
         match tcx.hir().get(scope) {
-            Node::Item(ref it) => intravisit::walk_item(&mut locator, it),
-            Node::ImplItem(ref it) => intravisit::walk_impl_item(&mut locator, it),
-            Node::TraitItem(ref it) => intravisit::walk_trait_item(&mut locator, it),
+            // We explicitly call `visit_*` methods, instead of using `intravisit::walk_*` methods
+            // This allows our visitor to process the defining item itself, causing
+            // it to pick up any 'sibling' defining uses.
+            //
+            // For example, this code:
+            // ```
+            // fn foo() {
+            //     type Blah = impl Debug;
+            //     let my_closure = || -> Blah { true };
+            // }
+            // ```
+            //
+            // requires us to explicitly process `foo()` in order
+            // to notice the defining usage of `Blah`.
+            Node::Item(ref it) => locator.visit_item(it),
+            Node::ImplItem(ref it) => locator.visit_impl_item(it),
+            Node::TraitItem(ref it) => locator.visit_trait_item(it),
             other => bug!(
-                "{:?} is not a valid scope for an existential type item",
+                "{:?} is not a valid scope for an opaque type item",
                 other
             ),
         }
@@ -1682,6 +1744,15 @@ fn find_existential_constraints(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
     }
 }
 
+pub fn get_infer_ret_ty(output: &'_ hir::FunctionRetTy) -> Option<&hir::Ty> {
+    if let hir::FunctionRetTy::Return(ref ty) = output {
+        if let hir::TyKind::Infer = ty.node {
+            return Some(&**ty)
+        }
+    }
+    None
+}
+
 fn fn_sig(tcx: TyCtxt<'_>, def_id: DefId) -> ty::PolyFnSig<'_> {
     use rustc::hir::*;
     use rustc::hir::Node::*;
@@ -1692,18 +1763,41 @@ fn fn_sig(tcx: TyCtxt<'_>, def_id: DefId) -> ty::PolyFnSig<'_> {
 
     match tcx.hir().get(hir_id) {
         TraitItem(hir::TraitItem {
-            node: TraitItemKind::Method(sig, _),
+            node: TraitItemKind::Method(MethodSig { header, decl }, TraitMethod::Provided(_)),
             ..
         })
         | ImplItem(hir::ImplItem {
-            node: ImplItemKind::Method(sig, _),
+            node: ImplItemKind::Method(MethodSig { header, decl }, _),
             ..
-        }) => AstConv::ty_of_fn(&icx, sig.header.unsafety, sig.header.abi, &sig.decl),
-
-        Item(hir::Item {
+        })
+        | Item(hir::Item {
             node: ItemKind::Fn(decl, header, _, _),
             ..
-        }) => AstConv::ty_of_fn(&icx, header.unsafety, header.abi, decl),
+        }) => match get_infer_ret_ty(&decl.output) {
+            Some(ty) => {
+                let fn_sig = tcx.typeck_tables_of(def_id).liberated_fn_sigs()[hir_id];
+                let mut diag = bad_placeholder_type(tcx, ty.span);
+                let ret_ty = fn_sig.output();
+                if ret_ty != tcx.types.err  {
+                    diag.span_suggestion(
+                        ty.span,
+                        "replace `_` with the correct return type",
+                        ret_ty.to_string(),
+                        Applicability::MaybeIncorrect,
+                    );
+                }
+                diag.emit();
+                ty::Binder::bind(fn_sig)
+            },
+            None => AstConv::ty_of_fn(&icx, header.unsafety, header.abi, decl)
+        },
+
+        TraitItem(hir::TraitItem {
+            node: TraitItemKind::Method(MethodSig { header, decl }, _),
+            ..
+        }) => {
+            AstConv::ty_of_fn(&icx, header.unsafety, header.abi, decl)
+        },
 
         ForeignItem(&hir::ForeignItem {
             node: ForeignItemKind::Fn(ref fn_decl, _, _),
@@ -1713,10 +1807,9 @@ fn fn_sig(tcx: TyCtxt<'_>, def_id: DefId) -> ty::PolyFnSig<'_> {
             compute_sig_of_foreign_fn_decl(tcx, def_id, fn_decl, abi)
         }
 
-        Ctor(data) | Variant(Spanned {
-            node: hir::VariantKind { data, ..  },
-            ..
-        }) if data.ctor_hir_id().is_some() => {
+        Ctor(data) | Variant(
+            hir::Variant { data, ..  }
+        ) if data.ctor_hir_id().is_some() => {
             let ty = tcx.type_of(tcx.hir().get_parent_did(hir_id));
             let inputs = data.fields()
                 .iter()
@@ -1920,7 +2013,7 @@ fn explicit_predicates_of(
         Node::TraitItem(item) => &item.generics,
 
         Node::ImplItem(item) => match item.node {
-            ImplItemKind::Existential(ref bounds) => {
+            ImplItemKind::OpaqueTy(ref bounds) => {
                 let substs = InternalSubsts::identity_for_item(tcx, def_id);
                 let opaque_ty = tcx.mk_opaque(def_id, substs);
 
@@ -1948,7 +2041,7 @@ fn explicit_predicates_of(
                     generics
                 }
                 ItemKind::Fn(.., ref generics, _)
-                | ItemKind::Ty(_, ref generics)
+                | ItemKind::TyAlias(_, ref generics)
                 | ItemKind::Enum(_, ref generics)
                 | ItemKind::Struct(_, ref generics)
                 | ItemKind::Union(_, ref generics) => generics,
@@ -1961,7 +2054,7 @@ fn explicit_predicates_of(
                     is_trait = Some((ty::TraitRef::identity(tcx, def_id), &empty_trait_items));
                     generics
                 }
-                ItemKind::Existential(ExistTy {
+                ItemKind::OpaqueTy(OpaqueTy {
                     ref bounds,
                     impl_trait_fn,
                     ref generics,
@@ -1987,7 +2080,7 @@ fn explicit_predicates_of(
                             predicates: bounds_predicates,
                         });
                     } else {
-                        // named existential types
+                        // named opaque types
                         predicates.extend(bounds_predicates);
                         generics
                     }
@@ -2102,15 +2195,12 @@ fn explicit_predicates_of(
                     match bound {
                         &hir::GenericBound::Trait(ref poly_trait_ref, _) => {
                             let mut bounds = Bounds::default();
-
-                            let (trait_ref, _) = AstConv::instantiate_poly_trait_ref(
+                            let _ = AstConv::instantiate_poly_trait_ref(
                                 &icx,
                                 poly_trait_ref,
                                 ty,
                                 &mut bounds,
                             );
-
-                            predicates.push((trait_ref.to_predicate(), poly_trait_ref.span));
                             predicates.extend(bounds.predicates(tcx, ty));
                         }
 
@@ -2202,7 +2292,7 @@ fn explicit_predicates_of(
 /// Converts a specific `GenericBound` from the AST into a set of
 /// predicates that apply to the self type. A vector is returned
 /// because this can be anywhere from zero predicates (`T: ?Sized` adds no
-/// predicates) to one (`T: Foo`) to many (`T: Bar<X=i32>` adds `T: Bar`
+/// predicates) to one (`T: Foo`) to many (`T: Bar<X = i32>` adds `T: Bar`
 /// and `<T as Bar>::X == i32`).
 fn predicates_from_bound<'tcx>(
     astconv: &dyn AstConv<'tcx>,
@@ -2212,10 +2302,12 @@ fn predicates_from_bound<'tcx>(
     match *bound {
         hir::GenericBound::Trait(ref tr, hir::TraitBoundModifier::None) => {
             let mut bounds = Bounds::default();
-            let (pred, _) = astconv.instantiate_poly_trait_ref(tr, param_ty, &mut bounds);
-            iter::once((pred.to_predicate(), tr.span))
-                .chain(bounds.predicates(astconv.tcx(), param_ty))
-                .collect()
+            let _ = astconv.instantiate_poly_trait_ref(
+                tr,
+                param_ty,
+                &mut bounds,
+            );
+            bounds.predicates(astconv.tcx(), param_ty)
         }
         hir::GenericBound::Outlives(ref lifetime) => {
             let region = astconv.ast_region_to_region(lifetime, None);

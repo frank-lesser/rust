@@ -363,7 +363,8 @@ impl<'a> HashStable<StableHashingContext<'a>> for token::TokenKind {
             }
 
             token::DocComment(val) |
-            token::Shebang(val) => val.hash_stable(hcx, hasher),
+            token::Shebang(val) |
+            token::Unknown(val) => val.hash_stable(hcx, hasher),
         }
     }
 }
@@ -396,9 +397,10 @@ impl_stable_hash_for!(enum ::syntax_pos::hygiene::Transparency {
     Opaque,
 });
 
-impl_stable_hash_for!(struct ::syntax_pos::hygiene::ExpnInfo {
-    call_site,
+impl_stable_hash_for!(struct ::syntax_pos::hygiene::ExpnData {
     kind,
+    parent -> _,
+    call_site,
     def_site,
     default_transparency,
     allow_internal_unstable,
@@ -418,7 +420,7 @@ impl_stable_hash_for!(enum ::syntax_pos::hygiene::DesugaringKind {
     Async,
     Await,
     QuestionMark,
-    ExistentialType,
+    OpaqueTy,
     ForLoop,
     TryBlock
 });

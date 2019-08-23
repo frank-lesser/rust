@@ -12,7 +12,6 @@ use rustc::traits::{ObligationCause, ObligationCauseCode};
 use rustc::ty::{self, Ty, TypeFoldable};
 use rustc::ty::subst::Kind;
 use syntax::ast;
-use syntax::source_map::Spanned;
 use syntax::util::lev_distance::find_best_match_for_name;
 use syntax_pos::Span;
 use syntax_pos::hygiene::DesugaringKind;
@@ -54,6 +53,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let is_non_ref_pat = match pat.node {
             PatKind::Struct(..) |
             PatKind::TupleStruct(..) |
+            PatKind::Or(_) |
             PatKind::Tuple(..) |
             PatKind::Box(_) |
             PatKind::Range(..) |
@@ -88,7 +88,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // For each ampersand peeled off, update the binding mode and push the original
             // type into the adjustments vector.
             //
-            // See the examples in `run-pass/match-defbm*.rs`.
+            // See the examples in `ui/match-defbm*.rs`.
             let mut pat_adjustments = vec![];
             while let ty::Ref(_, inner_ty, inner_mutability) = exp_ty.sty {
                 debug!("inspecting {:?}", exp_ty);
@@ -196,7 +196,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let rhs_ty = self.check_expr(end);
 
                 // Check that both end-points are of numeric or char type.
-                let numeric_or_char = |ty: Ty<'_>| ty.is_numeric() || ty.is_char();
+                let numeric_or_char = |ty: Ty<'_>| {
+                    ty.is_numeric()
+                    || ty.is_char()
+                    || ty.references_error()
+                };
                 let lhs_compat = numeric_or_char(lhs_ty);
                 let rhs_compat = numeric_or_char(rhs_ty);
 
@@ -305,6 +309,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
             PatKind::Struct(ref qpath, ref fields, etc) => {
                 self.check_pat_struct(pat, qpath, fields, etc, expected, def_bm, discrim_span)
+            }
+            PatKind::Or(ref pats) => {
+                let expected_ty = self.structurally_resolved_type(pat.span, expected);
+                for pat in pats {
+                    self.check_pat_walk(pat, expected, def_bm, discrim_span);
+                }
+                expected_ty
             }
             PatKind::Tuple(ref elements, ddpos) => {
                 let mut expected_len = elements.len();
@@ -419,7 +430,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let expected_ty = self.structurally_resolved_type(pat.span, expected);
                 let (inner_ty, slice_ty) = match expected_ty.sty {
                     ty::Array(inner_ty, size) => {
-                        if let Some(size) = size.assert_usize(tcx) {
+                        if let Some(size) = size.try_eval_usize(tcx, self.param_env) {
                             let min_len = before.len() as u64 + after.len() as u64;
                             if slice.is_none() {
                                 if min_len != size {
@@ -551,21 +562,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) {
         let tcx = self.tcx;
         if let PatKind::Binding(..) = inner.node {
-            let parent_id = tcx.hir().get_parent_node(pat.hir_id);
-            let parent = tcx.hir().get(parent_id);
-            debug!("inner {:?} pat {:?} parent {:?}", inner, pat, parent);
-            match parent {
-                hir::Node::Item(hir::Item { node: hir::ItemKind::Fn(..), .. }) |
-                hir::Node::ForeignItem(hir::ForeignItem {
-                    node: hir::ForeignItemKind::Fn(..), ..
-                }) |
-                hir::Node::TraitItem(hir::TraitItem { node: hir::TraitItemKind::Method(..), .. }) |
-                hir::Node::ImplItem(hir::ImplItem { node: hir::ImplItemKind::Method(..), .. }) => {
-                    // this pat is likely an argument
+            let binding_parent_id = tcx.hir().get_parent_node(pat.hir_id);
+            let binding_parent = tcx.hir().get(binding_parent_id);
+            debug!("inner {:?} pat {:?} parent {:?}", inner, pat, binding_parent);
+            match binding_parent {
+                hir::Node::Arg(hir::Arg { span, .. }) => {
                     if let Ok(snippet) = tcx.sess.source_map().span_to_snippet(inner.span) {
-                        // FIXME: turn into structured suggestion, will need a span that also
-                        // includes the the arg's type.
-                        err.help(&format!("did you mean `{}: &{}`?", snippet, expected));
+                        err.span_suggestion(
+                            *span,
+                            &format!("did you mean `{}`", snippet),
+                            format!(" &{}", expected),
+                            Applicability::MachineApplicable,
+                        );
                     }
                 }
                 hir::Node::Arm(_) |
@@ -1035,7 +1043,7 @@ https://doc.rust-lang.org/reference/types.html#trait-objects");
         &self,
         pat: &'tcx hir::Pat,
         qpath: &hir::QPath,
-        fields: &'tcx [Spanned<hir::FieldPat>],
+        fields: &'tcx [hir::FieldPat],
         etc: bool,
         expected: Ty<'tcx>,
         def_bm: ty::BindingMode,
@@ -1047,7 +1055,7 @@ https://doc.rust-lang.org/reference/types.html#trait-objects");
             variant_ty
         } else {
             for field in fields {
-                self.check_pat_walk(&field.node.pat, self.tcx.types.err, def_bm, discrim_span);
+                self.check_pat_walk(&field.pat, self.tcx.types.err, def_bm, discrim_span);
             }
             return self.tcx.types.err;
         };
@@ -1205,7 +1213,7 @@ https://doc.rust-lang.org/reference/types.html#trait-objects");
         pat_id: hir::HirId,
         span: Span,
         variant: &'tcx ty::VariantDef,
-        fields: &'tcx [Spanned<hir::FieldPat>],
+        fields: &'tcx [hir::FieldPat],
         etc: bool,
         def_bm: ty::BindingMode,
     ) -> bool {
@@ -1230,7 +1238,8 @@ https://doc.rust-lang.org/reference/types.html#trait-objects");
 
         let mut inexistent_fields = vec![];
         // Typecheck each field.
-        for &Spanned { node: ref field, span } in fields {
+        for field in fields {
+            let span = field.span;
             let ident = tcx.adjust_ident(field.ident, variant.def_id);
             let field_ty = match used_fields.entry(ident) {
                 Occupied(occupied) => {

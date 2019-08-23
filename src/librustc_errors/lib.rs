@@ -5,15 +5,9 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 
 #![feature(crate_visibility_modifier)]
-#![allow(unused_attributes)]
 #![cfg_attr(unix, feature(libc))]
 #![feature(nll)]
 #![feature(optin_builtin_traits)]
-#![deny(rust_2018_idioms)]
-#![deny(unused_lifetimes)]
-
-#[allow(unused_extern_crates)]
-extern crate serialize as rustc_serialize; // used by deriving
 
 pub use emitter::ColorConfig;
 
@@ -49,8 +43,7 @@ use syntax_pos::{BytePos,
                  SourceFile,
                  FileName,
                  MultiSpan,
-                 Span,
-                 NO_EXPANSION};
+                 Span};
 
 /// Indicates the confidence in the correctness of a suggestion.
 ///
@@ -195,7 +188,7 @@ impl CodeSuggestion {
             // Find the bounding span.
             let lo = substitution.parts.iter().map(|part| part.span.lo()).min().unwrap();
             let hi = substitution.parts.iter().map(|part| part.span.hi()).min().unwrap();
-            let bounding_span = Span::new(lo, hi, NO_EXPANSION);
+            let bounding_span = Span::with_root_ctxt(lo, hi);
             let lines = cm.span_to_lines(bounding_span).unwrap();
             assert!(!lines.lines.is_empty());
 
@@ -229,7 +222,8 @@ impl CodeSuggestion {
                         }
                     }
                     if let Some(cur_line) = fm.get_line(cur_lo.line - 1) {
-                        buf.push_str(&cur_line[..cur_lo.col.to_usize()]);
+                        let end = std::cmp::min(cur_line.len(), cur_lo.col.to_usize());
+                        buf.push_str(&cur_line[..end]);
                     }
                 }
                 buf.push_str(&part.snippet);
@@ -792,9 +786,6 @@ impl Handler {
 pub enum Level {
     Bug,
     Fatal,
-    // An error which while not immediately fatal, should stop the compiler
-    // progressing beyond the current phase.
-    PhaseFatal,
     Error,
     Warning,
     Note,
@@ -813,7 +804,7 @@ impl Level {
     fn color(self) -> ColorSpec {
         let mut spec = ColorSpec::new();
         match self {
-            Bug | Fatal | PhaseFatal | Error => {
+            Bug | Fatal | Error => {
                 spec.set_fg(Some(Color::Red))
                     .set_intense(true);
             }
@@ -838,7 +829,7 @@ impl Level {
     pub fn to_str(self) -> &'static str {
         match self {
             Bug => "error: internal compiler error",
-            Fatal | PhaseFatal | Error => "error",
+            Fatal | Error => "error",
             Warning => "warning",
             Note => "note",
             Help => "help",

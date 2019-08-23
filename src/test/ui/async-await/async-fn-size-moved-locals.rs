@@ -12,8 +12,6 @@
 
 // edition:2018
 
-#![feature(async_await)]
-
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -93,9 +91,27 @@ async fn joined_with_noop() {
     joiner.await
 }
 
+async fn mixed_sizes() {
+    let a = BigFut::new();
+    let b = BigFut::new();
+    let c = BigFut::new();
+    let d = BigFut::new();
+    let e = BigFut::new();
+    let joiner = Joiner {
+        a: Some(a),
+        b: Some(b),
+        c: Some(c),
+    };
+
+    d.await;
+    e.await;
+    joiner.await;
+}
+
 fn main() {
     assert_eq!(1028, std::mem::size_of_val(&single()));
     assert_eq!(1032, std::mem::size_of_val(&single_with_noop()));
     assert_eq!(3084, std::mem::size_of_val(&joined()));
     assert_eq!(3084, std::mem::size_of_val(&joined_with_noop()));
+    assert_eq!(7188, std::mem::size_of_val(&mixed_sizes()));
 }

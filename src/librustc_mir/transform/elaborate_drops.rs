@@ -105,7 +105,7 @@ fn find_dead_unwinds<'tcx>(
             init_data.apply_location(tcx, body, env, loc);
         }
 
-        let path = match env.move_data.rev_lookup.find(location) {
+        let path = match env.move_data.rev_lookup.find(location.as_ref()) {
             LookupResult::Exact(e) => e,
             LookupResult::Parent(..) => {
                 debug!("find_dead_unwinds: has parent; skipping");
@@ -360,7 +360,7 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
                 statement_index: data.statements.len()
             });
 
-            let path = self.move_data().rev_lookup.find(location);
+            let path = self.move_data().rev_lookup.find(location.as_ref());
             debug!("collect_drop_flags: {:?}, place {:?} ({:?})",
                    bb, location, path);
 
@@ -399,7 +399,7 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
             match terminator.kind {
                 TerminatorKind::Drop { ref location, target, unwind } => {
                     let init_data = self.initialization_data_at(loc);
-                    match self.move_data().rev_lookup.find(location) {
+                    match self.move_data().rev_lookup.find(location.as_ref()) {
                         LookupResult::Exact(path) => {
                             elaborate_drop(
                                 &mut Elaborator {
@@ -488,7 +488,7 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
             is_cleanup: false,
         });
 
-        match self.move_data().rev_lookup.find(location) {
+        match self.move_data().rev_lookup.find(location.as_ref()) {
             LookupResult::Exact(path) => {
                 debug!("elaborate_drop_and_replace({:?}) - tracked {:?}", terminator, path);
                 let init_data = self.initialization_data_at(loc);
@@ -527,7 +527,6 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
     fn constant_bool(&self, span: Span, val: bool) -> Rvalue<'tcx> {
         Rvalue::Use(Operand::Constant(Box::new(Constant {
             span,
-            ty: self.tcx.types.bool,
             user_ty: None,
             literal: ty::Const::from_bool(self.tcx, val),
         })))
@@ -558,7 +557,7 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
                 assert!(!self.patch.is_patched(bb));
 
                 let loc = Location { block: tgt, statement_index: 0 };
-                let path = self.move_data().rev_lookup.find(place);
+                let path = self.move_data().rev_lookup.find(place.as_ref());
                 on_lookup_result_bits(
                     self.tcx, self.body, self.move_data(), path,
                     |child| self.set_drop_flag(loc, child, DropFlagState::Present)
@@ -632,7 +631,7 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
                 assert!(!self.patch.is_patched(bb));
 
                 let loc = Location { block: bb, statement_index: data.statements.len() };
-                let path = self.move_data().rev_lookup.find(place);
+                let path = self.move_data().rev_lookup.find(place.as_ref());
                 on_lookup_result_bits(
                     self.tcx, self.body, self.move_data(), path,
                     |child| self.set_drop_flag(loc, child, DropFlagState::Present)

@@ -27,7 +27,7 @@ use crate::hir::def_id::{CrateNum, LOCAL_CRATE};
 use crate::hir::intravisit;
 use crate::hir;
 use crate::lint::builtin::BuiltinLintDiagnostics;
-use crate::lint::builtin::parser::ILL_FORMED_ATTRIBUTE_INPUT;
+use crate::lint::builtin::parser::{ILL_FORMED_ATTRIBUTE_INPUT, META_VARIABLE_MISUSE};
 use crate::session::{Session, DiagnosticMessageId};
 use crate::ty::TyCtxt;
 use crate::ty::query::Providers;
@@ -82,6 +82,7 @@ impl Lint {
     pub fn from_parser_lint_id(lint_id: BufferedEarlyLintId) -> &'static Self {
         match lint_id {
             BufferedEarlyLintId::IllFormedAttributeInput => ILL_FORMED_ATTRIBUTE_INPUT,
+            BufferedEarlyLintId::MetaVariableMisuse => META_VARIABLE_MISUSE,
         }
     }
 
@@ -205,6 +206,7 @@ macro_rules! declare_lint_pass {
 macro_rules! late_lint_methods {
     ($macro:path, $args:tt, [$hir:tt]) => (
         $macro!($args, [$hir], [
+            fn check_arg(a: &$hir hir::Arg);
             fn check_body(a: &$hir hir::Body);
             fn check_body_post(a: &$hir hir::Body);
             fn check_name(a: Span, b: ast::Name);
@@ -357,6 +359,7 @@ macro_rules! declare_combined_late_lint_pass {
 macro_rules! early_lint_methods {
     ($macro:path, $args:tt) => (
         $macro!($args, [
+            fn check_arg(a: &ast::Arg);
             fn check_ident(a: ast::Ident);
             fn check_crate(a: &ast::Crate);
             fn check_crate_post(a: &ast::Crate);
@@ -493,8 +496,6 @@ macro_rules! declare_combined_early_lint_pass {
 pub type EarlyLintPassObject = Box<dyn EarlyLintPass + sync::Send + sync::Sync + 'static>;
 pub type LateLintPassObject = Box<dyn for<'a, 'tcx> LateLintPass<'a, 'tcx> + sync::Send
                                                                            + sync::Sync + 'static>;
-
-
 
 /// Identifies a lint known to the compiler.
 #[derive(Clone, Copy, Debug)]
@@ -671,7 +672,7 @@ pub fn struct_lint_level<'a>(sess: &'a Session,
             sess.diag_note_once(
                 &mut err,
                 DiagnosticMessageId::from(lint),
-                &format!("#[{}({})] on by default", level.as_str(), name));
+                &format!("`#[{}({})]` on by default", level.as_str(), name));
         }
         LintSource::CommandLine(lint_flag_val) => {
             let flag = match level {
@@ -706,7 +707,7 @@ pub fn struct_lint_level<'a>(sess: &'a Session,
             if lint_attr_name.as_str() != name {
                 let level_str = level.as_str();
                 sess.diag_note_once(&mut err, DiagnosticMessageId::from(lint),
-                                    &format!("#[{}({})] implied by #[{}({})]",
+                                    &format!("`#[{}({})]` implied by `#[{}({})]`",
                                              level_str, name, level_str, lint_attr_name));
             }
         }
@@ -811,6 +812,12 @@ impl intravisit::Visitor<'tcx> for LintLevelMapBuilder<'tcx> {
         intravisit::NestedVisitorMap::All(&self.tcx.hir())
     }
 
+    fn visit_arg(&mut self, arg: &'tcx hir::Arg) {
+        self.with_lint_attrs(arg.hir_id, &arg.attrs, |builder| {
+            intravisit::walk_arg(builder, arg);
+        });
+    }
+
     fn visit_item(&mut self, it: &'tcx hir::Item) {
         self.with_lint_attrs(it.hir_id, &it.attrs, |builder| {
             intravisit::walk_item(builder, it);
@@ -839,7 +846,7 @@ impl intravisit::Visitor<'tcx> for LintLevelMapBuilder<'tcx> {
                      v: &'tcx hir::Variant,
                      g: &'tcx hir::Generics,
                      item_id: hir::HirId) {
-        self.with_lint_attrs(v.node.id, &v.node.attrs, |builder| {
+        self.with_lint_attrs(v.id, &v.attrs, |builder| {
             intravisit::walk_variant(builder, v, g, item_id);
         })
     }
@@ -878,21 +885,16 @@ pub fn provide(providers: &mut Providers<'_>) {
 /// This is used to test whether a lint should not even begin to figure out whether it should
 /// be reported on the current node.
 pub fn in_external_macro(sess: &Session, span: Span) -> bool {
-    let info = match span.ctxt().outer_expn_info() {
-        Some(info) => info,
-        // no ExpnInfo means this span doesn't come from a macro
-        None => return false,
-    };
-
-    match info.kind {
+    let expn_data = span.ctxt().outer_expn_data();
+    match expn_data.kind {
         ExpnKind::Root | ExpnKind::Desugaring(DesugaringKind::ForLoop) => false,
         ExpnKind::Desugaring(_) => true, // well, it's "external"
         ExpnKind::Macro(MacroKind::Bang, _) => {
-            if info.def_site.is_dummy() {
+            if expn_data.def_site.is_dummy() {
                 // dummy span for the def_site means it's an external macro
                 return true;
             }
-            match sess.source_map().span_to_snippet(info.def_site) {
+            match sess.source_map().span_to_snippet(expn_data.def_site) {
                 Ok(code) => !code.starts_with("macro_rules"),
                 // no snippet = external macro or compiler-builtin expansion
                 Err(_) => true,
@@ -904,10 +906,8 @@ pub fn in_external_macro(sess: &Session, span: Span) -> bool {
 
 /// Returns whether `span` originates in a derive macro's expansion
 pub fn in_derive_expansion(span: Span) -> bool {
-    if let Some(info) = span.ctxt().outer_expn_info() {
-        if let ExpnKind::Macro(MacroKind::Derive, _) = info.kind {
-            return true;
-        }
+    if let ExpnKind::Macro(MacroKind::Derive, _) = span.ctxt().outer_expn_data().kind {
+        return true;
     }
     false
 }

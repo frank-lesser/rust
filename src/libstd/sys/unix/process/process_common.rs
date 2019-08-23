@@ -12,6 +12,38 @@ use crate::collections::BTreeMap;
 
 use libc::{c_int, gid_t, uid_t, c_char, EXIT_SUCCESS, EXIT_FAILURE};
 
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "redox")] {
+        const DEV_NULL: &'static str = "null:\0";
+    } else {
+        const DEV_NULL: &'static str = "/dev/null\0";
+    }
+}
+
+// Android with api less than 21 define sig* functions inline, so it is not
+// available for dynamic link. Implementing sigemptyset and sigaddset allow us
+// to support older Android version (independent of libc version).
+// The following implementations are based on https://git.io/vSkNf
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "android")] {
+        pub unsafe fn sigemptyset(set: *mut libc::sigset_t) -> libc::c_int {
+            set.write_bytes(0u8, 1);
+            return 0;
+        }
+        #[allow(dead_code)]
+        pub unsafe fn sigaddset(set: *mut libc::sigset_t, signum: libc::c_int) -> libc::c_int {
+            use crate::{slice, mem};
+
+            let raw = slice::from_raw_parts_mut(set as *mut u8, mem::size_of::<libc::sigset_t>());
+            let bit = (signum - 1) as usize;
+            raw[bit / 8] |= 1 << (bit % 8);
+            return 0;
+        }
+    } else {
+        pub use libc::{sigemptyset, sigaddset};
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Command
 ////////////////////////////////////////////////////////////////////////////////
@@ -298,7 +330,7 @@ impl Stdio {
                 opts.read(readable);
                 opts.write(!readable);
                 let path = unsafe {
-                    CStr::from_ptr("/dev/null\0".as_ptr() as *const _)
+                    CStr::from_ptr(DEV_NULL.as_ptr() as *const _)
                 };
                 let fd = File::open_c(&path, &opts)?;
                 Ok((ChildStdio::Owned(fd.into_fd()), None))
@@ -419,36 +451,6 @@ mod tests {
                 Err(e) => panic!("received error for `{}`: {}", stringify!($e), e),
             }
         }
-    }
-
-    // Android with api less than 21 define sig* functions inline, so it is not
-    // available for dynamic link. Implementing sigemptyset and sigaddset allow us
-    // to support older Android version (independent of libc version).
-    // The following implementations are based on https://git.io/vSkNf
-
-    #[cfg(not(target_os = "android"))]
-    extern {
-        #[cfg_attr(target_os = "netbsd", link_name = "__sigemptyset14")]
-        fn sigemptyset(set: *mut libc::sigset_t) -> libc::c_int;
-
-        #[cfg_attr(target_os = "netbsd", link_name = "__sigaddset14")]
-        fn sigaddset(set: *mut libc::sigset_t, signum: libc::c_int) -> libc::c_int;
-    }
-
-    #[cfg(target_os = "android")]
-    unsafe fn sigemptyset(set: *mut libc::sigset_t) -> libc::c_int {
-        set.write_bytes(0u8, 1);
-        return 0;
-    }
-
-    #[cfg(target_os = "android")]
-    unsafe fn sigaddset(set: *mut libc::sigset_t, signum: libc::c_int) -> libc::c_int {
-        use crate::slice;
-
-        let raw = slice::from_raw_parts_mut(set as *mut u8, mem::size_of::<libc::sigset_t>());
-        let bit = (signum - 1) as usize;
-        raw[bit / 8] |= 1 << (bit % 8);
-        return 0;
     }
 
     // See #14232 for more information, but it appears that signal delivery to a

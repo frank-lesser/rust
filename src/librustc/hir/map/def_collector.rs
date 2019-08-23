@@ -2,7 +2,7 @@ use crate::hir::map::definitions::*;
 use crate::hir::def_id::DefIndex;
 
 use syntax::ast::*;
-use syntax::ext::hygiene::Mark;
+use syntax::ext::hygiene::ExpnId;
 use syntax::visit;
 use syntax::symbol::{kw, sym};
 use syntax::parse::token::{self, Token};
@@ -12,11 +12,11 @@ use syntax_pos::Span;
 pub struct DefCollector<'a> {
     definitions: &'a mut Definitions,
     parent_def: DefIndex,
-    expansion: Mark,
+    expansion: ExpnId,
 }
 
 impl<'a> DefCollector<'a> {
-    pub fn new(definitions: &'a mut Definitions, expansion: Mark) -> Self {
+    pub fn new(definitions: &'a mut Definitions, expansion: ExpnId) -> Self {
         let parent_def = definitions.invocation_parent(expansion);
         DefCollector { definitions, parent_def, expansion }
     }
@@ -74,8 +74,8 @@ impl<'a> DefCollector<'a> {
         })
     }
 
-    fn visit_macro_invoc(&mut self, id: NodeId) {
-        self.definitions.set_invocation_parent(id.placeholder_to_mark(), self.parent_def);
+    pub fn visit_macro_invoc(&mut self, id: NodeId) {
+        self.definitions.set_invocation_parent(id.placeholder_to_expn_id(), self.parent_def);
     }
 }
 
@@ -92,8 +92,8 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
             }
             ItemKind::Mod(..) | ItemKind::Trait(..) | ItemKind::TraitAlias(..) |
             ItemKind::Enum(..) | ItemKind::Struct(..) | ItemKind::Union(..) |
-            ItemKind::Existential(..) | ItemKind::ExternCrate(..) | ItemKind::ForeignMod(..) |
-            ItemKind::Ty(..) => DefPathData::TypeNs(i.ident.as_interned_str()),
+            ItemKind::OpaqueTy(..) | ItemKind::ExternCrate(..) | ItemKind::ForeignMod(..) |
+            ItemKind::TyAlias(..) => DefPathData::TypeNs(i.ident.as_interned_str()),
             ItemKind::Fn(
                 ref decl,
                 ref header,
@@ -155,11 +155,11 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
     }
 
     fn visit_variant(&mut self, v: &'a Variant, g: &'a Generics, item_id: NodeId) {
-        let def = self.create_def(v.node.id,
-                                  DefPathData::TypeNs(v.node.ident.as_interned_str()),
+        let def = self.create_def(v.id,
+                                  DefPathData::TypeNs(v.ident.as_interned_str()),
                                   v.span);
         self.with_parent(def, |this| {
-            if let Some(ctor_hir_id) = v.node.data.ctor_id() {
+            if let Some(ctor_hir_id) = v.data.ctor_id() {
                 this.create_def(ctor_hir_id, DefPathData::Ctor, v.span);
             }
             visit::walk_variant(this, v, g, item_id)
@@ -222,8 +222,8 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
             }
             ImplItemKind::Method(..) | ImplItemKind::Const(..) =>
                 DefPathData::ValueNs(ii.ident.as_interned_str()),
-            ImplItemKind::Type(..) |
-            ImplItemKind::Existential(..) => {
+            ImplItemKind::TyAlias(..) |
+            ImplItemKind::OpaqueTy(..) => {
                 DefPathData::TypeNs(ii.ident.as_interned_str())
             },
             ImplItemKind::Macro(..) => return self.visit_macro_invoc(ii.id),

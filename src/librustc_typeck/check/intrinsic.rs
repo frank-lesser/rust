@@ -67,11 +67,11 @@ pub fn intrisic_operation_unsafety(intrinsic: &str) -> hir::Unsafety {
     match intrinsic {
         "size_of" | "min_align_of" | "needs_drop" |
         "add_with_overflow" | "sub_with_overflow" | "mul_with_overflow" |
-        "overflowing_add" | "overflowing_sub" | "overflowing_mul" |
+        "wrapping_add" | "wrapping_sub" | "wrapping_mul" |
         "saturating_add" | "saturating_sub" |
         "rotate_left" | "rotate_right" |
         "ctpop" | "ctlz" | "cttz" | "bswap" | "bitreverse" |
-        "minnumf32" | "minnumf64" | "maxnumf32" | "maxnumf64"
+        "minnumf32" | "minnumf64" | "maxnumf32" | "maxnumf64" | "type_name"
         => hir::Unsafety::Normal,
         _ => hir::Unsafety::Unsafe,
     }
@@ -145,6 +145,7 @@ pub fn check_intrinsic_type(tcx: TyCtxt<'_>, it: &hir::ForeignItem) {
             "rustc_peek" => (1, vec![param(0)], param(0)),
             "panic_if_uninhabited" => (1, Vec::new(), tcx.mk_unit()),
             "init" => (1, Vec::new(), param(0)),
+            "uninit" => (1, Vec::new(), param(0)),
             "forget" => (1, vec![param(0)], tcx.mk_unit()),
             "transmute" => (2, vec![ param(0) ], param(1)),
             "move_val_init" => {
@@ -313,7 +314,7 @@ pub fn check_intrinsic_type(tcx: TyCtxt<'_>, it: &hir::ForeignItem) {
                 (1, vec![param(0), param(0)], param(0)),
             "unchecked_add" | "unchecked_sub" | "unchecked_mul" =>
                 (1, vec![param(0), param(0)], param(0)),
-            "overflowing_add" | "overflowing_sub" | "overflowing_mul" =>
+            "wrapping_add" | "wrapping_sub" | "wrapping_mul" =>
                 (1, vec![param(0), param(0)], param(0)),
             "saturating_add" | "saturating_sub" =>
                 (1, vec![param(0), param(0)], param(0)),

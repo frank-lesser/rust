@@ -263,7 +263,7 @@ pub fn write_mir_pretty<'tcx>(
 
         write_mir_fn(tcx, MirSource::item(def_id), body, &mut |_, _| Ok(()), w)?;
 
-        for (i, body) in body.promoted.iter_enumerated() {
+        for (i, body) in tcx.promoted_mir(def_id).iter_enumerated() {
             writeln!(w, "")?;
             let src = MirSource {
                 instance: ty::InstanceDef::Item(def_id),
@@ -397,10 +397,9 @@ impl ExtraComments<'tcx> {
 impl Visitor<'tcx> for ExtraComments<'tcx> {
     fn visit_constant(&mut self, constant: &Constant<'tcx>, location: Location) {
         self.super_constant(constant, location);
-        let Constant { span, ty, user_ty, literal } = constant;
+        let Constant { span, user_ty, literal } = constant;
         self.push("mir::Constant");
         self.push(&format!("+ span: {:?}", span));
-        self.push(&format!("+ ty: {:?}", ty));
         if let Some(user_ty) = user_ty {
             self.push(&format!("+ user_ty: {:?}", user_ty));
         }

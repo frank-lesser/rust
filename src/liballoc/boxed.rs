@@ -1,6 +1,6 @@
 //! A pointer type for heap allocation.
 //!
-//! `Box<T>`, casually referred to as a 'box', provides the simplest form of
+//! [`Box<T>`], casually referred to as a 'box', provides the simplest form of
 //! heap allocation in Rust. Boxes provide ownership for this allocation, and
 //! drop their contents when they go out of scope.
 //!
@@ -48,7 +48,7 @@
 //!
 //! It wouldn't work. This is because the size of a `List` depends on how many
 //! elements are in the list, and so we don't know how much memory to allocate
-//! for a `Cons`. By introducing a `Box`, which has a defined size, we know how
+//! for a `Cons`. By introducing a [`Box<T>`], which has a defined size, we know how
 //! big `Cons` needs to be.
 //!
 //! # Memory layout
@@ -59,22 +59,27 @@
 //! [`Layout`] used with the allocator is correct for the type. More precisely,
 //! a `value: *mut T` that has been allocated with the [`Global`] allocator
 //! with `Layout::for_value(&*value)` may be converted into a box using
-//! `Box::<T>::from_raw(value)`. Conversely, the memory backing a `value: *mut
-//! T` obtained from `Box::<T>::into_raw` may be deallocated using the
-//! [`Global`] allocator with `Layout::for_value(&*value)`.
+//! [`Box::<T>::from_raw(value)`]. Conversely, the memory backing a `value: *mut
+//! T` obtained from [`Box::<T>::into_raw`] may be deallocated using the
+//! [`Global`] allocator with [`Layout::for_value(&*value)`].
 //!
 //!
 //! [dereferencing]: ../../std/ops/trait.Deref.html
 //! [`Box`]: struct.Box.html
+//! [`Box<T>`]: struct.Box.html
+//! [`Box::<T>::from_raw(value)`]: struct.Box.html#method.from_raw
+//! [`Box::<T>::into_raw`]: struct.Box.html#method.into_raw
 //! [`Global`]: ../alloc/struct.Global.html
 //! [`Layout`]: ../alloc/struct.Layout.html
+//! [`Layout::for_value(&*value)`]: ../alloc/struct.Layout.html#method.for_value
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use core::any::Any;
+use core::array::LengthAtMost32;
 use core::borrow;
 use core::cmp::Ordering;
-use core::convert::From;
+use core::convert::{From, TryFrom};
 use core::fmt;
 use core::future::Future;
 use core::hash::{Hash, Hasher};
@@ -86,8 +91,10 @@ use core::ops::{
     CoerceUnsized, DispatchFromDyn, Deref, DerefMut, Receiver, Generator, GeneratorState
 };
 use core::ptr::{self, NonNull, Unique};
+use core::slice;
 use core::task::{Context, Poll};
 
+use crate::alloc::{self, Global, Alloc};
 use crate::vec::Vec;
 use crate::raw_vec::RawVec;
 use crate::str::from_boxed_utf8_unchecked;
@@ -116,12 +123,145 @@ impl<T> Box<T> {
         box x
     }
 
+    /// Constructs a new box with uninitialized contents.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit)]
+    ///
+    /// let mut five = Box::<u32>::new_uninit();
+    ///
+    /// let five = unsafe {
+    ///     // Deferred initialization:
+    ///     five.as_mut_ptr().write(5);
+    ///
+    ///     five.assume_init()
+    /// };
+    ///
+    /// assert_eq!(*five, 5)
+    /// ```
+    #[unstable(feature = "new_uninit", issue = "63291")]
+    pub fn new_uninit() -> Box<mem::MaybeUninit<T>> {
+        let layout = alloc::Layout::new::<mem::MaybeUninit<T>>();
+        let ptr = unsafe {
+            Global.alloc(layout)
+                .unwrap_or_else(|_| alloc::handle_alloc_error(layout))
+        };
+        Box(ptr.cast().into())
+    }
+
     /// Constructs a new `Pin<Box<T>>`. If `T` does not implement `Unpin`, then
     /// `x` will be pinned in memory and unable to be moved.
     #[stable(feature = "pin", since = "1.33.0")]
     #[inline(always)]
     pub fn pin(x: T) -> Pin<Box<T>> {
         (box x).into()
+    }
+}
+
+impl<T> Box<[T]> {
+    /// Constructs a new boxed slice with uninitialized contents.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit)]
+    ///
+    /// let mut values = Box::<[u32]>::new_uninit_slice(3);
+    ///
+    /// let values = unsafe {
+    ///     // Deferred initialization:
+    ///     values[0].as_mut_ptr().write(1);
+    ///     values[1].as_mut_ptr().write(2);
+    ///     values[2].as_mut_ptr().write(3);
+    ///
+    ///     values.assume_init()
+    /// };
+    ///
+    /// assert_eq!(*values, [1, 2, 3])
+    /// ```
+    #[unstable(feature = "new_uninit", issue = "63291")]
+    pub fn new_uninit_slice(len: usize) -> Box<[mem::MaybeUninit<T>]> {
+        let layout = alloc::Layout::array::<mem::MaybeUninit<T>>(len).unwrap();
+        let ptr = unsafe { alloc::alloc(layout) };
+        let unique = Unique::new(ptr).unwrap_or_else(|| alloc::handle_alloc_error(layout));
+        let slice = unsafe { slice::from_raw_parts_mut(unique.cast().as_ptr(), len) };
+        Box(Unique::from(slice))
+    }
+}
+
+impl<T> Box<mem::MaybeUninit<T>> {
+    /// Converts to `Box<T>`.
+    ///
+    /// # Safety
+    ///
+    /// As with [`MaybeUninit::assume_init`],
+    /// it is up to the caller to guarantee that the value
+    /// really is in an initialized state.
+    /// Calling this when the content is not yet fully initialized
+    /// causes immediate undefined behavior.
+    ///
+    /// [`MaybeUninit::assume_init`]: ../../std/mem/union.MaybeUninit.html#method.assume_init
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit)]
+    ///
+    /// let mut five = Box::<u32>::new_uninit();
+    ///
+    /// let five: Box<u32> = unsafe {
+    ///     // Deferred initialization:
+    ///     five.as_mut_ptr().write(5);
+    ///
+    ///     five.assume_init()
+    /// };
+    ///
+    /// assert_eq!(*five, 5)
+    /// ```
+    #[unstable(feature = "new_uninit", issue = "63291")]
+    #[inline]
+    pub unsafe fn assume_init(self) -> Box<T> {
+        Box(Box::into_unique(self).cast())
+    }
+}
+
+impl<T> Box<[mem::MaybeUninit<T>]> {
+    /// Converts to `Box<[T]>`.
+    ///
+    /// # Safety
+    ///
+    /// As with [`MaybeUninit::assume_init`],
+    /// it is up to the caller to guarantee that the values
+    /// really are in an initialized state.
+    /// Calling this when the content is not yet fully initialized
+    /// causes immediate undefined behavior.
+    ///
+    /// [`MaybeUninit::assume_init`]: ../../std/mem/union.MaybeUninit.html#method.assume_init
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit)]
+    ///
+    /// let mut values = Box::<[u32]>::new_uninit_slice(3);
+    ///
+    /// let values = unsafe {
+    ///     // Deferred initialization:
+    ///     values[0].as_mut_ptr().write(1);
+    ///     values[1].as_mut_ptr().write(2);
+    ///     values[2].as_mut_ptr().write(3);
+    ///
+    ///     values.assume_init()
+    /// };
+    ///
+    /// assert_eq!(*values, [1, 2, 3])
+    /// ```
+    #[unstable(feature = "new_uninit", issue = "63291")]
+    #[inline]
+    pub unsafe fn assume_init(self) -> Box<[T]> {
+        Box(Unique::new_unchecked(Box::into_raw(self) as _))
     }
 }
 
@@ -605,6 +745,22 @@ impl From<Box<str>> for Box<[u8]> {
     #[inline]
     fn from(s: Box<str>) -> Self {
         unsafe { Box::from_raw(Box::into_raw(s) as *mut [u8]) }
+    }
+}
+
+#[unstable(feature = "boxed_slice_try_from", issue = "0")]
+impl<T, const N: usize> TryFrom<Box<[T]>> for Box<[T; N]>
+where
+    [T; N]: LengthAtMost32,
+{
+    type Error = Box<[T]>;
+
+    fn try_from(boxed_slice: Box<[T]>) -> Result<Self, Self::Error> {
+        if boxed_slice.len() == N {
+            Ok(unsafe { Box::from_raw(Box::into_raw(boxed_slice) as *mut [T; N]) })
+        } else {
+            Err(boxed_slice)
+        }
     }
 }
 

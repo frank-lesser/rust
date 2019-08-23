@@ -109,8 +109,8 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
                 let b_llval = bx.const_usize((end - start) as u64);
                 OperandValue::Pair(a_llval, b_llval)
             },
-            ConstValue::ByRef { offset, align, alloc } => {
-                return bx.load_operand(bx.from_const_alloc(layout, align, alloc, offset));
+            ConstValue::ByRef { alloc, offset } => {
+                return bx.load_operand(bx.from_const_alloc(layout, alloc, offset));
             },
         };
 
@@ -380,11 +380,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     fn maybe_codegen_consume_direct(
         &mut self,
         bx: &mut Bx,
-        place: &mir::Place<'tcx>
+        place_ref: &mir::PlaceRef<'_, 'tcx>
     ) -> Option<OperandRef<'tcx, Bx::Value>> {
-        debug!("maybe_codegen_consume_direct(place={:?})", place);
+        debug!("maybe_codegen_consume_direct(place_ref={:?})", place_ref);
 
-        place.iterate(|place_base, place_projection| {
+        place_ref.iterate(|place_base, place_projection| {
             if let mir::PlaceBase::Local(index) = place_base {
                 match self.locals[*index] {
                     LocalRef::Operand(Some(mut o)) => {
@@ -413,7 +413,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         Some(o)
                     }
                     LocalRef::Operand(None) => {
-                        bug!("use of {:?} before def", place);
+                        bug!("use of {:?} before def", place_ref);
                     }
                     LocalRef::Place(..) | LocalRef::UnsizedPlace(..) => {
                         // watch out for locals that do not have an
@@ -430,11 +430,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     pub fn codegen_consume(
         &mut self,
         bx: &mut Bx,
-        place: &mir::Place<'tcx>
+        place_ref: &mir::PlaceRef<'_, 'tcx>
     ) -> OperandRef<'tcx, Bx::Value> {
-        debug!("codegen_consume(place={:?})", place);
+        debug!("codegen_consume(place_ref={:?})", place_ref);
 
-        let ty = self.monomorphized_place_ty(place);
+        let ty = self.monomorphized_place_ty(place_ref);
         let layout = bx.cx().layout_of(ty);
 
         // ZSTs don't require any actual memory access.
@@ -442,13 +442,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return OperandRef::new_zst(bx, layout);
         }
 
-        if let Some(o) = self.maybe_codegen_consume_direct(bx, place) {
+        if let Some(o) = self.maybe_codegen_consume_direct(bx, place_ref) {
             return o;
         }
 
         // for most places, to consume them we just load them
         // out from their home
-        let place = self.codegen_place(bx, place);
+        let place = self.codegen_place(bx, place_ref);
         bx.load_operand(place)
     }
 
@@ -462,11 +462,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         match *operand {
             mir::Operand::Copy(ref place) |
             mir::Operand::Move(ref place) => {
-                self.codegen_consume(bx, place)
+                self.codegen_consume(bx, &place.as_ref())
             }
 
             mir::Operand::Constant(ref constant) => {
-                let ty = self.monomorphize(&constant.ty);
                 self.eval_mir_constant(constant)
                     .map(|c| OperandRef::from_const(bx, c))
                     .unwrap_or_else(|err| {
@@ -481,6 +480,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         // the above error (or silence it under some conditions) will not cause UB
                         bx.abort();
                         // We've errored, so we don't have to produce working code.
+                        let ty = self.monomorphize(&constant.literal.ty);
                         let layout = bx.cx().layout_of(ty);
                         bx.load_operand(PlaceRef::new_sized(
                             bx.cx().const_undef(bx.cx().type_ptr_to(bx.cx().backend_type(layout))),

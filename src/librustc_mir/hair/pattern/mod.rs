@@ -162,7 +162,7 @@ pub enum PatternKind<'tcx> {
 
     /// Matches against a slice, checking the length and extracting elements.
     /// irrefutable when there is a slice pattern and both `prefix` and `suffix` are empty.
-    /// e.g., `&[ref xs..]`.
+    /// e.g., `&[ref xs @ ..]`.
     Slice {
         prefix: Vec<Pattern<'tcx>>,
         slice: Option<Pattern<'tcx>>,
@@ -175,18 +175,35 @@ pub enum PatternKind<'tcx> {
         slice: Option<Pattern<'tcx>>,
         suffix: Vec<Pattern<'tcx>>,
     },
+
+    /// An or-pattern, e.g. `p | q`.
+    /// Invariant: `pats.len() >= 2`.
+    Or {
+        pats: Vec<Pattern<'tcx>>,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct PatternRange<'tcx> {
     pub lo: &'tcx ty::Const<'tcx>,
     pub hi: &'tcx ty::Const<'tcx>,
-    pub ty: Ty<'tcx>,
     pub end: RangeEnd,
 }
 
 impl<'tcx> fmt::Display for Pattern<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Printing lists is a chore.
+        let mut first = true;
+        let mut start_or_continue = |s| {
+            if first {
+                first = false;
+                ""
+            } else {
+                s
+            }
+        };
+        let mut start_or_comma = || start_or_continue(", ");
+
         match *self.kind {
             PatternKind::Wild => write!(f, "_"),
             PatternKind::AscribeUserType { ref subpattern, .. } =>
@@ -225,9 +242,6 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
                     }
                 };
 
-                let mut first = true;
-                let mut start_or_continue = || if first { first = false; "" } else { ", " };
-
                 if let Some(variant) = variant {
                     write!(f, "{}", variant.ident)?;
 
@@ -242,12 +256,12 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
                                 continue;
                             }
                             let name = variant.fields[p.field.index()].ident;
-                            write!(f, "{}{}: {}", start_or_continue(), name, p.pattern)?;
+                            write!(f, "{}{}: {}", start_or_comma(), name, p.pattern)?;
                             printed += 1;
                         }
 
                         if printed < variant.fields.len() {
-                            write!(f, "{}..", start_or_continue())?;
+                            write!(f, "{}..", start_or_comma())?;
                         }
 
                         return write!(f, " }}");
@@ -258,7 +272,7 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
                 if num_fields != 0 || variant.is_none() {
                     write!(f, "(")?;
                     for i in 0..num_fields {
-                        write!(f, "{}", start_or_continue())?;
+                        write!(f, "{}", start_or_comma())?;
 
                         // Common case: the field is where we expect it.
                         if let Some(p) = subpatterns.get(i) {
@@ -296,7 +310,7 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
             PatternKind::Constant { value } => {
                 write!(f, "{}", value)
             }
-            PatternKind::Range(PatternRange { lo, hi, ty: _, end }) => {
+            PatternKind::Range(PatternRange { lo, hi, end }) => {
                 write!(f, "{}", lo)?;
                 match end {
                     RangeEnd::Included => write!(f, "..=")?,
@@ -306,14 +320,12 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
             }
             PatternKind::Slice { ref prefix, ref slice, ref suffix } |
             PatternKind::Array { ref prefix, ref slice, ref suffix } => {
-                let mut first = true;
-                let mut start_or_continue = || if first { first = false; "" } else { ", " };
                 write!(f, "[")?;
                 for p in prefix {
-                    write!(f, "{}{}", start_or_continue(), p)?;
+                    write!(f, "{}{}", start_or_comma(), p)?;
                 }
                 if let Some(ref slice) = *slice {
-                    write!(f, "{}", start_or_continue())?;
+                    write!(f, "{}", start_or_comma())?;
                     match *slice.kind {
                         PatternKind::Wild => {}
                         _ => write!(f, "{}", slice)?
@@ -321,9 +333,15 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
                     write!(f, "..")?;
                 }
                 for p in suffix {
-                    write!(f, "{}{}", start_or_continue(), p)?;
+                    write!(f, "{}{}", start_or_comma(), p)?;
                 }
                 write!(f, "]")
+            }
+            PatternKind::Or { ref pats } => {
+                for pat in pats {
+                    write!(f, "{}{}", start_or_continue(" | "), pat)?;
+                }
+                Ok(())
             }
         }
     }
@@ -442,15 +460,18 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
 
                 let mut kind = match (lo, hi) {
                     (PatternKind::Constant { value: lo }, PatternKind::Constant { value: hi }) => {
+                        assert_eq!(lo.ty, ty);
+                        assert_eq!(hi.ty, ty);
                         let cmp = compare_const_vals(
                             self.tcx,
                             lo,
                             hi,
-                            self.param_env.and(ty),
+                            self.param_env,
+                            ty,
                         );
                         match (end, cmp) {
                             (RangeEnd::Excluded, Some(Ordering::Less)) =>
-                                PatternKind::Range(PatternRange { lo, hi, ty, end }),
+                                PatternKind::Range(PatternRange { lo, hi, end }),
                             (RangeEnd::Excluded, _) => {
                                 span_err!(
                                     self.tcx.sess,
@@ -464,7 +485,7 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                                 PatternKind::Constant { value: lo }
                             }
                             (RangeEnd::Included, Some(Ordering::Less)) => {
-                                PatternKind::Range(PatternRange { lo, hi, ty, end })
+                                PatternKind::Range(PatternRange { lo, hi, end })
                             }
                             (RangeEnd::Included, _) => {
                                 let mut err = struct_span_err!(
@@ -644,14 +665,20 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                     fields.iter()
                           .map(|field| {
                               FieldPattern {
-                                  field: Field::new(self.tcx.field_index(field.node.hir_id,
+                                  field: Field::new(self.tcx.field_index(field.hir_id,
                                                                          self.tables)),
-                                  pattern: self.lower_pattern(&field.node.pat),
+                                  pattern: self.lower_pattern(&field.pat),
                               }
                           })
                           .collect();
 
                 self.lower_variant_or_leaf(res, pat.hir_id, pat.span, ty, subpatterns)
+            }
+
+            PatKind::Or(ref pats) => {
+                PatternKind::Or {
+                    pats: pats.iter().map(|p| self.lower_pattern(p)).collect(),
+                }
             }
         };
 
@@ -728,7 +755,7 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
 
             ty::Array(_, len) => {
                 // fixed-length array
-                let len = len.unwrap_usize(self.tcx);
+                let len = len.eval_usize(self.tcx, self.param_env);
                 assert!(len >= prefix.len() as u64 + suffix.len() as u64);
                 PatternKind::Array { prefix: prefix, slice: slice, suffix: suffix }
             }
@@ -1123,7 +1150,7 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
             }
             ty::Array(_, n) => {
                 PatternKind::Array {
-                    prefix: (0..n.unwrap_usize(self.tcx))
+                    prefix: (0..n.eval_usize(self.tcx, self.param_env))
                         .map(|i| adt_subpattern(i as usize, None))
                         .collect(),
                     slice: None,
@@ -1206,7 +1233,8 @@ fn search_for_adt_without_structural_match<'tcx>(tcx: TyCtxt<'tcx>,
                     // (But still tell caller to continue search.)
                     return false;
                 }
-                ty::Array(_, n) if n.assert_usize(self.tcx) == Some(0) => {
+                ty::Array(_, n) if n.try_eval_usize(self.tcx, ty::ParamEnv::reveal_all()) == Some(0)
+                => {
                     // rust-lang/rust#62336: ignore type of contents
                     // for empty array.
                     return false;
@@ -1414,17 +1442,7 @@ impl<'tcx> PatternFoldable<'tcx> for PatternKind<'tcx> {
             } => PatternKind::Constant {
                 value,
             },
-            PatternKind::Range(PatternRange {
-                lo,
-                hi,
-                ty,
-                end,
-            }) => PatternKind::Range(PatternRange {
-                lo,
-                hi,
-                ty: ty.fold_with(folder),
-                end,
-            }),
+            PatternKind::Range(range) => PatternKind::Range(range),
             PatternKind::Slice {
                 ref prefix,
                 ref slice,
@@ -1443,6 +1461,7 @@ impl<'tcx> PatternFoldable<'tcx> for PatternKind<'tcx> {
                 slice: slice.fold_with(folder),
                 suffix: suffix.fold_with(folder)
             },
+            PatternKind::Or { ref pats } => PatternKind::Or { pats: pats.fold_with(folder) },
         }
     }
 }
@@ -1451,7 +1470,8 @@ pub fn compare_const_vals<'tcx>(
     tcx: TyCtxt<'tcx>,
     a: &'tcx ty::Const<'tcx>,
     b: &'tcx ty::Const<'tcx>,
-    ty: ty::ParamEnvAnd<'tcx, Ty<'tcx>>,
+    param_env: ty::ParamEnv<'tcx>,
+    ty: Ty<'tcx>,
 ) -> Option<Ordering> {
     trace!("compare_const_vals: {:?}, {:?}", a, b);
 
@@ -1466,15 +1486,16 @@ pub fn compare_const_vals<'tcx>(
     let fallback = || from_bool(a == b);
 
     // Use the fallback if any type differs
-    if a.ty != b.ty || a.ty != ty.value {
+    if a.ty != b.ty || a.ty != ty {
         return fallback();
     }
 
-    // FIXME: This should use assert_bits(ty) instead of use_bits
-    // but triggers possibly bugs due to mismatching of arrays and slices
-    if let (Some(a), Some(b)) = (a.to_bits(tcx, ty), b.to_bits(tcx, ty)) {
+    let a_bits = a.try_eval_bits(tcx, param_env, ty);
+    let b_bits = b.try_eval_bits(tcx, param_env, ty);
+
+    if let (Some(a), Some(b)) = (a_bits, b_bits) {
         use ::rustc_apfloat::Float;
-        return match ty.value.sty {
+        return match ty.sty {
             ty::Float(ast::FloatTy::F32) => {
                 let l = ::rustc_apfloat::ieee::Single::from_bits(a);
                 let r = ::rustc_apfloat::ieee::Single::from_bits(b);
@@ -1497,7 +1518,7 @@ pub fn compare_const_vals<'tcx>(
         }
     }
 
-    if let ty::Str = ty.value.sty {
+    if let ty::Str = ty.sty {
         match (a.val, b.val) {
             (
                 ConstValue::Slice { data: alloc_a, start: offset_a, end: end_a },

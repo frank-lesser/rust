@@ -23,7 +23,7 @@ use crate::lint::{LintArray, Level, Lint, LintId, LintPass, LintBuffer};
 use crate::lint::builtin::BuiltinLintDiagnostics;
 use crate::lint::levels::{LintLevelSets, LintLevelsBuilder};
 use crate::middle::privacy::AccessLevels;
-use crate::rustc_serialize::{Decoder, Decodable, Encoder, Encodable};
+use rustc_serialize::{Decoder, Decodable, Encoder, Encodable};
 use crate::session::{config, early_error, Session};
 use crate::ty::{self, print::Printer, subst::Kind, TyCtxt, Ty};
 use crate::ty::layout::{LayoutError, LayoutOf, TyLayout};
@@ -966,6 +966,13 @@ for LateContextAndPass<'a, 'tcx, T> {
         self.context.tables = old_tables;
     }
 
+    fn visit_arg(&mut self, arg: &'tcx hir::Arg) {
+        self.with_lint_attrs(arg.hir_id, &arg.attrs, |cx| {
+            lint_callback!(cx, check_arg, arg);
+            hir_visit::walk_arg(cx, arg);
+        });
+    }
+
     fn visit_body(&mut self, body: &'tcx hir::Body) {
         lint_callback!(self, check_body, body);
         hir_visit::walk_body(self, body);
@@ -1053,7 +1060,7 @@ for LateContextAndPass<'a, 'tcx, T> {
                      v: &'tcx hir::Variant,
                      g: &'tcx hir::Generics,
                      item_id: hir::HirId) {
-        self.with_lint_attrs(v.node.id, &v.node.attrs, |cx| {
+        self.with_lint_attrs(v.id, &v.attrs, |cx| {
             lint_callback!(cx, check_variant, v, g);
             hir_visit::walk_variant(cx, v, g, item_id);
             lint_callback!(cx, check_variant_post, v, g);
@@ -1156,6 +1163,13 @@ for LateContextAndPass<'a, 'tcx, T> {
 }
 
 impl<'a, T: EarlyLintPass> ast_visit::Visitor<'a> for EarlyContextAndPass<'a, T> {
+    fn visit_arg(&mut self, arg: &'a ast::Arg) {
+        self.with_lint_attrs(arg.id, &arg.attrs, |cx| {
+            run_early_pass!(cx, check_arg, arg);
+            ast_visit::walk_arg(cx, arg);
+        });
+    }
+
     fn visit_item(&mut self, it: &'a ast::Item) {
         self.with_lint_attrs(it.id, &it.attrs, |cx| {
             run_early_pass!(cx, check_item, it);
@@ -1222,7 +1236,7 @@ impl<'a, T: EarlyLintPass> ast_visit::Visitor<'a> for EarlyContextAndPass<'a, T>
     }
 
     fn visit_variant(&mut self, v: &'a ast::Variant, g: &'a ast::Generics, item_id: ast::NodeId) {
-        self.with_lint_attrs(item_id, &v.node.attrs, |cx| {
+        self.with_lint_attrs(item_id, &v.attrs, |cx| {
             run_early_pass!(cx, check_variant, v, g);
             ast_visit::walk_variant(cx, v, g, item_id);
             run_early_pass!(cx, check_variant_post, v, g);
@@ -1331,7 +1345,7 @@ impl<'a, T: EarlyLintPass> ast_visit::Visitor<'a> for EarlyContextAndPass<'a, T>
         // part of `walk_mac`, and (b) we should be calling
         // `visit_path`, *but* that would require a `NodeId`, and I
         // want to get #53686 fixed quickly. -nmatsakis
-        ast_visit::walk_path(self, &mac.node.path);
+        ast_visit::walk_path(self, &mac.path);
 
         run_early_pass!(self, check_mac, mac);
     }
@@ -1341,7 +1355,7 @@ struct LateLintPassObjects<'a> {
     lints: &'a mut [LateLintPassObject],
 }
 
-#[cfg_attr(not(bootstrap), allow(rustc::lint_pass_impl_without_macro))]
+#[allow(rustc::lint_pass_impl_without_macro)]
 impl LintPass for LateLintPassObjects<'_> {
     fn name(&self) -> &'static str {
         panic!()
@@ -1511,7 +1525,7 @@ struct EarlyLintPassObjects<'a> {
     lints: &'a mut [EarlyLintPassObject],
 }
 
-#[cfg_attr(not(bootstrap), allow(rustc::lint_pass_impl_without_macro))]
+#[allow(rustc::lint_pass_impl_without_macro)]
 impl LintPass for EarlyLintPassObjects<'_> {
     fn name(&self) -> &'static str {
         panic!()

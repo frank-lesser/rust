@@ -33,6 +33,9 @@ fn item_might_be_inlined(tcx: TyCtxt<'tcx>, item: &hir::Item, attrs: CodegenFnAt
     }
 
     match item.node {
+        hir::ItemKind::Fn(_, header, ..) if header.is_const() => {
+            return true;
+        }
         hir::ItemKind::Impl(..) |
         hir::ItemKind::Fn(..) => {
             let generics = tcx.generics_of(tcx.hir().local_def_id(item.hir_id));
@@ -51,6 +54,11 @@ fn method_might_be_inlined(
     let generics = tcx.generics_of(tcx.hir().local_def_id(impl_item.hir_id));
     if codegen_fn_attrs.requests_inline() || generics.requires_monomorphization(tcx) {
         return true
+    }
+    if let hir::ImplItemKind::Method(method_sig, _) = &impl_item.node {
+        if method_sig.header.is_const() {
+            return true
+        }
     }
     if let Some(impl_hir_id) = tcx.hir().as_local_hir_id(impl_src) {
         match tcx.hir().find(impl_hir_id) {
@@ -188,8 +196,8 @@ impl<'a, 'tcx> ReachableContext<'a, 'tcx> {
                             }
                         }
                     }
-                    hir::ImplItemKind::Existential(..) |
-                    hir::ImplItemKind::Type(_) => false,
+                    hir::ImplItemKind::OpaqueTy(..) |
+                    hir::ImplItemKind::TyAlias(_) => false,
                 }
             }
             Some(_) => false,
@@ -263,8 +271,8 @@ impl<'a, 'tcx> ReachableContext<'a, 'tcx> {
                     // worklist, as determined by the privacy pass
                     hir::ItemKind::ExternCrate(_) |
                     hir::ItemKind::Use(..) |
-                    hir::ItemKind::Existential(..) |
-                    hir::ItemKind::Ty(..) |
+                    hir::ItemKind::OpaqueTy(..) |
+                    hir::ItemKind::TyAlias(..) |
                     hir::ItemKind::Static(..) |
                     hir::ItemKind::Mod(..) |
                     hir::ItemKind::ForeignMod(..) |
@@ -301,8 +309,8 @@ impl<'a, 'tcx> ReachableContext<'a, 'tcx> {
                             self.visit_nested_body(body)
                         }
                     }
-                    hir::ImplItemKind::Existential(..) |
-                    hir::ImplItemKind::Type(_) => {}
+                    hir::ImplItemKind::OpaqueTy(..) |
+                    hir::ImplItemKind::TyAlias(_) => {}
                 }
             }
             Node::Expr(&hir::Expr { node: hir::ExprKind::Closure(.., body, _, _), .. }) => {

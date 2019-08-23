@@ -1417,7 +1417,7 @@ fn confirm_callable_candidate<'cx, 'tcx>(
                 projection_ty: ty::ProjectionTy::from_ref_and_name(
                     tcx,
                     trait_ref,
-                    Ident::with_empty_ctxt(FN_OUTPUT_NAME),
+                    Ident::with_dummy_span(FN_OUTPUT_NAME),
                 ),
                 ty: ret_type
             }
@@ -1492,7 +1492,7 @@ fn confirm_impl_candidate<'cx, 'tcx>(
         };
     }
     let substs = translate_substs(selcx.infcx(), param_env, impl_def_id, substs, assoc_ty.node);
-    let ty = if let ty::AssocKind::Existential = assoc_ty.item.kind {
+    let ty = if let ty::AssocKind::OpaqueTy = assoc_ty.item.kind {
         let item_substs = InternalSubsts::identity_for_item(tcx, assoc_ty.item.def_id);
         tcx.mk_opaque(assoc_ty.item.def_id, item_substs)
     } else {

@@ -16,14 +16,13 @@
 
 #![recursion_limit="256"]
 
-#![deny(rust_2018_idioms)]
-#![deny(unused_lifetimes)]
-
 pub extern crate getopts;
 #[cfg(unix)]
 extern crate libc;
 #[macro_use]
 extern crate log;
+
+pub extern crate rustc_plugin_impl as plugin;
 
 use pretty::{PpMode, UserIdentifiedItem};
 
@@ -46,7 +45,7 @@ use rustc_interface::interface;
 use rustc_interface::util::get_codegen_sysroot;
 use rustc_data_structures::sync::SeqCst;
 
-use serialize::json::ToJson;
+use rustc_serialize::json::ToJson;
 
 use std::borrow::Cow;
 use std::cmp::max;
@@ -69,6 +68,7 @@ use syntax::symbol::sym;
 use syntax_pos::{DUMMY_SP, MultiSpan, FileName};
 
 pub mod pretty;
+mod args;
 
 /// Exit status code used for successful compilation and help output.
 pub const EXIT_SUCCESS: i32 = 0;
@@ -105,13 +105,20 @@ pub fn abort_on_err<T>(result: Result<T, ErrorReported>, sess: &Session) -> T {
 pub trait Callbacks {
     /// Called before creating the compiler instance
     fn config(&mut self, _config: &mut interface::Config) {}
-    /// Called after parsing and returns true to continue execution
-    fn after_parsing(&mut self, _compiler: &interface::Compiler) -> bool {
-        true
+    /// Called after parsing. Return value instructs the compiler whether to
+    /// continue the compilation afterwards (defaults to `Compilation::Continue`)
+    fn after_parsing(&mut self, _compiler: &interface::Compiler) -> Compilation {
+        Compilation::Continue
     }
-    /// Called after analysis and returns true to continue execution
-    fn after_analysis(&mut self, _compiler: &interface::Compiler) -> bool {
-        true
+    /// Called after expansion. Return value instructs the compiler whether to
+    /// continue the compilation afterwards (defaults to `Compilation::Continue`)
+    fn after_expansion(&mut self, _compiler: &interface::Compiler) -> Compilation {
+        Compilation::Continue
+    }
+    /// Called after analysis. Return value instructs the compiler whether to
+    /// continue the compilation afterwards (defaults to `Compilation::Continue`)
+    fn after_analysis(&mut self, _compiler: &interface::Compiler) -> Compilation {
+        Compilation::Continue
     }
 }
 
@@ -135,14 +142,22 @@ impl Callbacks for TimePassesCallbacks {
 // See comments on CompilerCalls below for details about the callbacks argument.
 // The FileLoader provides a way to load files from sources other than the file system.
 pub fn run_compiler(
-    args: &[String],
+    at_args: &[String],
     callbacks: &mut (dyn Callbacks + Send),
     file_loader: Option<Box<dyn FileLoader + Send + Sync>>,
     emitter: Option<Box<dyn Write + Send>>
 ) -> interface::Result<()> {
+    let mut args = Vec::new();
+    for arg in at_args {
+        match args::arg_expand(arg.clone()) {
+            Ok(arg) => args.extend(arg),
+            Err(err) => early_error(ErrorOutputType::default(),
+                &format!("Failed to load argument file: {}", err)),
+        }
+    }
     let diagnostic_output = emitter.map(|emitter| DiagnosticOutput::Raw(emitter))
                                    .unwrap_or(DiagnosticOutput::Default);
-    let matches = match handle_options(args) {
+    let matches = match handle_options(&args) {
         Some(matches) => matches,
         None => return Ok(()),
     };
@@ -294,7 +309,7 @@ pub fn run_compiler(
             }
         }
 
-        if !callbacks.after_parsing(compiler) {
+        if callbacks.after_parsing(compiler) == Compilation::Stop {
             return sess.compile_status();
         }
 
@@ -309,6 +324,11 @@ pub fn run_compiler(
         // Lint plugins are registered; now we can process command line flags.
         if sess.opts.describe_lints {
             describe_lints(&sess, &sess.lint_store.borrow(), true);
+            return sess.compile_status();
+        }
+
+        compiler.expansion()?;
+        if callbacks.after_expansion(compiler) == Compilation::Stop {
             return sess.compile_status();
         }
 
@@ -355,7 +375,7 @@ pub fn run_compiler(
 
         compiler.global_ctxt()?.peek_mut().enter(|tcx| tcx.analysis(LOCAL_CRATE))?;
 
-        if !callbacks.after_analysis(compiler) {
+        if callbacks.after_analysis(compiler) == Compilation::Stop {
             return sess.compile_status();
         }
 
@@ -669,7 +689,7 @@ impl RustcDefaultCalls {
 
                     let mut cfgs = sess.parse_sess.config.iter().filter_map(|&(name, ref value)| {
                         let gated_cfg = GatedCfg::gate(&ast::MetaItem {
-                            path: ast::Path::from_ident(ast::Ident::with_empty_ctxt(name)),
+                            path: ast::Path::from_ident(ast::Ident::with_dummy_span(name)),
                             node: ast::MetaItemKind::Word,
                             span: DUMMY_SP,
                         });
@@ -768,13 +788,19 @@ fn usage(verbose: bool, include_unstable_options: bool) {
     } else {
         "\n    --help -v           Print the full set of options rustc accepts"
     };
-    println!("{}\nAdditional help:
+    let at_path = if verbose && nightly_options::is_nightly_build() {
+        "    @path               Read newline separated options from `path`\n"
+    } else {
+        ""
+    };
+    println!("{options}{at_path}\nAdditional help:
     -C help             Print codegen options
     -W help             \
-              Print 'lint' options and default settings{}{}\n",
-             options.usage(message),
-             nightly_help,
-             verbose_help);
+              Print 'lint' options and default settings{nightly}{verbose}\n",
+             options = options.usage(message),
+             at_path = at_path,
+             nightly = nightly_help,
+             verbose = verbose_help);
 }
 
 fn print_wall_help() {
@@ -948,14 +974,11 @@ fn print_flag_list<T>(cmdline_opt: &str,
 /// otherwise returns `None`.
 ///
 /// The compiler's handling of options is a little complicated as it ties into
-/// our stability story, and it's even *more* complicated by historical
-/// accidents. The current intention of each compiler option is to have one of
-/// three modes:
+/// our stability story. The current intention of each compiler option is to
+/// have one of two modes:
 ///
 /// 1. An option is stable and can be used everywhere.
-/// 2. An option is unstable, but was historically allowed on the stable
-///    channel.
-/// 3. An option is unstable, and can only be used on nightly.
+/// 2. An option is unstable, and can only be used on nightly.
 ///
 /// Like unstable library and language features, however, unstable options have
 /// always required a form of "opt in" to indicate that you're using them. This
@@ -998,19 +1021,19 @@ pub fn handle_options(args: &[String]) -> Option<getopts::Matches> {
     //   this option that was passed.
     // * If we're a nightly compiler, then unstable options are now unlocked, so
     //   we're good to go.
-    // * Otherwise, if we're a truly unstable option then we generate an error
+    // * Otherwise, if we're an unstable option then we generate an error
     //   (unstable option being used on stable)
-    // * If we're a historically stable-but-should-be-unstable option then we
-    //   emit a warning that we're going to turn this into an error soon.
     nightly_options::check_nightly_options(&matches, &config::rustc_optgroups());
 
+    // Late check to see if @file was used without unstable options enabled
+    if crate::args::used_unstable_argsfile() && !nightly_options::is_unstable_enabled(&matches) {
+        early_error(ErrorOutputType::default(),
+            "@path is unstable - use -Z unstable-options to enable its use");
+    }
+
     if matches.opt_present("h") || matches.opt_present("help") {
-        // Only show unstable options in --help if we *really* accept unstable
-        // options, which catches the case where we got `-Z unstable-options` on
-        // the stable channel of Rust which was accidentally allowed
-        // historically.
-        usage(matches.opt_present("verbose"),
-              nightly_options::is_unstable_enabled(&matches));
+        // Only show unstable options in --help if we accept unstable options.
+        usage(matches.opt_present("verbose"), nightly_options::is_unstable_enabled(&matches));
         return None;
     }
 
@@ -1188,7 +1211,7 @@ pub fn main() {
     let result = report_ices_to_stderr_if_any(|| {
         let args = env::args_os().enumerate()
             .map(|(i, arg)| arg.into_string().unwrap_or_else(|arg| {
-                early_error(ErrorOutputType::default(),
+                    early_error(ErrorOutputType::default(),
                             &format!("Argument {} is not valid Unicode: {:?}", i, arg))
             }))
             .collect::<Vec<_>>();

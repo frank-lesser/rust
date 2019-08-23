@@ -363,6 +363,14 @@ impl<'a, 'hir> Visitor<'hir> for NodeCollector<'a, 'hir> {
         self.currently_in_body = prev_in_body;
     }
 
+    fn visit_arg(&mut self, arg: &'hir Arg) {
+        let node = Node::Arg(arg);
+        self.insert(arg.pat.span, arg.hir_id, node);
+        self.with_parent(arg.hir_id, |this| {
+            intravisit::walk_arg(this, arg);
+        });
+    }
+
     fn visit_item(&mut self, i: &'hir Item) {
         debug!("visit_item: {:?}", i);
         debug_assert_eq!(i.hir_id.owner,
@@ -536,11 +544,11 @@ impl<'a, 'hir> Visitor<'hir> for NodeCollector<'a, 'hir> {
     }
 
     fn visit_variant(&mut self, v: &'hir Variant, g: &'hir Generics, item_id: HirId) {
-        self.insert(v.span, v.node.id, Node::Variant(v));
-        self.with_parent(v.node.id, |this| {
+        self.insert(v.span, v.id, Node::Variant(v));
+        self.with_parent(v.id, |this| {
             // Register the constructor of this variant.
-            if let Some(ctor_hir_id) = v.node.data.ctor_hir_id() {
-                this.insert(v.span, ctor_hir_id, Node::Ctor(&v.node.data));
+            if let Some(ctor_hir_id) = v.data.ctor_hir_id() {
+                this.insert(v.span, ctor_hir_id, Node::Ctor(&v.data));
             }
             intravisit::walk_variant(this, v, g, item_id);
         });

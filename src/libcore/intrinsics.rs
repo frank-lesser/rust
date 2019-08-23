@@ -36,6 +36,8 @@
             issue = "0")]
 #![allow(missing_docs)]
 
+use crate::mem;
+
 #[stable(feature = "drop_in_place", since = "1.8.0")]
 #[rustc_deprecated(reason = "no longer an intrinsic - use `ptr::drop_in_place` directly",
                    since = "1.18.0")]
@@ -705,10 +707,25 @@ extern "rust-intrinsic" {
                          they should be used through stabilized interfaces \
                          in the rest of the standard library",
                issue = "0")]
-    #[rustc_deprecated(reason = "no longer used by rustc, will be removed - use MaybeUninit \
-                                 instead",
+    #[rustc_deprecated(reason = "superseded by MaybeUninit, removal planned",
                        since = "1.38.0")]
     pub fn init<T>() -> T;
+
+    /// Creates an uninitialized value.
+    ///
+    /// `uninit` is unsafe because there is no guarantee of what its
+    /// contents are. In particular its drop-flag may be set to any
+    /// state, which means it may claim either dropped or
+    /// undropped. In the general case one must use `ptr::write` to
+    /// initialize memory previous set to the result of `uninit`.
+    #[unstable(feature = "core_intrinsics",
+               reason = "intrinsics are unlikely to ever be stabilized, instead \
+                         they should be used through stabilized interfaces \
+                         in the rest of the standard library",
+               issue = "0")]
+    #[rustc_deprecated(reason = "superseded by MaybeUninit, removal planned",
+                       since = "1.38.0")]
+    pub fn uninit<T>() -> T;
 
     /// Moves a value out of scope without running drop glue.
     pub fn forget<T: ?Sized>(_: T);
@@ -1276,17 +1293,39 @@ extern "rust-intrinsic" {
     /// The stabilized versions of this intrinsic are available on the integer
     /// primitives via the `wrapping_add` method. For example,
     /// [`std::u32::wrapping_add`](../../std/primitive.u32.html#method.wrapping_add)
+    #[cfg(boostrap_stdarch_ignore_this)]
     pub fn overflowing_add<T>(a: T, b: T) -> T;
     /// Returns (a - b) mod 2<sup>N</sup>, where N is the width of T in bits.
     /// The stabilized versions of this intrinsic are available on the integer
     /// primitives via the `wrapping_sub` method. For example,
     /// [`std::u32::wrapping_sub`](../../std/primitive.u32.html#method.wrapping_sub)
+    #[cfg(boostrap_stdarch_ignore_this)]
     pub fn overflowing_sub<T>(a: T, b: T) -> T;
     /// Returns (a * b) mod 2<sup>N</sup>, where N is the width of T in bits.
     /// The stabilized versions of this intrinsic are available on the integer
     /// primitives via the `wrapping_mul` method. For example,
     /// [`std::u32::wrapping_mul`](../../std/primitive.u32.html#method.wrapping_mul)
+    #[cfg(boostrap_stdarch_ignore_this)]
     pub fn overflowing_mul<T>(a: T, b: T) -> T;
+
+    /// Returns (a + b) mod 2<sup>N</sup>, where N is the width of T in bits.
+    /// The stabilized versions of this intrinsic are available on the integer
+    /// primitives via the `wrapping_add` method. For example,
+    /// [`std::u32::wrapping_add`](../../std/primitive.u32.html#method.wrapping_add)
+    #[cfg(not(boostrap_stdarch_ignore_this))]
+    pub fn wrapping_add<T>(a: T, b: T) -> T;
+    /// Returns (a - b) mod 2<sup>N</sup>, where N is the width of T in bits.
+    /// The stabilized versions of this intrinsic are available on the integer
+    /// primitives via the `wrapping_sub` method. For example,
+    /// [`std::u32::wrapping_sub`](../../std/primitive.u32.html#method.wrapping_sub)
+    #[cfg(not(boostrap_stdarch_ignore_this))]
+    pub fn wrapping_sub<T>(a: T, b: T) -> T;
+    /// Returns (a * b) mod 2<sup>N</sup>, where N is the width of T in bits.
+    /// The stabilized versions of this intrinsic are available on the integer
+    /// primitives via the `wrapping_mul` method. For example,
+    /// [`std::u32::wrapping_mul`](../../std/primitive.u32.html#method.wrapping_mul)
+    #[cfg(not(boostrap_stdarch_ignore_this))]
+    pub fn wrapping_mul<T>(a: T, b: T) -> T;
 
     /// Computes `a + b`, while saturating at numeric bounds.
     /// The stabilized versions of this intrinsic are available on the integer
@@ -1322,6 +1361,26 @@ extern "rust-intrinsic" {
 // available in this module on stable. See <https://github.com/rust-lang/rust/issues/15702>.
 // (`transmute` also falls into this category, but it cannot be wrapped due to the
 // check that `T` and `U` have the same size.)
+
+/// Checks whether `ptr` is properly aligned with respect to
+/// `align_of::<T>()`.
+pub(crate) fn is_aligned_and_not_null<T>(ptr: *const T) -> bool {
+    !ptr.is_null() && ptr as usize % mem::align_of::<T>() == 0
+}
+
+/// Checks whether the regions of memory starting at `src` and `dst` of size
+/// `count * size_of::<T>()` overlap.
+fn overlaps<T>(src: *const T, dst: *const T, count: usize) -> bool {
+    let src_usize = src as usize;
+    let dst_usize = dst as usize;
+    let size = mem::size_of::<T>().checked_mul(count).unwrap();
+    let diff = if src_usize > dst_usize {
+        src_usize - dst_usize
+    } else {
+        dst_usize - src_usize
+    };
+    size > diff
+}
 
 /// Copies `count * size_of::<T>()` bytes from `src` to `dst`. The source
 /// and destination must *not* overlap.
@@ -1412,7 +1471,11 @@ pub unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
     extern "rust-intrinsic" {
         fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize);
     }
-    copy_nonoverlapping(src, dst, count);
+
+    debug_assert!(is_aligned_and_not_null(src), "attempt to copy from unaligned or null pointer");
+    debug_assert!(is_aligned_and_not_null(dst), "attempt to copy to unaligned or null pointer");
+    debug_assert!(!overlaps(src, dst, count), "attempt to copy to overlapping memory");
+    copy_nonoverlapping(src, dst, count)
 }
 
 /// Copies `count * size_of::<T>()` bytes from `src` to `dst`. The source
@@ -1472,6 +1535,9 @@ pub unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
     extern "rust-intrinsic" {
         fn copy<T>(src: *const T, dst: *mut T, count: usize);
     }
+
+    debug_assert!(is_aligned_and_not_null(src), "attempt to copy from unaligned or null pointer");
+    debug_assert!(is_aligned_and_not_null(dst), "attempt to copy to unaligned or null pointer");
     copy(src, dst, count)
 }
 
@@ -1553,5 +1619,7 @@ pub unsafe fn write_bytes<T>(dst: *mut T, val: u8, count: usize) {
     extern "rust-intrinsic" {
         fn write_bytes<T>(dst: *mut T, val: u8, count: usize);
     }
+
+    debug_assert!(is_aligned_and_not_null(dst), "attempt to write to unaligned or null pointer");
     write_bytes(dst, val, count)
 }

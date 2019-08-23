@@ -4,7 +4,7 @@ use syntax::source_map::{SourceMap, Spanned};
 use syntax::parse::ParseSess;
 use syntax::print::pp::{self, Breaks};
 use syntax::print::pp::Breaks::{Consistent, Inconsistent};
-use syntax::print::pprust::{Comments, PrintState};
+use syntax::print::pprust::{self, Comments, PrintState};
 use syntax::symbol::kw;
 use syntax::util::parser::{self, AssocOp, Fixity};
 use syntax_pos::{self, BytePos, FileName};
@@ -89,6 +89,15 @@ impl std::ops::DerefMut for State<'_> {
 impl<'a> PrintState<'a> for State<'a> {
     fn comments(&mut self) -> &mut Option<Comments<'a>> {
         &mut self.comments
+    }
+
+    fn print_ident(&mut self, ident: ast::Ident) {
+        self.s.word(pprust::ast_ident_to_string(ident, ident.is_raw_guess()));
+        self.ann.post(self, AnnNode::Name(&ident.name))
+    }
+
+    fn print_generic_args(&mut self, args: &ast::GenericArgs, _colons_before_params: bool) {
+        span_bug!(args.span(), "AST generic args printed by HIR pretty-printer");
     }
 }
 
@@ -441,6 +450,24 @@ impl<'a> State<'a> {
         self.s.word(";")
     }
 
+    fn print_item_type(
+        &mut self,
+        item: &hir::Item,
+        generics: &hir::Generics,
+        inner: impl Fn(&mut Self),
+    ) {
+        self.head(visibility_qualified(&item.vis, "type"));
+        self.print_ident(item.ident);
+        self.print_generic_params(&generics.params);
+        self.end(); // end the inner ibox
+
+        self.print_where_clause(&generics.where_clause);
+        self.s.space();
+        inner(self);
+        self.s.word(";");
+        self.end(); // end the outer ibox
+    }
+
     /// Pretty-print an item
     pub fn print_item(&mut self, item: &hir::Item) {
         self.hardbreak_if_not_bol();
@@ -543,44 +570,29 @@ impl<'a> State<'a> {
                 self.s.word(ga.asm.as_str().to_string());
                 self.end()
             }
-            hir::ItemKind::Ty(ref ty, ref generics) => {
-                self.head(visibility_qualified(&item.vis, "type"));
-                self.print_ident(item.ident);
-                self.print_generic_params(&generics.params);
-                self.end(); // end the inner ibox
-
-                self.print_where_clause(&generics.where_clause);
-                self.s.space();
-                self.word_space("=");
-                self.print_type(&ty);
-                self.s.word(";");
-                self.end(); // end the outer ibox
+            hir::ItemKind::TyAlias(ref ty, ref generics) => {
+                self.print_item_type(item, &generics, |state| {
+                    state.word_space("=");
+                    state.print_type(&ty);
+                });
             }
-            hir::ItemKind::Existential(ref exist) => {
-                self.head(visibility_qualified(&item.vis, "existential type"));
-                self.print_ident(item.ident);
-                self.print_generic_params(&exist.generics.params);
-                self.end(); // end the inner ibox
-
-                self.print_where_clause(&exist.generics.where_clause);
-                self.s.space();
-                let mut real_bounds = Vec::with_capacity(exist.bounds.len());
-                for b in exist.bounds.iter() {
-                    if let GenericBound::Trait(ref ptr, hir::TraitBoundModifier::Maybe) = *b {
-                        self.s.space();
-                        self.word_space("for ?");
-                        self.print_trait_ref(&ptr.trait_ref);
-                    } else {
-                        real_bounds.push(b);
+            hir::ItemKind::OpaqueTy(ref opaque_ty) => {
+                self.print_item_type(item, &opaque_ty.generics, |state| {
+                    let mut real_bounds = Vec::with_capacity(opaque_ty.bounds.len());
+                    for b in opaque_ty.bounds.iter() {
+                        if let GenericBound::Trait(ref ptr, hir::TraitBoundModifier::Maybe) = *b {
+                            state.s.space();
+                            state.word_space("for ?");
+                            state.print_trait_ref(&ptr.trait_ref);
+                        } else {
+                            real_bounds.push(b);
+                        }
                     }
-                }
-                self.print_bounds(":", real_bounds);
-                self.s.word(";");
-                self.end(); // end the outer ibox
+                    state.print_bounds("= impl", real_bounds);
+                });
             }
             hir::ItemKind::Enum(ref enum_definition, ref params) => {
-                self.print_enum_def(enum_definition, params, item.ident.name, item.span,
-                                    &item.vis);
+                self.print_enum_def(enum_definition, params, item.ident.name, item.span, &item.vis);
             }
             hir::ItemKind::Struct(ref struct_def, ref generics) => {
                 self.head(visibility_qualified(&item.vis, "struct"));
@@ -725,7 +737,7 @@ impl<'a> State<'a> {
         for v in variants {
             self.space_if_not_bol();
             self.maybe_print_comment(v.span.lo());
-            self.print_outer_attributes(&v.node.attrs);
+            self.print_outer_attributes(&v.attrs);
             self.ibox(INDENT_UNIT);
             self.print_variant(v);
             self.s.word(",");
@@ -817,8 +829,8 @@ impl<'a> State<'a> {
     pub fn print_variant(&mut self, v: &hir::Variant) {
         self.head("");
         let generics = hir::Generics::empty();
-        self.print_struct(&v.node.data, &generics, v.node.ident.name, v.span, false);
-        if let Some(ref d) = v.node.disr_expr {
+        self.print_struct(&v.data, &generics, v.ident.name, v.span, false);
+        if let Some(ref d) = v.disr_expr {
             self.s.space();
             self.word_space("=");
             self.print_anon_const(d);
@@ -896,12 +908,14 @@ impl<'a> State<'a> {
                 self.end(); // need to close a box
                 self.ann.nested(self, Nested::Body(body));
             }
-            hir::ImplItemKind::Type(ref ty) => {
+            hir::ImplItemKind::TyAlias(ref ty) => {
                 self.print_associated_type(ii.ident, None, Some(ty));
             }
-            hir::ImplItemKind::Existential(ref bounds) => {
-                self.word_space("existential");
-                self.print_associated_type(ii.ident, Some(bounds), None);
+            hir::ImplItemKind::OpaqueTy(ref bounds) => {
+                self.word_space("type");
+                self.print_ident(ii.ident);
+                self.print_bounds("= impl", bounds);
+                self.s.word(";");
             }
         }
         self.ann.post(self, AnnNode::SubItem(ii.hir_id))
@@ -932,7 +946,7 @@ impl<'a> State<'a> {
         self.maybe_print_comment(st.span.lo());
         match st.node {
             hir::StmtKind::Local(ref loc) => {
-                self.print_local(loc.init.deref(), |this| this.print_local_decl(&loc));
+                self.print_local(loc.init.as_deref(), |this| this.print_local_decl(&loc));
             }
             hir::StmtKind::Item(item) => {
                 self.ann.nested(self, Nested::Item(item))
@@ -1442,17 +1456,8 @@ impl<'a> State<'a> {
         self.s.word(i.to_string())
     }
 
-    pub fn print_ident(&mut self, ident: ast::Ident) {
-        if ident.is_raw_guess() {
-            self.s.word(format!("r#{}", ident.name));
-        } else {
-            self.s.word(ident.as_str().to_string());
-        }
-        self.ann.post(self, AnnNode::Name(&ident.name))
-    }
-
     pub fn print_name(&mut self, name: ast::Name) {
-        self.print_ident(ast::Ident::with_empty_ctxt(name))
+        self.print_ident(ast::Ident::with_dummy_span(name))
     }
 
     pub fn print_for_decl(&mut self, loc: &hir::Local, coll: &hir::Expr) {
@@ -1665,14 +1670,14 @@ impl<'a> State<'a> {
                                    &fields[..],
                                    |s, f| {
                                        s.cbox(INDENT_UNIT);
-                                       if !f.node.is_shorthand {
-                                           s.print_ident(f.node.ident);
+                                       if !f.is_shorthand {
+                                           s.print_ident(f.ident);
                                            s.word_nbsp(":");
                                        }
-                                       s.print_pat(&f.node.pat);
+                                       s.print_pat(&f.pat);
                                        s.end()
                                    },
-                                   |f| f.node.pat.span);
+                                   |f| f.pat.span);
                 if etc {
                     if !fields.is_empty() {
                         self.word_space(",");
@@ -1681,6 +1686,9 @@ impl<'a> State<'a> {
                 }
                 self.s.space();
                 self.s.word("}");
+            }
+            PatKind::Or(ref pats) => {
+                self.strsep("|", true, Inconsistent, &pats[..], |s, p| s.print_pat(&p));
             }
             PatKind::Tuple(ref elts, ddpos) => {
                 self.popen();
@@ -1765,6 +1773,11 @@ impl<'a> State<'a> {
             }
         }
         self.ann.post(self, AnnNode::Pat(pat))
+    }
+
+    pub fn print_arg(&mut self, arg: &hir::Arg) {
+        self.print_outer_attributes(&arg.attrs);
+        self.print_pat(&arg.pat);
     }
 
     pub fn print_arm(&mut self, arm: &hir::Arm) {

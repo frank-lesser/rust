@@ -556,7 +556,7 @@ fn make_mirror_unadjusted<'a, 'tcx>(
             };
             let span = cx.tcx.def_span(def_id);
             let count = match cx.tcx.at(span).const_eval(cx.param_env.and(global_id)) {
-                Ok(cv) => cv.unwrap_usize(cx.tcx),
+                Ok(cv) => cv.eval_usize(cx.tcx, cx.param_env),
                 Err(ErrorHandled::Reported) => 0,
                 Err(ErrorHandled::TooGeneric) => {
                     cx.tcx.sess.span_err(span, "array lengths can't depend on generic parameters");
@@ -927,7 +927,7 @@ fn convert_path_expr<'a, 'tcx>(
             ExprKind::Literal {
                 literal: cx.tcx.mk_const(ty::Const {
                     val: ConstValue::Unevaluated(def_id, substs),
-                    ty: cx.tcx.type_of(def_id),
+                    ty: cx.tables().node_type(expr.hir_id),
                 }),
                 user_ty,
             }

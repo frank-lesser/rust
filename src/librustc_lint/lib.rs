@@ -3,7 +3,7 @@
 //! This currently only contains the definitions and implementations
 //! of most of the lints that `rustc` supports directly, it does not
 //! contain the infrastructure for defining/registering lints. That is
-//! available in `rustc::lint` and `rustc_plugin` respectively.
+//! available in `rustc::lint` and `rustc_driver::plugin` respectively.
 //!
 //! ## Note
 //!
@@ -19,14 +19,12 @@
 
 #![recursion_limit="256"]
 
-#![deny(rust_2018_idioms)]
-#![deny(unused_lifetimes)]
-
 #[macro_use]
 extern crate rustc;
 
 mod error_codes;
 mod nonstandard_style;
+mod redundant_semicolon;
 pub mod builtin;
 mod types;
 mod unused;
@@ -58,6 +56,7 @@ use session::Session;
 use lint::LintId;
 use lint::FutureIncompatibleInfo;
 
+use redundant_semicolon::*;
 use nonstandard_style::*;
 use builtin::*;
 use types::*;
@@ -100,6 +99,8 @@ macro_rules! early_lint_passes {
             DeprecatedAttr: DeprecatedAttr::new(),
             WhileTrue: WhileTrue,
             NonAsciiIdents: NonAsciiIdents,
+            IncompleteFeatures: IncompleteFeatures,
+            RedundantSemicolon: RedundantSemicolon,
         ]);
     )
 }
@@ -179,6 +180,7 @@ macro_rules! late_lint_mod_passes {
             UnreachablePub: UnreachablePub,
 
             ExplicitOutlivesRequirements: ExplicitOutlivesRequirements,
+            InvalidValue: InvalidValue,
         ]);
     )
 }
@@ -481,9 +483,9 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
     store.register_removed("resolve_trait_on_defaulted_unit",
         "converted into hard error, see https://github.com/rust-lang/rust/issues/48950");
     store.register_removed("private_no_mangle_fns",
-        "no longer a warning, #[no_mangle] functions always exported");
+        "no longer a warning, `#[no_mangle]` functions always exported");
     store.register_removed("private_no_mangle_statics",
-        "no longer a warning, #[no_mangle] statics always exported");
+        "no longer a warning, `#[no_mangle]` statics always exported");
     store.register_removed("bad_repr",
         "replaced with a generic attribute input check");
     store.register_removed("duplicate_matcher_binding_name",

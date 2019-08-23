@@ -108,8 +108,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Err(match_pair)
             }
 
-            PatternKind::Range(PatternRange { lo, hi, ty, end }) => {
-                let (range, bias) = match ty.sty {
+            PatternKind::Range(PatternRange { lo, hi, end }) => {
+                let (range, bias) = match lo.ty.sty {
                     ty::Char => {
                         (Some(('\u{0000}' as u128, '\u{10FFFF}' as u128, Size::from_bits(32))), 0)
                     }
@@ -161,7 +161,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             PatternKind::Variant { adt_def, substs, variant_index, ref subpatterns } => {
                 let irrefutable = adt_def.variants.iter_enumerated().all(|(i, v)| {
                     i == variant_index || {
-                        self.hir.tcx().features().never_type &&
                         self.hir.tcx().features().exhaustive_patterns &&
                         !v.uninhabited_from(self.hir.tcx(), substs, adt_def.adt_kind()).is_empty()
                     }
@@ -195,6 +194,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let place = match_pair.place.deref();
                 candidate.match_pairs.push(MatchPair::new(place, subpattern));
                 Ok(())
+            }
+
+            PatternKind::Or { .. } => {
+                Err(match_pair)
             }
         }
     }

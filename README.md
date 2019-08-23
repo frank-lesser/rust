@@ -144,7 +144,7 @@ then you may need to force rustbuild to use an older version. This can be done
 by manually calling the appropriate vcvars file before running the bootstrap.
 
 ```batch
-> CALL "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+> CALL "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
 > python x.py build
 ```
 
@@ -200,11 +200,11 @@ fetch snapshots, and an OS that can execute the available snapshot binaries.
 
 Snapshot binaries are currently built and tested on several platforms:
 
-| Platform / Architecture  | x86 | x86_64 |
-|--------------------------|-----|--------|
-| Windows (7, 8, 10, ...)  | ✓   | ✓      |
-| Linux (2.6.18 or later)  | ✓   | ✓      |
-| OSX (10.7 Lion or later) | ✓   | ✓      |
+| Platform / Architecture    | x86 | x86_64 |
+|----------------------------|-----|--------|
+| Windows (7, 8, 10, ...)    | ✓   | ✓      |
+| Linux (2.6.18 or later)    | ✓   | ✓      |
+| macOS (10.7 Lion or later) | ✓   | ✓      |
 
 You may find that other platforms work, but these are our officially
 supported build environments that are most likely to work.

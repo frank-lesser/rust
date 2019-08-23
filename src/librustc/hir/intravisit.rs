@@ -210,6 +210,10 @@ pub trait Visitor<'v> : Sized {
         }
     }
 
+    fn visit_arg(&mut self, arg: &'v Arg) {
+        walk_arg(self, arg)
+    }
+
     /// Visits the top-level item and (optionally) nested items / impl items. See
     /// `visit_nested_item` for details.
     fn visit_item(&mut self, i: &'v Item) {
@@ -396,10 +400,7 @@ pub fn walk_mod<'v, V: Visitor<'v>>(visitor: &mut V, module: &'v Mod, mod_hir_id
 }
 
 pub fn walk_body<'v, V: Visitor<'v>>(visitor: &mut V, body: &'v Body) {
-    for argument in &body.arguments {
-        visitor.visit_id(argument.hir_id);
-        visitor.visit_pat(&argument.pat);
-    }
+    walk_list!(visitor, visit_arg, &body.arguments);
     visitor.visit_expr(&body.value);
 }
 
@@ -432,6 +433,7 @@ pub fn walk_lifetime<'v, V: Visitor<'v>>(visitor: &mut V, lifetime: &'v Lifetime
         LifetimeName::Static |
         LifetimeName::Error |
         LifetimeName::Implicit |
+        LifetimeName::ImplicitObjectLifetimeDefault |
         LifetimeName::Underscore => {}
     }
 }
@@ -450,6 +452,12 @@ pub fn walk_trait_ref<'v, V>(visitor: &mut V, trait_ref: &'v TraitRef)
 {
     visitor.visit_id(trait_ref.hir_ref_id);
     visitor.visit_path(&trait_ref.path, trait_ref.hir_ref_id)
+}
+
+pub fn walk_arg<'v, V: Visitor<'v>>(visitor: &mut V, arg: &'v Arg) {
+    visitor.visit_id(arg.hir_id);
+    visitor.visit_pat(&arg.pat);
+    walk_list!(visitor, visit_attribute, &arg.attrs);
 }
 
 pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item) {
@@ -493,12 +501,12 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item) {
         ItemKind::GlobalAsm(_) => {
             visitor.visit_id(item.hir_id);
         }
-        ItemKind::Ty(ref ty, ref generics) => {
+        ItemKind::TyAlias(ref ty, ref generics) => {
             visitor.visit_id(item.hir_id);
             visitor.visit_ty(ty);
             visitor.visit_generics(generics)
         }
-        ItemKind::Existential(ExistTy {
+        ItemKind::OpaqueTy(OpaqueTy {
             ref generics,
             ref bounds,
             ..
@@ -570,15 +578,15 @@ pub fn walk_variant<'v, V: Visitor<'v>>(visitor: &mut V,
                                         variant: &'v Variant,
                                         generics: &'v Generics,
                                         parent_item_id: HirId) {
-    visitor.visit_ident(variant.node.ident);
-    visitor.visit_id(variant.node.id);
-    visitor.visit_variant_data(&variant.node.data,
-                               variant.node.ident.name,
+    visitor.visit_ident(variant.ident);
+    visitor.visit_id(variant.id);
+    visitor.visit_variant_data(&variant.data,
+                               variant.ident.name,
                                generics,
                                parent_item_id,
                                variant.span);
-    walk_list!(visitor, visit_anon_const, &variant.node.disr_expr);
-    walk_list!(visitor, visit_attribute, &variant.node.attrs);
+    walk_list!(visitor, visit_anon_const, &variant.disr_expr);
+    walk_list!(visitor, visit_attribute, &variant.attrs);
 }
 
 pub fn walk_ty<'v, V: Visitor<'v>>(visitor: &mut V, typ: &'v Ty) {
@@ -697,11 +705,12 @@ pub fn walk_pat<'v, V: Visitor<'v>>(visitor: &mut V, pattern: &'v Pat) {
         PatKind::Struct(ref qpath, ref fields, _) => {
             visitor.visit_qpath(qpath, pattern.hir_id, pattern.span);
             for field in fields {
-                visitor.visit_id(field.node.hir_id);
-                visitor.visit_ident(field.node.ident);
-                visitor.visit_pat(&field.node.pat)
+                visitor.visit_id(field.hir_id);
+                visitor.visit_ident(field.ident);
+                visitor.visit_pat(&field.pat)
             }
         }
+        PatKind::Or(ref pats) => walk_list!(visitor, visit_pat, pats),
         PatKind::Tuple(ref tuple_elements, _) => {
             walk_list!(visitor, visit_pat, tuple_elements);
         }
@@ -919,11 +928,11 @@ pub fn walk_impl_item<'v, V: Visitor<'v>>(visitor: &mut V, impl_item: &'v ImplIt
                              impl_item.span,
                              impl_item.hir_id);
         }
-        ImplItemKind::Type(ref ty) => {
+        ImplItemKind::TyAlias(ref ty) => {
             visitor.visit_id(impl_item.hir_id);
             visitor.visit_ty(ty);
         }
-        ImplItemKind::Existential(ref bounds) => {
+        ImplItemKind::OpaqueTy(ref bounds) => {
             visitor.visit_id(impl_item.hir_id);
             walk_list!(visitor, visit_param_bound, bounds);
         }

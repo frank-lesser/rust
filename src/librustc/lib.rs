@@ -28,9 +28,6 @@
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 
-#![deny(rust_2018_idioms)]
-#![deny(unused_lifetimes)]
-
 #![feature(arbitrary_self_types)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
@@ -49,7 +46,6 @@
 #![feature(optin_builtin_traits)]
 #![feature(range_is_empty)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(rustc_attrs)]
 #![feature(slice_patterns)]
 #![feature(specialization)]
 #![feature(unboxed_closures)]
@@ -57,7 +53,6 @@
 #![feature(trace_macros)]
 #![feature(trusted_len)]
 #![feature(vec_remove_item)]
-#![feature(step_trait)]
 #![feature(stmt_expr_attributes)]
 #![feature(integer_atomics)]
 #![feature(test)]
@@ -66,6 +61,7 @@
 #![feature(proc_macro_hygiene)]
 #![feature(log_syntax)]
 #![feature(mem_take)]
+#![feature(associated_type_bounds)]
 
 #![recursion_limit="512"]
 
@@ -77,22 +73,16 @@ extern crate getopts;
 extern crate libc;
 #[macro_use] extern crate rustc_macros;
 #[macro_use] extern crate rustc_data_structures;
-
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
-
-// FIXME: This import is used by deriving `RustcDecodable` and `RustcEncodable`. Removing this
-// results in a bunch of "failed to resolve" errors. Hopefully, the compiler moves to serde or
-// something, and we can get rid of this.
-#[allow(rust_2018_idioms)]
-extern crate serialize as rustc_serialize;
-
 #[macro_use] extern crate smallvec;
 
 // Use the test crate here so we depend on getopts through it. This allow tools to link to both
 // librustc_driver and libtest.
-#[allow(unused_extern_crates)]
-extern crate test;
+extern crate test as _;
+
+#[cfg(test)]
+mod tests;
 
 #[macro_use]
 mod macros;
@@ -114,7 +104,6 @@ pub mod infer;
 pub mod lint;
 
 pub mod middle {
-    pub mod allocator;
     pub mod borrowck;
     pub mod expr_use_visitor;
     pub mod cstore;
@@ -152,19 +141,6 @@ pub mod util {
 
 // Allows macros to refer to this crate as `::rustc`
 extern crate self as rustc;
-
-// FIXME(#27438): right now the unit tests of librustc don't refer to any actual
-//                functions generated in librustc_data_structures (all
-//                references are through generic functions), but statics are
-//                referenced from time to time. Due to this bug we won't
-//                actually correctly link in the statics unless we also
-//                reference a function, so be sure to reference a dummy
-//                function.
-#[test]
-fn noop() {
-    rustc_data_structures::__noop_fix_for_27438();
-}
-
 
 // Build the diagnostics array at the end so that the metadata includes error use sites.
 __build_diagnostic_array! { librustc, DIAGNOSTICS }
