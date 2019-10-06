@@ -62,9 +62,11 @@ pub fn run(options: Options) -> i32 {
         ..config::Options::default()
     };
 
+    let mut cfgs = options.cfgs.clone();
+    cfgs.push("rustdoc".to_owned());
     let config = interface::Config {
         opts: sessopts,
-        crate_cfg: config::parse_cfgspecs(options.cfgs.clone()),
+        crate_cfg: config::parse_cfgspecs(cfgs),
         input,
         input_path: None,
         output_file: None,
@@ -401,7 +403,7 @@ pub fn make_test(s: &str,
         // Any errors in parsing should also appear when the doctest is compiled for real, so just
         // send all the errors that libsyntax emits directly into a `Sink` instead of stderr.
         let cm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
-        let emitter = EmitterWriter::new(box io::sink(), None, false, false, false, None);
+        let emitter = EmitterWriter::new(box io::sink(), None, false, false, false, None, false);
         // FIXME(misdreavus): pass `-Z treat-err-as-bug` to the doctest parser
         let handler = Handler::with_emitter(false, None, box emitter);
         let sess = ParseSess::with_span_handler(handler, cm);
@@ -425,7 +427,7 @@ pub fn make_test(s: &str,
             match parser.parse_item() {
                 Ok(Some(item)) => {
                     if !found_main {
-                        if let ast::ItemKind::Fn(..) = item.node {
+                        if let ast::ItemKind::Fn(..) = item.kind {
                             if item.ident.name == sym::main {
                                 found_main = true;
                             }
@@ -433,7 +435,7 @@ pub fn make_test(s: &str,
                     }
 
                     if !found_extern_crate {
-                        if let ast::ItemKind::ExternCrate(original) = item.node {
+                        if let ast::ItemKind::ExternCrate(original) = item.kind {
                             // This code will never be reached if `cratename` is none because
                             // `found_extern_crate` is initialized to `true` if it is none.
                             let cratename = cratename.unwrap();
@@ -446,7 +448,7 @@ pub fn make_test(s: &str,
                     }
 
                     if !found_macro {
-                        if let ast::ItemKind::Mac(..) = item.node {
+                        if let ast::ItemKind::Mac(..) = item.kind {
                             found_macro = true;
                         }
                     }
@@ -882,7 +884,7 @@ impl<'a, 'hir> intravisit::Visitor<'hir> for HirCollector<'a, 'hir> {
     }
 
     fn visit_item(&mut self, item: &'hir hir::Item) {
-        let name = if let hir::ItemKind::Impl(.., ref ty, _) = item.node {
+        let name = if let hir::ItemKind::Impl(.., ref ty, _) = item.kind {
             self.map.hir_to_pretty_string(ty.hir_id)
         } else {
             item.ident.to_string()

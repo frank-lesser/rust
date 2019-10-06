@@ -212,14 +212,14 @@ pub enum ObligationCauseCode<'tcx> {
     /// Constant expressions must be sized.
     ConstSized,
 
-    /// static items must have `Sync` type
+    /// Static items must have `Sync` type
     SharedStatic,
 
     BuiltinDerivedObligation(DerivedObligationCause<'tcx>),
 
     ImplDerivedObligation(DerivedObligationCause<'tcx>),
 
-    /// error derived when matching traits/impls; see ObligationCause for more details
+    /// Error derived when matching traits/impls; see ObligationCause for more details
     CompareImplMethodObligation {
         item_name: ast::Name,
         impl_item_def_id: DefId,
@@ -248,17 +248,20 @@ pub enum ObligationCauseCode<'tcx> {
     /// `start` has wrong type
     StartFunctionType,
 
-    /// intrinsic has wrong type
+    /// Intrinsic has wrong type
     IntrinsicType,
 
-    /// method receiver
+    /// Method receiver
     MethodReceiver,
 
     /// `return` with no expression
     ReturnNoExpression,
 
     /// `return` with an expression
-    ReturnType(hir::HirId),
+    ReturnValue(hir::HirId),
+
+    /// Return type of this function
+    ReturnType,
 
     /// Block implicit return
     BlockTailExpression(hir::HirId),
@@ -607,7 +610,7 @@ pub struct VtableImplData<'tcx, N> {
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, HashStable)]
 pub struct VtableGeneratorData<'tcx, N> {
     pub generator_def_id: DefId,
-    pub substs: ty::GeneratorSubsts<'tcx>,
+    pub substs: SubstsRef<'tcx>,
     /// Nested obligations. This can be non-empty if the generator
     /// signature contains associated types.
     pub nested: Vec<N>
@@ -616,7 +619,7 @@ pub struct VtableGeneratorData<'tcx, N> {
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, HashStable)]
 pub struct VtableClosureData<'tcx, N> {
     pub closure_def_id: DefId,
-    pub substs: ty::ClosureSubsts<'tcx>,
+    pub substs: SubstsRef<'tcx>,
     /// Nested obligations. This can be non-empty if the closure
     /// signature contains associated types.
     pub nested: Vec<N>

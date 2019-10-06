@@ -478,14 +478,6 @@ impl BorrowckMode {
             BorrowckMode::Migrate => true,
         }
     }
-
-    /// Returns whether we should emit the AST-based borrow checker errors.
-    pub fn use_ast(self) -> bool {
-        match self {
-            BorrowckMode::Mir => false,
-            BorrowckMode::Migrate => false,
-        }
-    }
 }
 
 pub enum Input {
@@ -687,7 +679,7 @@ pub enum EntryFnType {
 
 impl_stable_hash_via_hash!(EntryFnType);
 
-#[derive(Copy, PartialEq, PartialOrd, Clone, Ord, Eq, Hash, Debug)]
+#[derive(Copy, PartialEq, PartialOrd, Clone, Ord, Eq, Hash, Debug, HashStable)]
 pub enum CrateType {
     Executable,
     Dylib,
@@ -813,6 +805,7 @@ macro_rules! options {
         pub const parse_list: Option<&str> = Some("a space-separated list of strings");
         pub const parse_opt_list: Option<&str> = Some("a space-separated list of strings");
         pub const parse_opt_comma_list: Option<&str> = Some("a comma-separated list of strings");
+        pub const parse_threads: Option<&str> = Some("a number");
         pub const parse_uint: Option<&str> = Some("a number");
         pub const parse_passes: Option<&str> =
             Some("a space-separated list of passes, or `all`");
@@ -953,6 +946,14 @@ macro_rules! options {
                     true
                 },
                 None => false,
+            }
+        }
+
+        fn parse_threads(slot: &mut usize, v: Option<&str>) -> bool {
+            match v.and_then(|s| s.parse().ok()) {
+                Some(0) => { *slot = ::num_cpus::get(); true },
+                Some(i) => { *slot = i; true },
+                None => false
             }
         }
 
@@ -1259,7 +1260,11 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "prints the LLVM optimization passes being run"),
     ast_json: bool = (false, parse_bool, [UNTRACKED],
         "print the AST as JSON and halt"),
-    threads: Option<usize> = (None, parse_opt_uint, [UNTRACKED],
+    // We default to 1 here since we want to behave like
+    // a sequential compiler for now. This'll likely be adjusted
+    // in the future. Note that -Zthreads=0 is the way to get
+    // the num_cpus behavior.
+    threads: usize = (1, parse_threads, [UNTRACKED],
         "use a thread pool with N threads"),
     ast_json_noexpand: bool = (false, parse_bool, [UNTRACKED],
         "print the pre-expansion AST as JSON and halt"),
@@ -1268,14 +1273,6 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
     save_analysis: bool = (false, parse_bool, [UNTRACKED],
         "write syntax and type analysis (in JSON format) information, in \
          addition to normal output"),
-    flowgraph_print_loans: bool = (false, parse_bool, [UNTRACKED],
-        "include loan analysis data in -Z unpretty flowgraph output"),
-    flowgraph_print_moves: bool = (false, parse_bool, [UNTRACKED],
-        "include move analysis data in -Z unpretty flowgraph output"),
-    flowgraph_print_assigns: bool = (false, parse_bool, [UNTRACKED],
-        "include assignment analysis data in -Z unpretty flowgraph output"),
-    flowgraph_print_all: bool = (false, parse_bool, [UNTRACKED],
-        "include all dataflow analysis data in -Z unpretty flowgraph output"),
     print_region_graph: bool = (false, parse_bool, [UNTRACKED],
         "prints region inference graph. \
          Use with RUST_REGION_GRAPH=help for more info"),
@@ -1295,6 +1292,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "show extended diagnostic help"),
     terminal_width: Option<usize> = (None, parse_opt_uint, [UNTRACKED],
         "set the current terminal width"),
+    panic_abort_tests: bool = (false, parse_bool, [TRACKED],
+        "support compiling tests with panic=abort"),
     continue_parse_after_error: bool = (false, parse_bool, [TRACKED],
         "attempt to recover from parse errors (experimental)"),
     dep_tasks: bool = (false, parse_bool, [UNTRACKED],
@@ -1346,7 +1345,7 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
     mir_opt_level: usize = (1, parse_uint, [TRACKED],
         "set the MIR optimization level (0-3, default: 1)"),
     mutable_noalias: Option<bool> = (None, parse_opt_bool, [TRACKED],
-        "emit noalias metadata for mutable references (default: yes on LLVM >= 6)"),
+        "emit noalias metadata for mutable references (default: no)"),
     dump_mir: Option<String> = (None, parse_opt_string, [UNTRACKED],
         "dump MIR state to file.
         `val` is used to select which passes and functions to dump. For example:
@@ -1375,6 +1374,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "describes how to render the `rendered` field of json diagnostics"),
     unleash_the_miri_inside_of_you: bool = (false, parse_bool, [TRACKED],
         "take the breaks off const evaluation. NOTE: this is unsound"),
+    suppress_const_validation_back_compat_ice: bool = (false, parse_bool, [TRACKED],
+        "silence ICE triggered when the new const validator disagrees with the old"),
     osx_rpath_install_name: bool = (false, parse_bool, [TRACKED],
         "pass `-install_name @rpath/...` to the macOS linker"),
     sanitizer: Option<Sanitizer> = (None, parse_sanitizer, [TRACKED],
@@ -1424,8 +1425,6 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         valid types are any of the types for `--pretty`, as well as:
         `expanded`, `expanded,identified`,
         `expanded,hygiene` (with internal representations),
-        `flowgraph=<nodeid>` (graphviz formatted flowgraph for node),
-        `flowgraph,unlabelled=<nodeid>` (unlabelled graphviz formatted flowgraph for node),
         `everybody_loops` (all function bodies replaced with `loop {}`),
         `hir` (the HIR), `hir,identified`,
         `hir,typed` (HIR with types for each node),
@@ -1855,7 +1854,7 @@ pub fn rustc_optgroups() -> Vec<RustcOptGroup> {
 struct NullEmitter;
 
 impl errors::emitter::Emitter for NullEmitter {
-    fn emit_diagnostic(&mut self, _: &errors::DiagnosticBuilder<'_>) {}
+    fn emit_diagnostic(&mut self, _: &errors::Diagnostic) {}
 }
 
 // Converts strings provided as `--cfg [cfgspec]` into a `crate_cfg`.
@@ -1879,11 +1878,11 @@ pub fn parse_cfgspecs(cfgspecs: Vec<String>) -> FxHashSet<(String, Option<String
                     if meta_item.path.segments.len() != 1 {
                         error!("argument key must be an identifier");
                     }
-                    match &meta_item.node {
+                    match &meta_item.kind {
                         MetaItemKind::List(..) => {
                             error!(r#"expected `key` or `key="value"`"#);
                         }
-                        MetaItemKind::NameValue(lit) if !lit.node.is_str() => {
+                        MetaItemKind::NameValue(lit) if !lit.kind.is_str() => {
                             error!("argument value must be a string");
                         }
                         MetaItemKind::NameValue(..) | MetaItemKind::Word => {
@@ -2160,14 +2159,14 @@ pub fn build_session_options_and_crate_config(
         }
     }
 
-    if debugging_opts.threads == Some(0) {
+    if debugging_opts.threads == 0 {
         early_error(
             error_format,
             "value for threads must be a positive non-zero integer",
         );
     }
 
-    if debugging_opts.threads.unwrap_or(1) > 1 && debugging_opts.fuel.is_some() {
+    if debugging_opts.threads > 1 && debugging_opts.fuel.is_some() {
         early_error(
             error_format,
             "optimization fuel is incompatible with multiple threads",

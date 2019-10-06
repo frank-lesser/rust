@@ -192,14 +192,9 @@ use crate::sys;
 /// ```
 /// use std::collections::HashMap;
 ///
-/// fn main() {
-///     let timber_resources: HashMap<&str, i32> =
-///     [("Norway", 100),
-///      ("Denmark", 50),
-///      ("Iceland", 10)]
-///      .iter().cloned().collect();
-///     // use the values stored in map
-/// }
+/// let timber_resources: HashMap<&str, i32> = [("Norway", 100), ("Denmark", 50), ("Iceland", 10)]
+///     .iter().cloned().collect();
+/// // use the values stored in map
 /// ```
 
 #[derive(Clone)]
@@ -714,7 +709,6 @@ where
     /// # Examples
     ///
     /// ```
-    /// #![feature(map_get_key_value)]
     /// use std::collections::HashMap;
     ///
     /// let mut map = HashMap::new();
@@ -722,7 +716,7 @@ where
     /// assert_eq!(map.get_key_value(&1), Some((&1, &"a")));
     /// assert_eq!(map.get_key_value(&2), None);
     /// ```
-    #[unstable(feature = "map_get_key_value", issue = "49347")]
+    #[stable(feature = "map_get_key_value", since = "1.40.0")]
     #[inline]
     pub fn get_key_value<Q: ?Sized>(&self, k: &Q) -> Option<(&K, &V)>
     where

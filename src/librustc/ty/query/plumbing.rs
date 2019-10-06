@@ -15,6 +15,7 @@ use errors::DiagnosticBuilder;
 use errors::Level;
 use errors::Diagnostic;
 use errors::FatalError;
+use errors::Handler;
 use rustc_data_structures::fx::{FxHashMap};
 use rustc_data_structures::sync::{Lrc, Lock};
 use rustc_data_structures::sharded::Sharded;
@@ -111,7 +112,7 @@ impl<'a, 'tcx, Q: QueryDescription<'tcx>> JobOwner<'a, 'tcx, Q> {
             let mut lock = cache.get_shard_by_value(key).lock();
             if let Some(value) = lock.results.get(key) {
                 profq_msg!(tcx, ProfileQueriesMsg::CacheHit);
-                tcx.sess.profiler(|p| p.record_query_hit(Q::NAME));
+                tcx.prof.query_cache_hit(Q::NAME);
                 let result = (value.value.clone(), value.index);
                 #[cfg(debug_assertions)]
                 {
@@ -127,7 +128,7 @@ impl<'a, 'tcx, Q: QueryDescription<'tcx>> JobOwner<'a, 'tcx, Q> {
                             // in another thread has completed. Record how long we wait in the
                             // self-profiler.
                             #[cfg(parallel_compiler)]
-                            tcx.sess.profiler(|p| p.query_blocked_start(Q::NAME));
+                            tcx.prof.query_blocked_start(Q::NAME);
 
                             job.clone()
                         },
@@ -169,7 +170,7 @@ impl<'a, 'tcx, Q: QueryDescription<'tcx>> JobOwner<'a, 'tcx, Q> {
             #[cfg(parallel_compiler)]
             {
                 let result = job.r#await(tcx, span);
-                tcx.sess.profiler(|p| p.query_blocked_end(Q::NAME));
+                tcx.prof.query_blocked_end(Q::NAME);
 
                 if let Err(cycle) = result {
                     return TryGetJob::Cycle(Q::handle_cycle_error(tcx, cycle));
@@ -265,7 +266,7 @@ impl<'tcx> TyCtxt<'tcx> {
         tls::with_related_context(self, move |current_icx| {
             // Update the `ImplicitCtxt` to point to our new query job.
             let new_icx = tls::ImplicitCtxt {
-                tcx: self.global_tcx(),
+                tcx: self,
                 query: Some(job),
                 diagnostics,
                 layout_depth: current_icx.layout_depth,
@@ -274,7 +275,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
             // Use the `ImplicitCtxt` while we execute the query.
             tls::enter_context(&new_icx, |_| {
-                compute(self.global_tcx())
+                compute(self)
             })
         })
     }
@@ -321,23 +322,25 @@ impl<'tcx> TyCtxt<'tcx> {
         })
     }
 
-    pub fn try_print_query_stack() {
+    pub fn try_print_query_stack(handler: &Handler) {
         eprintln!("query stack during panic:");
 
+        // Be careful reyling on global state here: this code is called from
+        // a panic hook, which means that the global `Handler` may be in a weird
+        // state if it was responsible for triggering the panic.
         tls::with_context_opt(|icx| {
             if let Some(icx) = icx {
                 let mut current_query = icx.query.clone();
                 let mut i = 0;
 
                 while let Some(query) = current_query {
-                    let mut db = DiagnosticBuilder::new(icx.tcx.sess.diagnostic(),
-                        Level::FailureNote,
+                    let mut diag = Diagnostic::new(Level::FailureNote,
                         &format!("#{} [{}] {}",
                                  i,
                                  query.info.query.name(),
                                  query.info.query.describe(icx.tcx)));
-                    db.set_span(icx.tcx.sess.source_map().def_span(query.info.span));
-                    icx.tcx.sess.diagnostic().force_print_db(db);
+                    diag.span = icx.tcx.sess.source_map().def_span(query.info.span).into();
+                    handler.force_print_diagnostic(diag);
 
                     current_query = query.parent.clone();
                     i += 1;
@@ -379,18 +382,19 @@ impl<'tcx> TyCtxt<'tcx> {
         }
 
         if Q::ANON {
+
             profq_msg!(self, ProfileQueriesMsg::ProviderBegin);
-            self.sess.profiler(|p| p.start_query(Q::NAME));
+            let prof_timer = self.prof.query_provider(Q::NAME);
 
             let ((result, dep_node_index), diagnostics) = with_diagnostics(|diagnostics| {
                 self.start_query(job.job.clone(), diagnostics, |tcx| {
                     tcx.dep_graph.with_anon_task(Q::dep_kind(), || {
-                        Q::compute(tcx.global_tcx(), key)
+                        Q::compute(tcx, key)
                     })
                 })
             });
 
-            self.sess.profiler(|p| p.end_query(Q::NAME));
+            drop(prof_timer);
             profq_msg!(self, ProfileQueriesMsg::ProviderEnd);
 
             self.dep_graph.read_index(dep_node_index);
@@ -446,11 +450,10 @@ impl<'tcx> TyCtxt<'tcx> {
         debug_assert!(self.dep_graph.is_green(dep_node));
 
         // First we try to load the result from the on-disk cache.
-        let result = if Q::cache_on_disk(self.global_tcx(), key.clone(), None) &&
+        let result = if Q::cache_on_disk(self, key.clone(), None) &&
                         self.sess.opts.debugging_opts.incremental_queries {
-            self.sess.profiler(|p| p.incremental_load_result_start(Q::NAME));
-            let result = Q::try_load_from_disk(self.global_tcx(), prev_dep_node_index);
-            self.sess.profiler(|p| p.incremental_load_result_end(Q::NAME));
+            let _prof_timer = self.prof.incr_cache_loading(Q::NAME);
+            let result = Q::try_load_from_disk(self, prev_dep_node_index);
 
             // We always expect to find a cached result for things that
             // can be forced from `DepNode`.
@@ -466,21 +469,17 @@ impl<'tcx> TyCtxt<'tcx> {
 
         let result = if let Some(result) = result {
             profq_msg!(self, ProfileQueriesMsg::CacheHit);
-            self.sess.profiler(|p| p.record_query_hit(Q::NAME));
-
             result
         } else {
             // We could not load a result from the on-disk cache, so
             // recompute.
-
-            self.sess.profiler(|p| p.start_query(Q::NAME));
+            let _prof_timer = self.prof.query_provider(Q::NAME);
 
             // The dep-graph for this computation is already in-place.
             let result = self.dep_graph.with_ignore(|| {
                 Q::compute(self, key)
             });
 
-            self.sess.profiler(|p| p.end_query(Q::NAME));
             result
         };
 
@@ -548,7 +547,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 key, dep_node);
 
         profq_msg!(self, ProfileQueriesMsg::ProviderBegin);
-        self.sess.profiler(|p| p.start_query(Q::NAME));
+        let prof_timer = self.prof.query_provider(Q::NAME);
 
         let ((result, dep_node_index), diagnostics) = with_diagnostics(|diagnostics| {
             self.start_query(job.job.clone(), diagnostics, |tcx| {
@@ -568,7 +567,7 @@ impl<'tcx> TyCtxt<'tcx> {
             })
         });
 
-        self.sess.profiler(|p| p.end_query(Q::NAME));
+        drop(prof_timer);
         profq_msg!(self, ProfileQueriesMsg::ProviderEnd);
 
         if unlikely!(self.sess.opts.debugging_opts.query_dep_graph) {
@@ -616,7 +615,7 @@ impl<'tcx> TyCtxt<'tcx> {
             let _ = self.get_query::<Q>(DUMMY_SP, key);
         } else {
             profq_msg!(self, ProfileQueriesMsg::CacheHit);
-            self.sess.profiler(|p| p.record_query_hit(Q::NAME));
+            self.prof.query_cache_hit(Q::NAME);
         }
     }
 
@@ -644,7 +643,7 @@ impl<'tcx> TyCtxt<'tcx> {
 macro_rules! handle_cycle_error {
     ([][$tcx: expr, $error:expr]) => {{
         $tcx.report_cycle($error).emit();
-        Value::from_cycle_error($tcx.global_tcx())
+        Value::from_cycle_error($tcx)
     }};
     ([fatal_cycle$(, $modifiers:ident)*][$tcx:expr, $error:expr]) => {{
         $tcx.report_cycle($error).emit();
@@ -653,7 +652,7 @@ macro_rules! handle_cycle_error {
     }};
     ([cycle_delay_bug$(, $modifiers:ident)*][$tcx:expr, $error:expr]) => {{
         $tcx.report_cycle($error).delay_as_bug();
-        Value::from_cycle_error($tcx.global_tcx())
+        Value::from_cycle_error($tcx)
     }};
     ([$other:ident$(, $modifiers:ident)*][$($args:tt)*]) => {
         handle_cycle_error!([$($modifiers),*][$($args)*])
@@ -717,7 +716,6 @@ macro_rules! define_queries_inner {
         use rustc_data_structures::sharded::Sharded;
         use crate::{
             rustc_data_structures::stable_hasher::HashStable,
-            rustc_data_structures::stable_hasher::StableHasherResult,
             rustc_data_structures::stable_hasher::StableHasher,
             ich::StableHashingContext
         };
@@ -926,9 +924,7 @@ macro_rules! define_queries_inner {
         }
 
         impl<'a, $tcx> HashStable<StableHashingContext<'a>> for Query<$tcx> {
-            fn hash_stable<W: StableHasherResult>(&self,
-                                                hcx: &mut StableHashingContext<'a>,
-                                                hasher: &mut StableHasher<W>) {
+            fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
                 mem::discriminant(self).hash_stable(hcx, hasher);
                 match *self {
                     $(Query::$name(key) => key.hash_stable(hcx, hasher),)*
@@ -1000,7 +996,7 @@ macro_rules! define_queries_inner {
                         // would be missing appropriate entries in `providers`.
                         .unwrap_or(&tcx.queries.fallback_extern_providers)
                         .$name;
-                    provider(tcx.global_tcx(), key)
+                    provider(tcx, key)
                 })
             }
 

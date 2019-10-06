@@ -94,6 +94,7 @@ rustc_queries! {
         /// of the MIR qualify_consts pass. The actual meaning of
         /// the value isn't known except to the pass itself.
         query mir_const_qualif(key: DefId) -> (u8, &'tcx BitSet<mir::Local>) {
+            desc { |tcx| "const checking `{}`", tcx.def_path_str(key) }
             cache_on_disk_if { key.is_local() }
         }
 
@@ -132,7 +133,7 @@ rustc_queries! {
             cache_on_disk_if { key.is_local() }
             load_cached(tcx, id) {
                 let promoted: Option<
-                    rustc_data_structures::indexed_vec::IndexVec<
+                    rustc_index::vec::IndexVec<
                         crate::mir::Promoted,
                         crate::mir::Body<'tcx>
                     >> = tcx.queries.on_disk_cache.try_load_query_result(tcx, id);
@@ -244,6 +245,10 @@ rustc_queries! {
             desc { |tcx| "checking if item is const fn: `{}`", tcx.def_path_str(key) }
         }
 
+        query asyncness(key: DefId) -> hir::IsAsync {
+            desc { |tcx| "checking if the function is async: `{}`", tcx.def_path_str(key) }
+        }
+
         /// Returns `true` if calls to the function may be promoted.
         ///
         /// This is either because the function is e.g., a tuple-struct or tuple-variant
@@ -286,7 +291,7 @@ rustc_queries! {
         query associated_item(_: DefId) -> ty::AssocItem {}
 
         query impl_trait_ref(_: DefId) -> Option<ty::TraitRef<'tcx>> {}
-        query impl_polarity(_: DefId) -> hir::ImplPolarity {}
+        query impl_polarity(_: DefId) -> ty::ImplPolarity {}
 
         query issue33140_self_ty(_: DefId) -> Option<ty::Ty<'tcx>> {}
     }
@@ -393,10 +398,6 @@ rustc_queries! {
     }
 
     BorrowChecking {
-        query borrowck(key: DefId) -> &'tcx BorrowCheckResult {
-            cache_on_disk_if { key.is_local() }
-        }
-
         /// Borrow-checks the function body. If this is a closure, returns
         /// additional requirements that the closure's creator must verify.
         query mir_borrowck(key: DefId) -> mir::BorrowCheckResult<'tcx> {
@@ -465,7 +466,7 @@ rustc_queries! {
     }
 
     TypeChecking {
-        query check_match(key: DefId) -> SignalledError {
+        query check_match(key: DefId) {
             cache_on_disk_if { key.is_local() }
         }
 
@@ -530,19 +531,6 @@ rustc_queries! {
 
     TypeChecking {
         query trait_of_item(_: DefId) -> Option<DefId> {}
-        query const_is_rvalue_promotable_to_static(key: DefId) -> bool {
-            desc { |tcx|
-                "const checking if rvalue is promotable to static `{}`",
-                tcx.def_path_str(key)
-            }
-            cache_on_disk_if { true }
-        }
-        query rvalue_promotable_map(key: DefId) -> &'tcx ItemLocalSet {
-            desc { |tcx|
-                "checking which parts of `{}` are promotable to static",
-                tcx.def_path_str(key)
-            }
-        }
     }
 
     Codegen {
@@ -629,6 +617,12 @@ rustc_queries! {
         query dylib_dependency_formats(_: CrateNum)
                                         -> &'tcx [(CrateNum, LinkagePreference)] {
             desc { "dylib dependency formats of crate" }
+        }
+
+        query dependency_formats(_: CrateNum)
+            -> Lrc<crate::middle::dependency_format::Dependencies>
+        {
+            desc { "get the linkage format of all dependencies" }
         }
     }
 

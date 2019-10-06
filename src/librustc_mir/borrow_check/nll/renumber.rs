@@ -1,9 +1,9 @@
 use rustc::ty::subst::SubstsRef;
-use rustc::ty::{self, ClosureSubsts, GeneratorSubsts, Ty, TypeFoldable};
+use rustc::ty::{self, Ty, TypeFoldable};
 use rustc::mir::{Location, Body, Promoted};
 use rustc::mir::visit::{MutVisitor, TyContext};
 use rustc::infer::{InferCtxt, NLLRegionVariableOrigin};
-use rustc_data_structures::indexed_vec::IndexVec;
+use rustc_index::vec::IndexVec;
 
 /// Replaces all free regions appearing in the MIR with fresh
 /// inference variables, returning the number of variables created.
@@ -35,7 +35,7 @@ where
     infcx
         .tcx
         .fold_regions(value, &mut false, |_region, _depth| {
-            let origin = NLLRegionVariableOrigin::Existential;
+            let origin = NLLRegionVariableOrigin::Existential { from_forall: false };
             infcx.next_nll_region_var(origin)
         })
 }
@@ -81,31 +81,5 @@ impl<'a, 'tcx> MutVisitor<'tcx> for NLLVisitor<'a, 'tcx> {
 
     fn visit_const(&mut self, constant: &mut &'tcx ty::Const<'tcx>, _location: Location) {
         *constant = self.renumber_regions(&*constant);
-    }
-
-    fn visit_generator_substs(&mut self,
-                              substs: &mut GeneratorSubsts<'tcx>,
-                              location: Location) {
-        debug!(
-            "visit_generator_substs(substs={:?}, location={:?})",
-            substs,
-            location,
-        );
-
-        *substs = self.renumber_regions(substs);
-
-        debug!("visit_generator_substs: substs={:?}", substs);
-    }
-
-    fn visit_closure_substs(&mut self, substs: &mut ClosureSubsts<'tcx>, location: Location) {
-        debug!(
-            "visit_closure_substs(substs={:?}, location={:?})",
-            substs,
-            location
-        );
-
-        *substs = self.renumber_regions(substs);
-
-        debug!("visit_closure_substs: substs={:?}", substs);
     }
 }

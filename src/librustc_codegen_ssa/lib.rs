@@ -21,7 +21,6 @@
 
 #[macro_use] extern crate log;
 #[macro_use] extern crate rustc;
-#[macro_use] extern crate rustc_data_structures;
 #[macro_use] extern crate syntax;
 
 use std::path::PathBuf;
@@ -33,6 +32,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::svh::Svh;
 use rustc::middle::cstore::{LibSource, CrateSource, NativeLibrary};
+use rustc::middle::dependency_format::Dependencies;
 use syntax_pos::symbol::Symbol;
 
 mod error_codes;
@@ -142,6 +142,7 @@ pub struct CrateInfo {
     pub used_crates_dynamic: Vec<(CrateNum, LibSource)>,
     pub lang_item_to_crate: FxHashMap<LangItem, CrateNum>,
     pub missing_lang_items: FxHashMap<CrateNum, Vec<LangItem>>,
+    pub dependency_formats: Lrc<Dependencies>,
 }
 
 

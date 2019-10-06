@@ -9,7 +9,7 @@ use rustc::mir;
 use rustc::mir::interpret::truncate;
 use rustc::ty::{self, Ty};
 use rustc::ty::layout::{
-    self, Size, Align, LayoutOf, TyLayout, HasDataLayout, VariantIdx, PrimitiveExt
+    self, Size, Abi, Align, LayoutOf, TyLayout, HasDataLayout, VariantIdx, PrimitiveExt
 };
 use rustc::ty::TypeFoldable;
 
@@ -193,7 +193,7 @@ impl<'tcx, Tag> MPlaceTy<'tcx, Tag> {
     pub(super) fn len(self, cx: &impl HasDataLayout) -> InterpResult<'tcx, u64> {
         if self.layout.is_unsized() {
             // We need to consult `meta` metadata
-            match self.layout.ty.sty {
+            match self.layout.ty.kind {
                 ty::Slice(..) | ty::Str =>
                     return self.mplace.meta.unwrap().to_usize(cx),
                 _ => bug!("len not supported on unsized type {:?}", self.layout.ty),
@@ -210,7 +210,7 @@ impl<'tcx, Tag> MPlaceTy<'tcx, Tag> {
 
     #[inline]
     pub(super) fn vtable(self) -> Scalar<Tag> {
-        match self.layout.ty.sty {
+        match self.layout.ty.kind {
             ty::Dynamic(..) => self.mplace.meta.unwrap(),
             _ => bug!("vtable not supported on type {:?}", self.layout.ty),
         }
@@ -385,6 +385,10 @@ where
                 stride * field
             }
             layout::FieldPlacement::Union(count) => {
+                // FIXME(#64506) `UninhabitedValue` can be removed when this issue is resolved
+                if base.layout.abi == Abi::Uninhabited {
+                    throw_unsup!(UninhabitedValue);
+                }
                 assert!(field < count as u64,
                         "Tried to access field {} of union with {} fields", field, count);
                 // Offset is always 0
@@ -459,7 +463,7 @@ where
 
         // Compute meta and new layout
         let inner_len = len - to - from;
-        let (meta, ty) = match base.layout.ty.sty {
+        let (meta, ty) = match base.layout.ty.kind {
             // It is not nice to match on the type, but that seems to be the only way to
             // implement this.
             ty::Array(inner, _) =>
@@ -590,6 +594,13 @@ where
             StaticKind::Promoted(promoted, promoted_substs) => {
                 let substs = self.subst_from_frame_and_normalize_erasing_regions(promoted_substs);
                 let instance = ty::Instance::new(place_static.def_id, substs);
+
+                // Even after getting `substs` from the frame, this instance may still be
+                // polymorphic because `ConstProp` will try to promote polymorphic MIR.
+                if instance.needs_subst() {
+                    throw_inval!(TooGeneric);
+                }
+
                 self.const_eval_raw(GlobalId {
                     instance,
                     promoted: Some(promoted),

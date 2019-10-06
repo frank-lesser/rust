@@ -193,6 +193,7 @@ pub fn new_handler(error_format: ErrorOutputType,
                     short,
                     sessopts.debugging_opts.teach,
                     sessopts.debugging_opts.terminal_width,
+                    false,
                 ).ui_testing(ui_testing)
             )
         },
@@ -205,6 +206,7 @@ pub fn new_handler(error_format: ErrorOutputType,
                     source_map,
                     pretty,
                     json_rendered,
+                    false,
                 ).ui_testing(ui_testing)
             )
         },
@@ -232,7 +234,7 @@ pub fn run_core(options: RustdocOptions) -> (clean::Crate, RenderInfo, RenderOpt
         error_format,
         libs,
         externs,
-        cfgs,
+        mut cfgs,
         codegen_options,
         debugging_options,
         target,
@@ -247,6 +249,9 @@ pub fn run_core(options: RustdocOptions) -> (clean::Crate, RenderInfo, RenderOpt
         render_options,
         ..
     } = options;
+
+    // Add the rustdoc cfg into the doc build.
+    cfgs.push("rustdoc".to_string());
 
     let cpath = Some(input.clone());
     let input = Input::File(input);

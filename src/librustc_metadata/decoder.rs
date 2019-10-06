@@ -3,7 +3,7 @@
 use crate::cstore::{self, CrateMetadata, MetadataBlob, NativeLibrary, ForeignModule};
 use crate::schema::*;
 
-use rustc_data_structures::indexed_vec::IndexVec;
+use rustc_index::vec::IndexVec;
 use rustc_data_structures::sync::{Lrc, ReadGuard};
 use rustc::hir::map::{DefKey, DefPath, DefPathData, DefPathHash};
 use rustc::hir;
@@ -473,7 +473,7 @@ impl<'a, 'tcx> CrateMetadata {
             None => {
                 bug!("entry: id not found: {:?} in crate {:?} with number {}",
                      item_id,
-                     self.name,
+                     self.root.name,
                      self.cnum)
             }
             Some(d) => d.decode(self),
@@ -543,18 +543,13 @@ impl<'a, 'tcx> CrateMetadata {
                 name, SyntaxExtensionKind::Bang(Box::new(BangProcMacro { client })), Vec::new()
             )
         };
-        let edition = if sess.opts.debugging_opts.dual_proc_macros {
-            self.host_lib.as_ref().unwrap().metadata.get_root().edition
-        } else {
-            self.root.edition
-        };
 
         SyntaxExtension::new(
             &sess.parse_sess,
             kind,
             self.get_span(id, sess),
             helper_attrs,
-            edition,
+            self.root.edition,
             Symbol::intern(name),
             &self.get_attributes(&self.entry(id), sess),
         )
@@ -722,7 +717,7 @@ impl<'a, 'tcx> CrateMetadata {
         self.get_impl_data(id).parent_impl
     }
 
-    pub fn get_impl_polarity(&self, id: DefIndex) -> hir::ImplPolarity {
+    pub fn get_impl_polarity(&self, id: DefIndex) -> ty::ImplPolarity {
         self.get_impl_data(id).polarity
     }
 
@@ -915,14 +910,6 @@ impl<'a, 'tcx> CrateMetadata {
         }
     }
 
-    pub fn const_is_rvalue_promotable_to_static(&self, id: DefIndex) -> bool {
-        match self.entry(id).kind {
-            EntryKind::AssocConst(_, data, _) |
-            EntryKind::Const(data, _) => data.ast_promotable,
-            _ => bug!(),
-        }
-    }
-
     pub fn is_item_mir_available(&self, id: DefIndex) -> bool {
         !self.is_proc_macro(id) &&
         self.maybe_entry(id).and_then(|item| item.decode(self).mir).is_some()
@@ -932,7 +919,7 @@ impl<'a, 'tcx> CrateMetadata {
         self.entry_unless_proc_macro(id)
             .and_then(|entry| entry.mir.map(|mir| mir.decode((self, tcx))))
             .unwrap_or_else(|| {
-                bug!("get_optimized_mir: missing MIR for `{:?}", self.local_def_id(id))
+                bug!("get_optimized_mir: missing MIR for `{:?}`", self.local_def_id(id))
             })
     }
 
@@ -1210,6 +1197,15 @@ impl<'a, 'tcx> CrateMetadata {
             _ => hir::Constness::NotConst,
         };
         constness == hir::Constness::Const
+    }
+
+    pub fn asyncness(&self, id: DefIndex) -> hir::IsAsync {
+         match self.entry(id).kind {
+            EntryKind::Fn(data) => data.decode(self).asyncness,
+            EntryKind::Method(data) => data.decode(self).fn_data.asyncness,
+            EntryKind::ForeignFn(data) => data.decode(self).asyncness,
+            _ => bug!("asyncness: expect functions entry."),
+        }
     }
 
     pub fn is_foreign_item(&self, id: DefIndex) -> bool {

@@ -354,6 +354,17 @@ impl<'a> Resolver<'a> {
                     span, "defaulted type parameters cannot be forward declared".to_string());
                 err
             }
+            ResolutionError::SelfInTyParamDefault => {
+                let mut err = struct_span_err!(
+                    self.session,
+                    span,
+                    E0735,
+                    "type parameters cannot use `Self` in their defaults"
+                );
+                err.span_label(
+                    span, "`Self` in type parameter default".to_string());
+                err
+            }
             ResolutionError::ConstParamDependentOnTypeParam => {
                 let mut err = struct_span_err!(
                     self.session,
@@ -516,7 +527,7 @@ impl<'a> Resolver<'a> {
                         in_module_is_extern)) = worklist.pop() {
             // We have to visit module children in deterministic order to avoid
             // instabilities in reported imports (#43552).
-            in_module.for_each_child_stable(self, |this, ident, ns, name_binding| {
+            in_module.for_each_child(self, |this, ident, ns, name_binding| {
                 // avoid imports entirely
                 if name_binding.is_import() && !name_binding.is_extern_crate() { return; }
                 // avoid non-importable candidates as well

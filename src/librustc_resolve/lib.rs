@@ -9,7 +9,6 @@
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 
-#![feature(inner_deref)]
 #![feature(crate_visibility_modifier)]
 #![feature(label_break_value)]
 #![feature(mem_take)]
@@ -58,6 +57,7 @@ use std::{cmp, fmt, iter, ptr};
 use std::collections::BTreeSet;
 use rustc_data_structures::ptr_key::PtrKey;
 use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::fx::FxIndexMap;
 
 use diagnostics::{Suggestion, ImportSuggestion};
 use diagnostics::{find_span_of_binding_until_next_binding, extend_span_to_previous_binding};
@@ -214,6 +214,8 @@ enum ResolutionError<'a> {
     BindingShadowsSomethingUnacceptable(&'a str, Name, &'a NameBinding<'a>),
     /// Error E0128: type parameters with a default cannot use forward-declared identifiers.
     ForwardDeclaredTyParam, // FIXME(const_generics:defaults)
+    /// Error E0735: type parameters with a default cannot use `Self`
+    SelfInTyParamDefault,
     /// Error E0671: const parameter cannot depend on type parameter.
     ConstParamDependentOnTypeParam,
 }
@@ -290,7 +292,7 @@ impl<'tcx> Visitor<'tcx> for UsePlacementFinder {
         }
         // find a use statement
         for item in &module.items {
-            match item.node {
+            match item.kind {
                 ItemKind::Use(..) => {
                     // don't suggest placing a use before the prelude
                     // import or other generated ones
@@ -429,7 +431,7 @@ impl ModuleKind {
     }
 }
 
-type Resolutions<'a> = RefCell<FxHashMap<(Ident, Namespace), &'a RefCell<NameResolution<'a>>>>;
+type Resolutions<'a> = RefCell<FxIndexMap<(Ident, Namespace), &'a RefCell<NameResolution<'a>>>>;
 
 /// One node in the tree of modules.
 pub struct ModuleData<'a> {
@@ -491,17 +493,6 @@ impl<'a> ModuleData<'a> {
     {
         for (&(ident, ns), name_resolution) in resolver.as_mut().resolutions(self).borrow().iter() {
             name_resolution.borrow().binding.map(|binding| f(resolver, ident, ns, binding));
-        }
-    }
-
-    fn for_each_child_stable<R, F>(&'a self, resolver: &mut R, mut f: F)
-        where R: AsMut<Resolver<'a>>, F: FnMut(&mut R, Ident, Namespace, &'a NameBinding<'a>)
-    {
-        let resolutions = resolver.as_mut().resolutions(self).borrow();
-        let mut resolutions = resolutions.iter().collect::<Vec<_>>();
-        resolutions.sort_by_cached_key(|&(&(ident, ns), _)| (ident.as_str(), ns));
-        for &(&(ident, ns), &resolution) in resolutions.iter() {
-            resolution.borrow().binding.map(|binding| f(resolver, ident, ns, binding));
         }
     }
 
@@ -1536,7 +1527,7 @@ impl<'a> Resolver<'a> {
             if let Some(res) = ribs[i].bindings.get(&rib_ident).cloned() {
                 // The ident resolves to a type parameter or local variable.
                 return Some(LexicalScopeBinding::Res(
-                    self.validate_res_from_ribs(i, res, record_used, path_span, ribs),
+                    self.validate_res_from_ribs(i, rib_ident, res, record_used, path_span, ribs),
                 ));
             }
 
@@ -2122,6 +2113,7 @@ impl<'a> Resolver<'a> {
     fn validate_res_from_ribs(
         &mut self,
         rib_index: usize,
+        rib_ident: Ident,
         res: Res,
         record_used: bool,
         span: Span,
@@ -2133,7 +2125,12 @@ impl<'a> Resolver<'a> {
         // An invalid forward use of a type parameter from a previous default.
         if let ForwardTyParamBanRibKind = all_ribs[rib_index].kind {
             if record_used {
-                self.report_error(span, ResolutionError::ForwardDeclaredTyParam);
+                let res_error = if rib_ident.name == kw::SelfUpper {
+                    ResolutionError::SelfInTyParamDefault
+                } else {
+                    ResolutionError::ForwardDeclaredTyParam
+                };
+                self.report_error(span, res_error);
             }
             assert_eq!(res, Res::Err);
             return Res::Err;

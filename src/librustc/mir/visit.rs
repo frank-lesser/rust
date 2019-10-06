@@ -1,5 +1,5 @@
 use crate::ty::subst::SubstsRef;
-use crate::ty::{CanonicalUserTypeAnnotation, ClosureSubsts, GeneratorSubsts, Ty};
+use crate::ty::{CanonicalUserTypeAnnotation, Ty};
 use crate::mir::*;
 use syntax_pos::Span;
 
@@ -166,6 +166,15 @@ macro_rules! make_mir_visitor {
                 self.super_projection(base, projection, context, location);
             }
 
+            fn visit_projection_elem(&mut self,
+                                     base: & $($mutability)? PlaceBase<'tcx>,
+                                     proj_base: & $($mutability)? [PlaceElem<'tcx>],
+                                     elem: & $($mutability)? PlaceElem<'tcx>,
+                                     context: PlaceContext,
+                                     location: Location) {
+                self.super_projection_elem(base, proj_base, elem, context, location);
+            }
+
             fn visit_constant(&mut self,
                               constant: & $($mutability)? Constant<'tcx>,
                               location: Location) {
@@ -219,18 +228,6 @@ macro_rules! make_mir_visitor {
                             substs: & $($mutability)? SubstsRef<'tcx>,
                             _: Location) {
                 self.super_substs(substs);
-            }
-
-            fn visit_closure_substs(&mut self,
-                                    substs: & $($mutability)? ClosureSubsts<'tcx>,
-                                    _: Location) {
-                self.super_closure_substs(substs);
-            }
-
-            fn visit_generator_substs(&mut self,
-                                      substs: & $($mutability)? GeneratorSubsts<'tcx>,
-                                    _: Location) {
-                self.super_generator_substs(substs);
             }
 
             fn visit_local_decl(&mut self,
@@ -618,14 +615,14 @@ macro_rules! make_mir_visitor {
                                 _,
                                 closure_substs
                             ) => {
-                                self.visit_closure_substs(closure_substs, location);
+                                self.visit_substs(closure_substs, location);
                             }
                             AggregateKind::Generator(
                                 _,
                                 generator_substs,
                                 _movability,
                             ) => {
-                                self.visit_generator_substs(generator_substs, location);
+                                self.visit_substs(generator_substs, location);
                             }
                         }
 
@@ -725,27 +722,36 @@ macro_rules! make_mir_visitor {
                                 projection: & $($mutability)? [PlaceElem<'tcx>],
                                 context: PlaceContext,
                                 location: Location) {
-                if let [proj_base @ .., elem] = projection {
-                    self.visit_projection(base, proj_base, context, location);
+                let mut cursor = projection;
+                while let [proj_base @ .., elem] = cursor {
+                    cursor = proj_base;
+                    self.visit_projection_elem(base, cursor, elem, context, location);
+                }
+            }
 
-                    match elem {
-                        ProjectionElem::Field(_field, ty) => {
-                            self.visit_ty(ty, TyContext::Location(location));
-                        }
-                        ProjectionElem::Index(local) => {
-                            self.visit_local(
-                                local,
-                                PlaceContext::NonMutatingUse(NonMutatingUseContext::Copy),
-                                location
-                            );
-                        }
-                        ProjectionElem::Deref |
-                        ProjectionElem::Subslice { from: _, to: _ } |
-                        ProjectionElem::ConstantIndex { offset: _,
-                                                        min_length: _,
-                                                        from_end: _ } |
-                        ProjectionElem::Downcast(_, _) => {
-                        }
+            fn super_projection_elem(&mut self,
+                                     _base: & $($mutability)? PlaceBase<'tcx>,
+                                     _proj_base: & $($mutability)? [PlaceElem<'tcx>],
+                                     elem: & $($mutability)? PlaceElem<'tcx>,
+                                     _context: PlaceContext,
+                                     location: Location) {
+                match elem {
+                    ProjectionElem::Field(_field, ty) => {
+                        self.visit_ty(ty, TyContext::Location(location));
+                    }
+                    ProjectionElem::Index(local) => {
+                        self.visit_local(
+                            local,
+                            PlaceContext::NonMutatingUse(NonMutatingUseContext::Copy),
+                            location
+                        );
+                    }
+                    ProjectionElem::Deref |
+                    ProjectionElem::Subslice { from: _, to: _ } |
+                    ProjectionElem::ConstantIndex { offset: _,
+                                                    min_length: _,
+                                                    from_end: _ } |
+                    ProjectionElem::Downcast(_, _) => {
                     }
                 }
             }
@@ -832,14 +838,6 @@ macro_rules! make_mir_visitor {
             }
 
             fn super_substs(&mut self, _substs: & $($mutability)? SubstsRef<'tcx>) {
-            }
-
-            fn super_generator_substs(&mut self,
-                                      _substs: & $($mutability)? GeneratorSubsts<'tcx>) {
-            }
-
-            fn super_closure_substs(&mut self,
-                                    _substs: & $($mutability)? ClosureSubsts<'tcx>) {
             }
 
             // Convenience methods

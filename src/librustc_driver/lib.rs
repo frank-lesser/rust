@@ -66,7 +66,7 @@ use syntax::source_map::FileLoader;
 use syntax::feature_gate::{GatedCfg, UnstableFeatures};
 use syntax::parse::{self, PResult};
 use syntax::symbol::sym;
-use syntax_pos::{DUMMY_SP, MultiSpan, FileName};
+use syntax_pos::{DUMMY_SP, FileName};
 
 pub mod pretty;
 mod args;
@@ -296,7 +296,6 @@ pub fn run_compiler(
                     );
                     Ok(())
                 })?;
-                return sess.compile_status();
             } else {
                 let mut krate = compiler.parse()?.take();
                 pretty::visit_crate(sess, &mut krate, ppm);
@@ -307,8 +306,8 @@ pub fn run_compiler(
                     ppm,
                     compiler.output_file().as_ref().map(|p| &**p),
                 );
-                return sess.compile_status();
             }
+            return sess.compile_status();
         }
 
         if callbacks.after_parsing(compiler) == Compilation::Stop {
@@ -701,7 +700,7 @@ impl RustcDefaultCalls {
                     let mut cfgs = sess.parse_sess.config.iter().filter_map(|&(name, ref value)| {
                         let gated_cfg = GatedCfg::gate(&ast::MetaItem {
                             path: ast::Path::from_ident(ast::Ident::with_dummy_span(name)),
-                            node: ast::MetaItemKind::Word,
+                            kind: ast::MetaItemKind::Word,
                             span: DUMMY_SP,
                         });
 
@@ -1196,15 +1195,16 @@ pub fn report_ice(info: &panic::PanicInfo<'_>, bug_report_url: &str) {
         false,
         false,
         None,
+        false,
     ));
     let handler = errors::Handler::with_emitter(true, None, emitter);
 
     // a .span_bug or .bug call has already printed what
     // it wants to print.
     if !info.payload().is::<errors::ExplicitBug>() {
-        handler.emit(&MultiSpan::new(),
-                     "unexpected panic",
-                     errors::Level::Bug);
+        let d = errors::Diagnostic::new(errors::Level::Bug, "unexpected panic");
+        handler.emit_diagnostic(&d);
+        handler.abort_if_errors_and_should_abort();
     }
 
     let mut xs: Vec<Cow<'static, str>> = vec![
@@ -1224,16 +1224,14 @@ pub fn report_ice(info: &panic::PanicInfo<'_>, bug_report_url: &str) {
     }
 
     for note in &xs {
-        handler.emit(&MultiSpan::new(),
-                     note,
-                     errors::Level::Note);
+        handler.note_without_error(&note);
     }
 
     // If backtraces are enabled, also print the query stack
     let backtrace = env::var_os("RUST_BACKTRACE").map(|x| &x != "0").unwrap_or(false);
 
     if backtrace {
-        TyCtxt::try_print_query_stack();
+        TyCtxt::try_print_query_stack(&handler);
     }
 
     #[cfg(windows)]
