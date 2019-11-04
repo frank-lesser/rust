@@ -12,8 +12,8 @@ use Destination::*;
 use syntax_pos::{SourceFile, Span, MultiSpan};
 
 use crate::{
-    Level, CodeSuggestion, Diagnostic, SubDiagnostic,
-    SuggestionStyle, SourceMapperDyn, DiagnosticId,
+    Level, CodeSuggestion, Diagnostic, SubDiagnostic, pluralise,
+    SuggestionStyle, SourceMapper, SourceMapperDyn, DiagnosticId,
 };
 use crate::Level::Error;
 use crate::snippet::{Annotation, AnnotationType, Line, MultilineAnnotation, StyledString, Style};
@@ -180,7 +180,7 @@ const ANONYMIZED_LINE_NUM: &str = "LL";
 /// Emitter trait for emitting errors.
 pub trait Emitter {
     /// Emit a structured diagnostic.
-    fn emit_diagnostic(&mut self, db: &Diagnostic);
+    fn emit_diagnostic(&mut self, diag: &Diagnostic);
 
     /// Emit a notification that an artifact has been output.
     /// This is currently only supported for the JSON format,
@@ -191,6 +191,8 @@ pub trait Emitter {
     fn should_show_explain(&self) -> bool {
         true
     }
+
+    fn source_map(&self) -> Option<&Lrc<SourceMapperDyn>>;
 
     /// Formats the substitutions of the primary_span
     ///
@@ -204,10 +206,10 @@ pub trait Emitter {
     ///   we return the original `primary_span` and the original suggestions.
     fn primary_span_formatted<'a>(
         &mut self,
-        db: &'a Diagnostic
+        diag: &'a Diagnostic,
     ) -> (MultiSpan, &'a [CodeSuggestion]) {
-        let mut primary_span = db.span.clone();
-        if let Some((sugg, rest)) = db.suggestions.split_first() {
+        let mut primary_span = diag.span.clone();
+        if let Some((sugg, rest)) = diag.suggestions.split_first() {
             if rest.is_empty() &&
                // ^ if there is only one suggestion
                // don't display multi-suggestions as labels
@@ -234,7 +236,20 @@ pub trait Emitter {
                     format!("help: {}", sugg.msg)
                 } else {
                     // Show the default suggestion text with the substitution
-                    format!("help: {}: `{}`", sugg.msg, substitution)
+                    format!(
+                        "help: {}{}: `{}`",
+                        sugg.msg,
+                        if self.source_map().map(|sm| is_case_difference(
+                            &**sm,
+                            substitution,
+                            sugg.substitutions[0].parts[0].span,
+                        )).unwrap_or(false) {
+                            " (notice the capitalization)"
+                        } else {
+                            ""
+                        },
+                        substitution,
+                    )
                 };
                 primary_span.push_span_label(sugg.substitutions[0].parts[0].span, msg);
 
@@ -245,10 +260,10 @@ pub trait Emitter {
                 // to be consistent. We could try to figure out if we can
                 // make one (or the first one) inline, but that would give
                 // undue importance to a semi-random suggestion
-                (primary_span, &db.suggestions)
+                (primary_span, &diag.suggestions)
             }
         } else {
-            (primary_span, &db.suggestions)
+            (primary_span, &diag.suggestions)
         }
     }
 
@@ -382,19 +397,23 @@ pub trait Emitter {
 }
 
 impl Emitter for EmitterWriter {
-    fn emit_diagnostic(&mut self, db: &Diagnostic) {
-        let mut children = db.children.clone();
-        let (mut primary_span, suggestions) = self.primary_span_formatted(&db);
+    fn source_map(&self) -> Option<&Lrc<SourceMapperDyn>> {
+        self.sm.as_ref()
+    }
+
+    fn emit_diagnostic(&mut self, diag: &Diagnostic) {
+        let mut children = diag.children.clone();
+        let (mut primary_span, suggestions) = self.primary_span_formatted(&diag);
 
         self.fix_multispans_in_std_macros(&self.sm,
                                           &mut primary_span,
                                           &mut children,
-                                          &db.level,
+                                          &diag.level,
                                           self.external_macro_backtrace);
 
-        self.emit_messages_default(&db.level,
-                                   &db.styled_message(),
-                                   &db.code,
+        self.emit_messages_default(&diag.level,
+                                   &diag.styled_message(),
+                                   &diag.code,
                                    &primary_span,
                                    &children,
                                    &suggestions);
@@ -1461,7 +1480,9 @@ impl EmitterWriter {
         let suggestions = suggestion.splice_lines(&**sm);
 
         let mut row_num = 2;
-        for &(ref complete, ref parts) in suggestions.iter().take(MAX_SUGGESTIONS) {
+        let mut notice_capitalization = false;
+        for (complete, parts, only_capitalization) in suggestions.iter().take(MAX_SUGGESTIONS) {
+            notice_capitalization |= only_capitalization;
             // Only show underline if the suggestion spans a single line and doesn't cover the
             // entirety of the code output. If you have multiple replacements in the same line
             // of code, show the underline.
@@ -1551,34 +1572,37 @@ impl EmitterWriter {
             }
         }
         if suggestions.len() > MAX_SUGGESTIONS {
-            let msg = format!("and {} other candidates", suggestions.len() - MAX_SUGGESTIONS);
-            buffer.puts(row_num, 0, &msg, Style::NoStyle);
+            let others = suggestions.len() - MAX_SUGGESTIONS;
+            let msg = format!("and {} other candidate{}", others, pluralise!(others));
+            buffer.puts(row_num, max_line_num_len + 3, &msg, Style::NoStyle);
+        } else if notice_capitalization {
+            let msg = "notice the capitalization difference";
+            buffer.puts(row_num, max_line_num_len + 3, &msg, Style::NoStyle);
         }
         emit_to_destination(&buffer.render(), level, &mut self.dst, self.short_message)?;
         Ok(())
     }
 
-    fn emit_messages_default(&mut self,
-                             level: &Level,
-                             message: &[(String, Style)],
-                             code: &Option<DiagnosticId>,
-                             span: &MultiSpan,
-                             children: &[SubDiagnostic],
-                             suggestions: &[CodeSuggestion]) {
+    fn emit_messages_default(
+        &mut self,
+        level: &Level,
+        message: &[(String, Style)],
+        code: &Option<DiagnosticId>,
+        span: &MultiSpan,
+        children: &[SubDiagnostic],
+        suggestions: &[CodeSuggestion],
+    ) {
         let max_line_num_len = if self.ui_testing {
             ANONYMIZED_LINE_NUM.len()
         } else {
             self.get_max_line_num(span, children).to_string().len()
         };
 
-        match self.emit_message_default(span,
-                                        message,
-                                        code,
-                                        level,
-                                        max_line_num_len,
-                                        false) {
+        match self.emit_message_default(span, message, code, level, max_line_num_len, false) {
             Ok(()) => {
-                if !children.is_empty() {
+                if !children.is_empty() || suggestions.iter().any(|s| {
+                    s.style != SuggestionStyle::CompletelyHidden
+                }) {
                     let mut buffer = StyledBuffer::new();
                     if !self.short_message {
                         draw_col_separator_no_space(&mut buffer, 0, max_line_num_len + 1);
@@ -1792,10 +1816,9 @@ impl FileWithAnnotatedLines {
                     // Every `|` that joins the beginning of the span (`___^`) to the end (`|__^`).
                     add_annotation_to_file(&mut output, file.clone(), line, ann.as_line());
                 }
-                if middle < ann.line_end - 1 {
-                    for line in ann.line_end - 1..ann.line_end {
-                        add_annotation_to_file(&mut output, file.clone(), line, ann.as_line());
-                    }
+                let line_end = ann.line_end - 1;
+                if middle < line_end {
+                    add_annotation_to_file(&mut output, file.clone(), line_end, ann.as_line());
                 }
             } else {
                 end_ann.annotation_type = AnnotationType::Singleline;
@@ -2033,4 +2056,19 @@ impl<'a> Drop for WritableDst<'a> {
             _ => {}
         }
     }
+}
+
+/// Whether the original and suggested code are visually similar enough to warrant extra wording.
+pub fn is_case_difference(sm: &dyn SourceMapper, suggested: &str, sp: Span) -> bool {
+    // FIXME: this should probably be extended to also account for `FO0` → `FOO` and unicode.
+    let found = sm.span_to_snippet(sp).unwrap();
+    let ascii_confusables = &['c', 'f', 'i', 'k', 'o', 's', 'u', 'v', 'w', 'x', 'y', 'z'];
+    // All the chars that differ in capitalization are confusable (above):
+    let confusable = found.chars().zip(suggested.chars()).filter(|(f, s)| f != s).all(|(f, s)| {
+        (ascii_confusables.contains(&f) || ascii_confusables.contains(&s))
+    });
+    confusable && found.to_lowercase() == suggested.to_lowercase()
+            // FIXME: We sometimes suggest the same thing we already have, which is a
+            //        bug, but be defensive against that here.
+            && found != suggested
 }

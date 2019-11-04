@@ -536,10 +536,16 @@ pub struct EnclosingBreakables<'tcx> {
 
 impl<'tcx> EnclosingBreakables<'tcx> {
     fn find_breakable(&mut self, target_id: hir::HirId) -> &mut BreakableCtxt<'tcx> {
-        let ix = *self.by_id.get(&target_id).unwrap_or_else(|| {
+        self.opt_find_breakable(target_id).unwrap_or_else(|| {
             bug!("could not find enclosing breakable with id {}", target_id);
-        });
-        &mut self.stack[ix]
+        })
+    }
+
+    fn opt_find_breakable(&mut self, target_id: hir::HirId) -> Option<&mut BreakableCtxt<'tcx>> {
+        match self.by_id.get(&target_id) {
+            Some(ix) => Some(&mut self.stack[*ix]),
+            None => None,
+        }
     }
 }
 
@@ -1387,7 +1393,35 @@ fn check_union(tcx: TyCtxt<'_>, id: hir::HirId, span: Span) {
     def.destructor(tcx); // force the destructor to be evaluated
     check_representable(tcx, span, def_id);
     check_transparent(tcx, span, def_id);
+    check_union_fields(tcx, span, def_id);
     check_packed(tcx, span, def_id);
+}
+
+/// When the `#![feature(untagged_unions)]` gate is active,
+/// check that the fields of the `union` does not contain fields that need dropping.
+fn check_union_fields(tcx: TyCtxt<'_>, span: Span, item_def_id: DefId) -> bool {
+    let item_type = tcx.type_of(item_def_id);
+    if let ty::Adt(def, substs) = item_type.kind {
+        assert!(def.is_union());
+        let fields = &def.non_enum_variant().fields;
+        for field in fields {
+            let field_ty = field.ty(tcx, substs);
+            // We are currently checking the type this field came from, so it must be local.
+            let field_span = tcx.hir().span_if_local(field.did).unwrap();
+            let param_env = tcx.param_env(field.did);
+            if field_ty.needs_drop(tcx, param_env) {
+                struct_span_err!(tcx.sess, field_span, E0740,
+                                    "unions may not contain fields that need dropping")
+                            .span_note(field_span,
+                                        "`std::mem::ManuallyDrop` can be used to wrap the type")
+                            .emit();
+                return false;
+            }
+        }
+    } else {
+        span_bug!(span, "unions must be ty::Adt, but got {:?}", item_type.kind);
+    }
+    return true;
 }
 
 /// Checks that an opaque type does not contain cycles and does not use `Self` or `T::Foo`
@@ -1713,8 +1747,6 @@ fn check_specialization_validity<'tcx>(
     impl_id: DefId,
     impl_item: &hir::ImplItem,
 ) {
-    let ancestors = trait_def.ancestors(tcx, impl_id);
-
     let kind = match impl_item.kind {
         hir::ImplItemKind::Const(..) => ty::AssocKind::Const,
         hir::ImplItemKind::Method(..) => ty::AssocKind::Method,
@@ -1722,15 +1754,53 @@ fn check_specialization_validity<'tcx>(
         hir::ImplItemKind::TyAlias(_) => ty::AssocKind::Type,
     };
 
-    let parent = ancestors.defs(tcx, trait_item.ident, kind, trait_def.def_id).nth(1)
-        .map(|node_item| node_item.map(|parent| parent.defaultness));
+    let mut ancestor_impls = trait_def.ancestors(tcx, impl_id)
+        .skip(1)
+        .filter_map(|parent| {
+            if parent.is_from_trait() {
+                None
+            } else {
+                Some((parent, parent.item(tcx, trait_item.ident, kind, trait_def.def_id)))
+            }
+        })
+        .peekable();
 
-    if let Some(parent) = parent {
-        if tcx.impl_item_is_final(&parent) {
-            report_forbidden_specialization(tcx, impl_item, parent.node.def_id());
-        }
+    if ancestor_impls.peek().is_none() {
+        // No parent, nothing to specialize.
+        return;
     }
 
+    let opt_result = ancestor_impls.find_map(|(parent_impl, parent_item)| {
+        match parent_item {
+            // Parent impl exists, and contains the parent item we're trying to specialize, but
+            // doesn't mark it `default`.
+            Some(parent_item) if tcx.impl_item_is_final(&parent_item) => {
+                Some(Err(parent_impl.def_id()))
+            }
+
+            // Parent impl contains item and makes it specializable.
+            Some(_) => {
+                Some(Ok(()))
+            }
+
+            // Parent impl doesn't mention the item. This means it's inherited from the
+            // grandparent. In that case, if parent is a `default impl`, inherited items use the
+            // "defaultness" from the grandparent, else they are final.
+            None => if tcx.impl_is_default(parent_impl.def_id()) {
+                None
+            } else {
+                Some(Err(parent_impl.def_id()))
+            }
+        }
+    });
+
+    // If `opt_result` is `None`, we have only encoutered `default impl`s that don't contain the
+    // item. This is allowed, the item isn't actually getting specialized here.
+    let result = opt_result.unwrap_or(Ok(()));
+
+    if let Err(parent_impl) = result {
+        report_forbidden_specialization(tcx, impl_item, parent_impl);
+    }
 }
 
 fn check_impl_items_against_trait<'tcx>(
@@ -1846,8 +1916,7 @@ fn check_impl_items_against_trait<'tcx>(
     let associated_type_overridden = overridden_associated_type.is_some();
     for trait_item in tcx.associated_items(impl_trait_ref.def_id) {
         let is_implemented = trait_def.ancestors(tcx, impl_id)
-            .defs(tcx, trait_item.ident, trait_item.kind, impl_trait_ref.def_id)
-            .next()
+            .leaf_def(tcx, trait_item.ident, trait_item.kind)
             .map(|node_item| !node_item.node.is_from_trait())
             .unwrap_or(false);
 
@@ -2200,7 +2269,7 @@ pub fn check_enum<'tcx>(tcx: TyCtxt<'tcx>, sp: Span, vs: &'tcx [hir::Variant], i
 
 fn report_unexpected_variant_res(tcx: TyCtxt<'_>, res: Res, span: Span, qpath: &QPath) {
     span_err!(tcx.sess, span, E0533,
-              "expected unit struct/variant or constant, found {} `{}`",
+              "expected unit struct, unit variant or constant, found {} `{}`",
               res.descr(),
               hir::print::to_string(tcx.hir(), |s| s.print_qpath(qpath, false)));
 }
@@ -2210,19 +2279,17 @@ impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
         self.tcx
     }
 
-    fn get_type_parameter_bounds(&self, _: Span, def_id: DefId)
-                                 -> &'tcx ty::GenericPredicates<'tcx>
-    {
+    fn get_type_parameter_bounds(&self, _: Span, def_id: DefId) -> ty::GenericPredicates<'tcx> {
         let tcx = self.tcx;
         let hir_id = tcx.hir().as_local_hir_id(def_id).unwrap();
         let item_id = tcx.hir().ty_param_owner(hir_id);
         let item_def_id = tcx.hir().local_def_id(item_id);
         let generics = tcx.generics_of(item_def_id);
         let index = generics.param_def_id_to_index[&def_id];
-        tcx.arena.alloc(ty::GenericPredicates {
+        ty::GenericPredicates {
             parent: None,
-            predicates: self.param_env.caller_bounds.iter().filter_map(|&predicate| {
-                match predicate {
+            predicates: tcx.arena.alloc_from_iter(
+                self.param_env.caller_bounds.iter().filter_map(|&predicate| match predicate {
                     ty::Predicate::Trait(ref data)
                     if data.skip_binder().self_ty().is_param(index) => {
                         // HACK(eddyb) should get the original `Span`.
@@ -2230,9 +2297,9 @@ impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
                         Some((predicate, span))
                     }
                     _ => None
-                }
-            }).collect()
-        })
+                }),
+            ),
+        }
     }
 
     fn re_infer(
@@ -2407,23 +2474,23 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         self.cause(span, ObligationCauseCode::MiscObligation)
     }
 
-    /// Resolves type variables in `ty` if possible. Unlike the infcx
+    /// Resolves type and const variables in `ty` if possible. Unlike the infcx
     /// version (resolve_vars_if_possible), this version will
     /// also select obligations if it seems useful, in an effort
     /// to get more type information.
-    fn resolve_type_vars_with_obligations(&self, mut ty: Ty<'tcx>) -> Ty<'tcx> {
-        debug!("resolve_type_vars_with_obligations(ty={:?})", ty);
+    fn resolve_vars_with_obligations(&self, mut ty: Ty<'tcx>) -> Ty<'tcx> {
+        debug!("resolve_vars_with_obligations(ty={:?})", ty);
 
         // No Infer()? Nothing needs doing.
-        if !ty.has_infer_types() {
-            debug!("resolve_type_vars_with_obligations: ty={:?}", ty);
+        if !ty.has_infer_types() && !ty.has_infer_consts() {
+            debug!("resolve_vars_with_obligations: ty={:?}", ty);
             return ty;
         }
 
         // If `ty` is a type variable, see whether we already know what it is.
         ty = self.resolve_vars_if_possible(&ty);
-        if !ty.has_infer_types() {
-            debug!("resolve_type_vars_with_obligations: ty={:?}", ty);
+        if !ty.has_infer_types() && !ty.has_infer_consts()  {
+            debug!("resolve_vars_with_obligations: ty={:?}", ty);
             return ty;
         }
 
@@ -2434,7 +2501,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         self.select_obligations_where_possible(false, |_| {});
         ty = self.resolve_vars_if_possible(&ty);
 
-        debug!("resolve_type_vars_with_obligations: ty={:?}", ty);
+        debug!("resolve_vars_with_obligations: ty={:?}", ty);
         ty
     }
 
@@ -2700,8 +2767,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let mut opaque_types = self.opaque_types.borrow_mut();
         for (ty, decl) in opaque_type_map {
-            let old_value = opaque_types.insert(ty, decl);
-            assert!(old_value.is_none(), "instantiated twice: {:?}/{:?}", ty, decl);
+            let _ = opaque_types.insert(ty, decl);
         }
 
         value
@@ -3635,7 +3701,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                            formal_ret: Ty<'tcx>,
                                            formal_args: &[Ty<'tcx>])
                                            -> Vec<Ty<'tcx>> {
-        let formal_ret = self.resolve_type_vars_with_obligations(formal_ret);
+        let formal_ret = self.resolve_vars_with_obligations(formal_ret);
         let ret_ty = match expected_ret.only_has_type(self) {
             Some(ret) => ret,
             None => return Vec::new()
@@ -4181,20 +4247,21 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub fn suggest_mismatched_types_on_tail(
         &self,
         err: &mut DiagnosticBuilder<'tcx>,
-        expression: &'tcx hir::Expr,
+        expr: &'tcx hir::Expr,
         expected: Ty<'tcx>,
         found: Ty<'tcx>,
         cause_span: Span,
         blk_id: hir::HirId,
     ) -> bool {
-        self.suggest_missing_semicolon(err, expression, expected, cause_span);
+        let expr = expr.peel_drop_temps();
+        self.suggest_missing_semicolon(err, expr, expected, cause_span);
         let mut pointing_at_return_type = false;
         if let Some((fn_decl, can_suggest)) = self.get_fn_decl(blk_id) {
             pointing_at_return_type = self.suggest_missing_return_type(
                 err, &fn_decl, expected, found, can_suggest);
         }
-        self.suggest_ref_or_into(err, expression, expected, found);
-        self.suggest_boxing_when_appropriate(err, expression, expected, found);
+        self.suggest_ref_or_into(err, expr, expected, found);
+        self.suggest_boxing_when_appropriate(err, expr, expected, found);
         pointing_at_return_type
     }
 
@@ -4483,7 +4550,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 err.span_suggestion(
                     span,
                     "try adding a return type",
-                    format!("-> {} ", self.resolve_type_vars_with_obligations(found)),
+                    format!("-> {} ", self.resolve_vars_with_obligations(found)),
                     Applicability::MachineApplicable);
                 true
             }
@@ -4959,7 +5026,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     // If no resolution is possible, then an error is reported.
     // Numeric inference variables may be left unresolved.
     pub fn structurally_resolved_type(&self, sp: Span, ty: Ty<'tcx>) -> Ty<'tcx> {
-        let ty = self.resolve_type_vars_with_obligations(ty);
+        let ty = self.resolve_vars_with_obligations(ty);
         if !ty.is_ty_var() {
             ty
         } else {

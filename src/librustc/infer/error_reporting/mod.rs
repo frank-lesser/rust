@@ -200,7 +200,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 {
                     sp = param.span;
                 }
-                (format!("the lifetime {} as defined on", br.name), sp)
+                (format!("the lifetime `{}` as defined on", br.name), sp)
             }
             ty::ReFree(ty::FreeRegion {
                 bound_region: ty::BoundRegion::BrNamed(_, name),
@@ -213,7 +213,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 {
                     sp = param.span;
                 }
-                (format!("the lifetime {} as defined on", name), sp)
+                (format!("the lifetime `{}` as defined on", name), sp)
             }
             ty::ReFree(ref fr) => match fr.bound_region {
                 ty::BrAnon(idx) => (
@@ -221,7 +221,7 @@ impl<'tcx> TyCtxt<'tcx> {
                     self.hir().span(node),
                 ),
                 _ => (
-                    format!("the lifetime {} as defined on", region),
+                    format!("the lifetime `{}` as defined on", region),
                     cm.def_span(self.hir().span(node)),
                 ),
             },
@@ -542,7 +542,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 disambiguated_data: &DisambiguatedDefPathData,
             ) -> Result<Self::Path, Self::Error> {
                 let mut path = print_prefix(self)?;
-                path.push(disambiguated_data.data.as_interned_str().to_string());
+                path.push(disambiguated_data.data.as_symbol().to_string());
                 Ok(path)
             }
             fn path_generic_args(
@@ -867,6 +867,9 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     /// Compares two given types, eliding parts that are the same between them and highlighting
     /// relevant differences, and return two representation of those types for highlighted printing.
     fn cmp(&self, t1: Ty<'tcx>, t2: Ty<'tcx>) -> (DiagnosticStyledString, DiagnosticStyledString) {
+        debug!("cmp(t1={}, t1.kind={:?}, t2={}, t2.kind={:?})", t1, t1.kind, t2, t2.kind);
+
+        // helper functions
         fn equals<'tcx>(a: Ty<'tcx>, b: Ty<'tcx>) -> bool {
             match (&a.kind, &b.kind) {
                 (a, b) if *a == *b => true,
@@ -902,6 +905,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             s.push_normal(ty.to_string());
         }
 
+        // process starts here
         match (&t1.kind, &t2.kind) {
             (&ty::Adt(def1, sub1), &ty::Adt(def2, sub2)) => {
                 let sub_no_defaults_1 = self.strip_generic_default_params(def1.did, sub1);
@@ -935,6 +939,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                         .filter(|(a, b)| a == b)
                         .count();
                     let len = sub1.len() - common_default_params;
+                    let consts_offset = len - sub1.consts().count();
 
                     // Only draw `<...>` if there're lifetime/type arguments.
                     if len > 0 {
@@ -981,7 +986,8 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     //         ^ elided type as this type argument was the same in both sides
                     let type_arguments = sub1.types().zip(sub2.types());
                     let regions_len = sub1.regions().count();
-                    for (i, (ta1, ta2)) in type_arguments.take(len).enumerate() {
+                    let num_display_types = consts_offset - regions_len;
+                    for (i, (ta1, ta2)) in type_arguments.take(num_display_types).enumerate() {
                         let i = i + regions_len;
                         if ta1 == ta2 {
                             values.0.push_normal("_");
@@ -990,6 +996,21 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                             let (x1, x2) = self.cmp(ta1, ta2);
                             (values.0).0.extend(x1.0);
                             (values.1).0.extend(x2.0);
+                        }
+                        self.push_comma(&mut values.0, &mut values.1, len, i);
+                    }
+
+                    // Do the same for const arguments, if they are equal, do not highlight and
+                    // elide them from the output.
+                    let const_arguments = sub1.consts().zip(sub2.consts());
+                    for (i, (ca1, ca2)) in const_arguments.enumerate() {
+                        let i = i + consts_offset;
+                        if ca1 == ca2 {
+                            values.0.push_normal("_");
+                            values.1.push_normal("_");
+                        } else {
+                            values.0.push_highlighted(ca1.to_string());
+                            values.1.push_highlighted(ca2.to_string());
                         }
                         self.push_comma(&mut values.0, &mut values.1, len, i);
                     }
@@ -1035,12 +1056,47 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                         return values;
                     }
 
-                    // We couldn't find anything in common, highlight everything.
-                    //     let x: Bar<Qux> = y::<Foo<Zar>>();
-                    (
-                        DiagnosticStyledString::highlighted(t1.to_string()),
-                        DiagnosticStyledString::highlighted(t2.to_string()),
-                    )
+                    // We can't find anything in common, highlight relevant part of type path.
+                    //     let x: foo::bar::Baz<Qux> = y:<foo::bar::Bar<Zar>>();
+                    //     foo::bar::Baz<Qux>
+                    //     foo::bar::Bar<Zar>
+                    //               -------- this part of the path is different
+
+                    let t1_str = t1.to_string();
+                    let t2_str = t2.to_string();
+                    let min_len = t1_str.len().min(t2_str.len());
+
+                    const SEPARATOR: &str = "::";
+                    let separator_len = SEPARATOR.len();
+                    let split_idx: usize =
+                        t1_str.split(SEPARATOR)
+                            .zip(t2_str.split(SEPARATOR))
+                            .take_while(|(mod1_str, mod2_str)| mod1_str == mod2_str)
+                            .map(|(mod_str, _)| mod_str.len() + separator_len)
+                            .sum();
+
+                    debug!("cmp: separator_len={}, split_idx={}, min_len={}",
+                        separator_len, split_idx, min_len
+                    );
+
+                    if split_idx >= min_len {
+                        // paths are identical, highlight everything
+                        (
+                            DiagnosticStyledString::highlighted(t1_str),
+                            DiagnosticStyledString::highlighted(t2_str)
+                        )
+                    } else {
+                        let (common, uniq1) = t1_str.split_at(split_idx);
+                        let (_, uniq2) = t2_str.split_at(split_idx);
+                        debug!("cmp: common={}, uniq1={}, uniq2={}", common, uniq1, uniq2);
+
+                        values.0.push_normal(common);
+                        values.0.push_highlighted(uniq1);
+                        values.1.push_normal(common);
+                        values.1.push_highlighted(uniq2);
+
+                        values
+                    }
                 }
             }
 
@@ -1103,6 +1159,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             _ => {}
         }
 
+        debug!("note_type_err(diag={:?})", diag);
         let (expected_found, exp_found, is_simple_error) = match values {
             None => (None, None, false),
             Some(values) => {
@@ -1129,10 +1186,17 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
 
         let span = cause.span(self.tcx);
 
-        diag.span_label(span, terr.to_string());
-        if let Some((sp, msg)) = secondary_span {
-            diag.span_label(sp, msg);
-        }
+        // Ignore msg for object safe coercion
+        // since E0038 message will be printed
+        match terr {
+            TypeError::ObjectUnsafeCoercion(_) => {}
+            _ => {
+                diag.span_label(span, terr.to_string());
+                if let Some((sp, msg)) = secondary_span {
+                    diag.span_label(sp, msg);
+                }
+            }
+        };
 
         if let Some((expected, found)) = expected_found {
             match (terr, is_simple_error, expected == found) {
@@ -1152,7 +1216,14 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                         &sort_string(values.found),
                     );
                 }
+                (TypeError::ObjectUnsafeCoercion(_), ..) => {
+                    diag.note_unsuccessfull_coercion(found, expected);
+                }
                 (_, false, _) => {
+                    debug!(
+                        "note_type_err: exp_found={:?}, expected={:?} found={:?}",
+                        exp_found, expected, found
+                    );
                     if let Some(exp_found) = exp_found {
                         self.suggest_as_ref_where_appropriate(span, &exp_found, diag);
                     }
@@ -1250,6 +1321,10 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         let span = trace.cause.span(self.tcx);
         let failure_code = trace.cause.as_failure_code(terr);
         let mut diag = match failure_code {
+            FailureCode::Error0038(did) => {
+                let violations = self.tcx.object_safety_violations(did);
+                self.tcx.report_object_safety_error(span, did, violations)
+            }
             FailureCode::Error0317(failure_str) => {
                 struct_span_err!(self.tcx.sess, span, E0317, "{}", failure_str)
             }
@@ -1611,6 +1686,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
 }
 
 enum FailureCode {
+    Error0038(DefId),
     Error0317(&'static str),
     Error0580(&'static str),
     Error0308(&'static str),
@@ -1649,6 +1725,7 @@ impl<'tcx> ObligationCause<'tcx> {
                 TypeError::IntrinsicCast => {
                     Error0308("cannot coerce intrinsics to function pointers")
                 }
+                TypeError::ObjectUnsafeCoercion(did) => Error0038(did.clone()),
                 _ => Error0308("mismatched types"),
             },
         }

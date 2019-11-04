@@ -13,7 +13,7 @@ use rustc_macros::HashStable;
 use crate::ty::subst::{InternalSubsts, Subst, SubstsRef, GenericArg, GenericArgKind};
 use crate::ty::{self, AdtDef, Discr, DefIdTree, TypeFlags, Ty, TyCtxt, TypeFoldable};
 use crate::ty::{List, TyS, ParamEnvAnd, ParamEnv};
-use crate::ty::layout::{Size, Integer, IntegerExt, VariantIdx};
+use crate::ty::layout::VariantIdx;
 use crate::util::captures::Captures;
 use crate::mir::interpret::{Scalar, GlobalId};
 
@@ -24,8 +24,7 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use rustc_target::spec::abi;
 use syntax::ast::{self, Ident};
-use syntax::attr::{SignedInt, UnsignedInt};
-use syntax::symbol::{kw, InternedString};
+use syntax::symbol::{kw, Symbol};
 
 use self::InferTy::*;
 use self::TyKind::*;
@@ -56,7 +55,7 @@ pub enum BoundRegion {
     ///
     /// The `DefId` is needed to distinguish free regions in
     /// the event of shadowing.
-    BrNamed(DefId, InternedString),
+    BrNamed(DefId, Symbol),
 
     /// Anonymous region for the implicit env pointer parameter
     /// to a closure
@@ -305,8 +304,7 @@ static_assert_size!(TyKind<'_>, 24);
 /// type parameters is similar, but the role of CK and CS are
 /// different. CK represents the "yield type" and CS represents the
 /// "return type" of the generator.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
-         RustcEncodable, RustcDecodable, HashStable)]
+#[derive(Copy, Clone, Debug)]
 pub struct ClosureSubsts<'tcx> {
     /// Lifetime and type parameters from the enclosing function,
     /// concatenated with the types of the upvars.
@@ -393,8 +391,7 @@ impl<'tcx> ClosureSubsts<'tcx> {
 }
 
 /// Similar to `ClosureSubsts`; see the above documentation for more.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
-         RustcEncodable, RustcDecodable, HashStable)]
+#[derive(Copy, Clone, Debug)]
 pub struct GeneratorSubsts<'tcx> {
     pub substs: SubstsRef<'tcx>,
 }
@@ -1036,7 +1033,7 @@ impl<'tcx> ProjectionTy<'tcx> {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable, HashStable)]
+#[derive(Clone, Debug)]
 pub struct GenSig<'tcx> {
     pub yield_ty: Ty<'tcx>,
     pub return_ty: Ty<'tcx>,
@@ -1124,16 +1121,16 @@ pub type CanonicalPolyFnSig<'tcx> = Canonical<'tcx, Binder<FnSig<'tcx>>>;
          Hash, RustcEncodable, RustcDecodable, HashStable)]
 pub struct ParamTy {
     pub index: u32,
-    pub name: InternedString,
+    pub name: Symbol,
 }
 
 impl<'tcx> ParamTy {
-    pub fn new(index: u32, name: InternedString) -> ParamTy {
+    pub fn new(index: u32, name: Symbol) -> ParamTy {
         ParamTy { index, name: name }
     }
 
     pub fn for_self() -> ParamTy {
-        ParamTy::new(0, kw::SelfUpper.as_interned_str())
+        ParamTy::new(0, kw::SelfUpper)
     }
 
     pub fn for_def(def: &ty::GenericParamDef) -> ParamTy {
@@ -1149,11 +1146,11 @@ impl<'tcx> ParamTy {
          Eq, PartialEq, Ord, PartialOrd, HashStable)]
 pub struct ParamConst {
     pub index: u32,
-    pub name: InternedString,
+    pub name: Symbol,
 }
 
 impl<'tcx> ParamConst {
-    pub fn new(index: u32, name: InternedString) -> ParamConst {
+    pub fn new(index: u32, name: Symbol) -> ParamConst {
         ParamConst { index, name }
     }
 
@@ -1326,7 +1323,7 @@ impl<'tcx> rustc_serialize::UseSpecializedDecodable for Region<'tcx> {}
 pub struct EarlyBoundRegion {
     pub def_id: DefId,
     pub index: u32,
-    pub name: InternedString,
+    pub name: Symbol,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, RustcEncodable, RustcDecodable)]
@@ -1390,7 +1387,7 @@ pub struct BoundTy {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, RustcEncodable, RustcDecodable)]
 pub enum BoundTyKind {
     Anon,
-    Param(InternedString),
+    Param(Symbol),
 }
 
 impl_stable_hash_for!(struct BoundTy { var, kind });
@@ -1775,6 +1772,10 @@ impl<'tcx> TyS<'tcx> {
 
     #[inline]
     pub fn is_bool(&self) -> bool { self.kind == Bool }
+
+    /// Returns `true` if this type is a `str`.
+    #[inline]
+    pub fn is_str(&self) -> bool { self.kind == Str }
 
     #[inline]
     pub fn is_param(&self, index: u32) -> bool {
@@ -2200,7 +2201,9 @@ impl<'tcx> TyS<'tcx> {
                 _ => bug!("cannot convert type `{:?}` to a closure kind", self),
             },
 
-            Infer(_) => None,
+            // "Bound" types appear in canonical queries when the
+            // closure type is not yet known
+            Bound(..) | Infer(_) => None,
 
             Error => Some(ty::ClosureKind::Fn),
 
@@ -2300,20 +2303,7 @@ impl<'tcx> Const<'tcx> {
         ty: Ty<'tcx>,
     ) -> Option<u128> {
         assert_eq!(self.ty, ty);
-        // This is purely an optimization -- layout_of is a pretty expensive operation,
-        // but if we can determine the size without calling it, we don't need all that complexity
-        // (hashing, caching, etc.). As such, try to skip it.
-        let size = match ty.kind {
-            ty::Bool => Size::from_bytes(1),
-            ty::Char => Size::from_bytes(4),
-            ty::Int(ity) => {
-                Integer::from_attr(&tcx, SignedInt(ity)).size()
-            }
-            ty::Uint(uty) => {
-                Integer::from_attr(&tcx, UnsignedInt(uty)).size()
-            }
-            _ => tcx.layout_of(param_env.with_reveal_all().and(ty)).ok()?.size,
-        };
+        let size = tcx.layout_of(param_env.with_reveal_all().and(ty)).ok()?.size;
         // if `ty` does not depend on generic parameters, use an empty param_env
         self.eval(tcx, param_env).val.try_to_bits(size)
     }
@@ -2381,6 +2371,4 @@ pub enum InferConst<'tcx> {
     Var(ConstVid<'tcx>),
     /// A fresh const variable. See `infer::freshen` for more details.
     Fresh(u32),
-    /// Canonicalized const variable, used only when preparing a trait query.
-    Canonical(DebruijnIndex, BoundVar),
 }

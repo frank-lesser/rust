@@ -9,8 +9,6 @@ use crate::ty::query::Query;
 use crate::ty::query::config::{QueryConfig, QueryDescription};
 use crate::ty::query::job::{QueryJob, QueryResult, QueryInfo};
 
-use crate::util::common::{profq_msg, ProfileQueriesMsg, QueryMsg};
-
 use errors::DiagnosticBuilder;
 use errors::Level;
 use errors::Diagnostic;
@@ -62,33 +60,6 @@ impl<'tcx, M: QueryConfig<'tcx>> Default for QueryCache<'tcx, M> {
     }
 }
 
-// If enabled, sends a message to the profile-queries thread.
-macro_rules! profq_msg {
-    ($tcx:expr, $msg:expr) => {
-        if cfg!(debug_assertions) {
-            if $tcx.sess.profile_queries() {
-                profq_msg($tcx.sess, $msg)
-            }
-        }
-    }
-}
-
-// If enabled, formats a key using its debug string, which can be
-// expensive to compute (in terms of time).
-macro_rules! profq_query_msg {
-    ($query:expr, $tcx:expr, $key:expr) => {{
-        let msg = if cfg!(debug_assertions) {
-            if $tcx.sess.profile_queries_and_keys() {
-                Some(format!("{:?}", $key))
-            } else { None }
-        } else { None };
-        QueryMsg {
-            query: $query,
-            msg,
-        }
-    }}
-}
-
 /// A type representing the responsibility to execute the job in the `job` field.
 /// This will poison the relevant query if dropped.
 pub(super) struct JobOwner<'a, 'tcx, Q: QueryDescription<'tcx>> {
@@ -111,7 +82,6 @@ impl<'a, 'tcx, Q: QueryDescription<'tcx>> JobOwner<'a, 'tcx, Q> {
         loop {
             let mut lock = cache.get_shard_by_value(key).lock();
             if let Some(value) = lock.results.get(key) {
-                profq_msg!(tcx, ProfileQueriesMsg::CacheHit);
                 tcx.prof.query_cache_hit(Q::NAME);
                 let result = (value.value.clone(), value.index);
                 #[cfg(debug_assertions)]
@@ -120,6 +90,10 @@ impl<'a, 'tcx, Q: QueryDescription<'tcx>> JobOwner<'a, 'tcx, Q> {
                 }
                 return TryGetJob::JobCompleted(result);
             }
+
+            #[cfg(parallel_compiler)]
+            let query_blocked_prof_timer;
+
             let job = match lock.active.entry((*key).clone()) {
                 Entry::Occupied(entry) => {
                     match *entry.get() {
@@ -128,7 +102,9 @@ impl<'a, 'tcx, Q: QueryDescription<'tcx>> JobOwner<'a, 'tcx, Q> {
                             // in another thread has completed. Record how long we wait in the
                             // self-profiler.
                             #[cfg(parallel_compiler)]
-                            tcx.prof.query_blocked_start(Q::NAME);
+                            {
+                                query_blocked_prof_timer = tcx.prof.query_blocked(Q::NAME);
+                            }
 
                             job.clone()
                         },
@@ -170,7 +146,11 @@ impl<'a, 'tcx, Q: QueryDescription<'tcx>> JobOwner<'a, 'tcx, Q> {
             #[cfg(parallel_compiler)]
             {
                 let result = job.r#await(tcx, span);
-                tcx.prof.query_blocked_end(Q::NAME);
+
+                // This `drop()` is not strictly necessary as the binding
+                // would go out of scope anyway. But it's good to have an
+                // explicit marker of how far the measurement goes.
+                drop(query_blocked_prof_timer);
 
                 if let Err(cycle) = result {
                     return TryGetJob::Cycle(Q::handle_cycle_error(tcx, cycle));
@@ -358,13 +338,6 @@ impl<'tcx> TyCtxt<'tcx> {
                key,
                span);
 
-        profq_msg!(self,
-            ProfileQueriesMsg::QueryBegin(
-                span.data(),
-                profq_query_msg!(Q::NAME.as_str(), self, key),
-            )
-        );
-
         let job = match JobOwner::try_get(self, span, &key) {
             TryGetJob::NotYetStarted(job) => job,
             TryGetJob::Cycle(result) => return result,
@@ -383,7 +356,6 @@ impl<'tcx> TyCtxt<'tcx> {
 
         if Q::ANON {
 
-            profq_msg!(self, ProfileQueriesMsg::ProviderBegin);
             let prof_timer = self.prof.query_provider(Q::NAME);
 
             let ((result, dep_node_index), diagnostics) = with_diagnostics(|diagnostics| {
@@ -395,7 +367,6 @@ impl<'tcx> TyCtxt<'tcx> {
             });
 
             drop(prof_timer);
-            profq_msg!(self, ProfileQueriesMsg::ProviderEnd);
 
             self.dep_graph.read_index(dep_node_index);
 
@@ -468,7 +439,6 @@ impl<'tcx> TyCtxt<'tcx> {
         };
 
         let result = if let Some(result) = result {
-            profq_msg!(self, ProfileQueriesMsg::CacheHit);
             result
         } else {
             // We could not load a result from the on-disk cache, so
@@ -487,10 +457,6 @@ impl<'tcx> TyCtxt<'tcx> {
         // the cache and make sure that they have the expected fingerprint.
         if unlikely!(self.sess.opts.debugging_opts.incremental_verify_ich) {
             self.incremental_verify_ich::<Q>(&result, dep_node, dep_node_index);
-        }
-
-        if unlikely!(self.sess.opts.debugging_opts.query_dep_graph) {
-            self.dep_graph.mark_loaded_from_cache(dep_node_index, true);
         }
 
         result
@@ -546,7 +512,6 @@ impl<'tcx> TyCtxt<'tcx> {
                  - dep-node: {:?}",
                 key, dep_node);
 
-        profq_msg!(self, ProfileQueriesMsg::ProviderBegin);
         let prof_timer = self.prof.query_provider(Q::NAME);
 
         let ((result, dep_node_index), diagnostics) = with_diagnostics(|diagnostics| {
@@ -568,11 +533,6 @@ impl<'tcx> TyCtxt<'tcx> {
         });
 
         drop(prof_timer);
-        profq_msg!(self, ProfileQueriesMsg::ProviderEnd);
-
-        if unlikely!(self.sess.opts.debugging_opts.query_dep_graph) {
-            self.dep_graph.mark_loaded_from_cache(dep_node_index, false);
-        }
 
         if unlikely!(!diagnostics.is_empty()) {
             if dep_node.kind != crate::dep_graph::DepKind::Null {
@@ -614,19 +574,12 @@ impl<'tcx> TyCtxt<'tcx> {
 
             let _ = self.get_query::<Q>(DUMMY_SP, key);
         } else {
-            profq_msg!(self, ProfileQueriesMsg::CacheHit);
             self.prof.query_cache_hit(Q::NAME);
         }
     }
 
     #[allow(dead_code)]
     fn force_query<Q: QueryDescription<'tcx>>(self, key: Q::Key, span: Span, dep_node: DepNode) {
-        profq_msg!(
-            self,
-            ProfileQueriesMsg::QueryBegin(span.data(),
-                                          profq_query_msg!(Q::NAME.as_str(), self, key))
-        );
-
         // We may be concurrently trying both execute and force a query.
         // Ensure that only one of them runs the query.
         let job = match JobOwner::try_get(self, span, &key) {
@@ -858,7 +811,7 @@ macro_rules! define_queries_inner {
         }
 
         #[allow(nonstandard_style)]
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        #[derive(Clone, Copy)]
         pub enum QueryName {
             $($name),*
         }
@@ -876,7 +829,7 @@ macro_rules! define_queries_inner {
         }
 
         #[allow(nonstandard_style)]
-        #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+        #[derive(Clone, Debug)]
         pub enum Query<$tcx> {
             $($(#[$attr])* $name($K)),*
         }
@@ -1191,37 +1144,6 @@ pub fn force_from_dep_node(tcx: TyCtxt<'_>, dep_node: &DepNode) -> bool {
         return false
     }
 
-    macro_rules! def_id {
-        () => {
-            if let Some(def_id) = dep_node.extract_def_id(tcx) {
-                def_id
-            } else {
-                // Return from the whole function.
-                return false
-            }
-        }
-    };
-
-    macro_rules! krate {
-        () => { (def_id!()).krate }
-    };
-
-    macro_rules! force_ex {
-        ($tcx:expr, $query:ident, $key:expr) => {
-            {
-                $tcx.force_query::<crate::ty::query::queries::$query<'_>>(
-                    $key,
-                    DUMMY_SP,
-                    *dep_node
-                );
-            }
-        }
-    };
-
-    macro_rules! force {
-        ($query:ident, $key:expr) => { force_ex!(tcx, $query, $key) }
-    };
-
     rustc_dep_node_force!([dep_node, tcx]
         // These are inputs that are expected to be pre-allocated and that
         // should therefore always be red or green already.
@@ -1240,7 +1162,19 @@ pub fn force_from_dep_node(tcx: TyCtxt<'_>, dep_node: &DepNode) -> bool {
             bug!("force_from_dep_node: encountered {:?}", dep_node)
         }
 
-        DepKind::Analysis => { force!(analysis, krate!()); }
+        DepKind::Analysis => {
+            let def_id = if let Some(def_id) = dep_node.extract_def_id(tcx) {
+                def_id
+            } else {
+                // Return from the whole function.
+                return false
+            };
+            tcx.force_query::<crate::ty::query::queries::analysis<'_>>(
+                def_id.krate,
+                DUMMY_SP,
+                *dep_node
+            );
+        }
     );
 
     true

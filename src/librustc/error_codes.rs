@@ -259,8 +259,8 @@ trait Foo {
 This is similar to the second sub-error, but subtler. It happens in situations
 like the following:
 
-```compile_fail
-trait Super<A> {}
+```compile_fail,E0038
+trait Super<A: ?Sized> {}
 
 trait Trait: Super<Self> {
 }
@@ -270,17 +270,21 @@ struct Foo;
 impl Super<Foo> for Foo{}
 
 impl Trait for Foo {}
+
+fn main() {
+    let x: Box<dyn Trait>;
+}
 ```
 
 Here, the supertrait might have methods as follows:
 
 ```
-trait Super<A> {
-    fn get_a(&self) -> A; // note that this is object safe!
+trait Super<A: ?Sized> {
+    fn get_a(&self) -> &A; // note that this is object safe!
 }
 ```
 
-If the trait `Foo` was deriving from something like `Super<String>` or
+If the trait `Trait` was deriving from something like `Super<String>` or
 `Super<T>` (where `Foo` itself is `Foo<T>`), this is okay, because given a type
 `get_a()` will definitely return an object of that type.
 
@@ -465,7 +469,6 @@ fn main() {
 }
 ```
 "##,
-
 
 E0139: r##"
 #### Note: this error code is no longer emitted by the compiler.
@@ -1520,8 +1523,51 @@ where
 ```
 "##,
 
+E0495: r##"
+A lifetime cannot be determined in the given situation.
+
+Erroneous code example:
+
+```compile_fail,E0495
+fn transmute_lifetime<'a, 'b, T>(t: &'a (T,)) -> &'b T {
+    match (&t,) { // error!
+        ((u,),) => u,
+    }
+}
+
+let y = Box::new((42,));
+let x = transmute_lifetime(&y);
+```
+
+In this code, you have two ways to solve this issue:
+ 1. Enforce that `'a` lives at least as long as `'b`.
+ 2. Use the same lifetime requirement for both input and output values.
+
+So for the first solution, you can do it by replacing `'a` with `'a: 'b`:
+
+```
+fn transmute_lifetime<'a: 'b, 'b, T>(t: &'a (T,)) -> &'b T {
+    match (&t,) { // ok!
+        ((u,),) => u,
+    }
+}
+```
+
+In the second you can do it by simply removing `'b` so they both use `'a`:
+
+```
+fn transmute_lifetime<'a, T>(t: &'a (T,)) -> &'a T {
+    match (&t,) { // ok!
+        ((u,),) => u,
+    }
+}
+```
+"##,
+
 E0496: r##"
-A lifetime name is shadowing another lifetime name. Erroneous code example:
+A lifetime name is shadowing another lifetime name.
+
+Erroneous code example:
 
 ```compile_fail,E0496
 struct Foo<'a> {
@@ -1553,8 +1599,11 @@ fn main() {
 "##,
 
 E0497: r##"
-A stability attribute was used outside of the standard library. Erroneous code
-example:
+#### Note: this error code is no longer emitted by the compiler.
+
+A stability attribute was used outside of the standard library.
+
+Erroneous code example:
 
 ```compile_fail
 #[stable] // error: stability attributes may not be used outside of the
@@ -1698,6 +1747,27 @@ fn main() {
 
 To understand better how closures work in Rust, read:
 https://doc.rust-lang.org/book/ch13-01-closures.html
+"##,
+
+E0566: r##"
+Conflicting representation hints have been used on a same item.
+
+Erroneous code example:
+
+```
+#[repr(u32, u64)] // warning!
+enum Repr { A }
+```
+
+In most cases (if not all), using just one representation hint is more than
+enough. If you want to have a representation hint depending on the current
+architecture, use `cfg_attr`. Example:
+
+```
+#[cfg_attr(linux, repr(u32))]
+#[cfg_attr(not(linux), repr(u64))]
+enum Repr { A }
+```
 "##,
 
 E0580: r##"
@@ -1935,6 +2005,24 @@ a (non-transparent) struct containing a single float, while `Grams` is a
 transparent wrapper around a float. This can make a difference for the ABI.
 "##,
 
+E0697: r##"
+A closure has been used as `static`.
+
+Erroneous code example:
+
+```compile_fail,E0697
+fn main() {
+    static || {}; // used as `static`
+}
+```
+
+Closures cannot be used as `static`. They "save" the environment,
+and as such a static closure would save only a static environment
+which would consist only of variables with a static lifetime. Given
+this it would be better to use a proper function. The easiest fix
+is to remove the `static` keyword.
+"##,
+
 E0698: r##"
 When using generators (or async) all type variables must be bound so a
 generator can be constructed.
@@ -1957,8 +2045,8 @@ so that a generator can then be constructed:
 async fn bar<T>() -> () {}
 
 async fn foo() {
-  bar::<String>().await;
-  //   ^^^^^^^^ specify type explicitly
+    bar::<String>().await;
+    //   ^^^^^^^^ specify type explicitly
 }
 ```
 "##,
@@ -2017,8 +2105,6 @@ on something other than a struct or enum.
 Examples of erroneous code:
 
 ```compile_fail,E0701
-# #![feature(non_exhaustive)]
-
 #[non_exhaustive]
 trait Foo { }
 ```
@@ -2038,6 +2124,84 @@ static X: u32 = 42;
 ```
 "##,
 
+E0728: r##"
+[`await`] has been used outside [`async`] function or block.
+
+Erroneous code examples:
+
+```edition2018,compile_fail,E0728
+# use std::pin::Pin;
+# use std::future::Future;
+# use std::task::{Context, Poll};
+#
+# struct WakeOnceThenComplete(bool);
+#
+# fn wake_and_yield_once() -> WakeOnceThenComplete {
+#     WakeOnceThenComplete(false)
+# }
+#
+# impl Future for WakeOnceThenComplete {
+#     type Output = ();
+#     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+#         if self.0 {
+#             Poll::Ready(())
+#         } else {
+#             cx.waker().wake_by_ref();
+#             self.0 = true;
+#             Poll::Pending
+#         }
+#     }
+# }
+#
+fn foo() {
+    wake_and_yield_once().await // `await` is used outside `async` context
+}
+```
+
+[`await`] is used to suspend the current computation until the given
+future is ready to produce a value. So it is legal only within
+an [`async`] context, like an `async fn` or an `async` block.
+
+```edition2018
+# use std::pin::Pin;
+# use std::future::Future;
+# use std::task::{Context, Poll};
+#
+# struct WakeOnceThenComplete(bool);
+#
+# fn wake_and_yield_once() -> WakeOnceThenComplete {
+#     WakeOnceThenComplete(false)
+# }
+#
+# impl Future for WakeOnceThenComplete {
+#     type Output = ();
+#     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+#         if self.0 {
+#             Poll::Ready(())
+#         } else {
+#             cx.waker().wake_by_ref();
+#             self.0 = true;
+#             Poll::Pending
+#         }
+#     }
+# }
+#
+async fn foo() {
+    wake_and_yield_once().await // `await` is used within `async` function
+}
+
+fn bar(x: u8) -> impl Future<Output = u8> {
+    async move {
+        wake_and_yield_once().await; // `await` is used within `async` block
+        x
+    }
+}
+```
+
+[`async`]: https://doc.rust-lang.org/std/keyword.async.html
+[`await`]: https://doc.rust-lang.org/std/keyword.await.html
+"##,
+
 E0734: r##"
 A stability attribute has been used outside of the standard library.
 
@@ -2054,6 +2218,76 @@ These attributes are meant to only be used by the standard library and are
 rejected in your own crates.
 "##,
 
+E0736: r##"
+`#[track_caller]` and `#[naked]` cannot both be applied to the same function.
+
+Erroneous code example:
+
+```compile_fail,E0736
+#![feature(track_caller)]
+
+#[naked]
+#[track_caller]
+fn foo() {}
+```
+
+This is primarily due to ABI incompatibilities between the two attributes.
+See [RFC 2091] for details on this and other limitations.
+
+[RFC 2091]: https://github.com/rust-lang/rfcs/blob/master/text/2091-inline-semantic.md
+"##,
+
+E0738: r##"
+`#[track_caller]` cannot be used in traits yet. This is due to limitations in
+the compiler which are likely to be temporary. See [RFC 2091] for details on
+this and other restrictions.
+
+Erroneous example with a trait method implementation:
+
+```compile_fail,E0738
+#![feature(track_caller)]
+
+trait Foo {
+    fn bar(&self);
+}
+
+impl Foo for u64 {
+    #[track_caller]
+    fn bar(&self) {}
+}
+```
+
+Erroneous example with a blanket trait method implementation:
+
+```compile_fail,E0738
+#![feature(track_caller)]
+
+trait Foo {
+    #[track_caller]
+    fn bar(&self) {}
+    fn baz(&self);
+}
+```
+
+Erroneous example with a trait method declaration:
+
+```compile_fail,E0738
+#![feature(track_caller)]
+
+trait Foo {
+    fn bar(&self) {}
+
+    #[track_caller]
+    fn baz(&self);
+}
+```
+
+Note that while the compiler may be able to support the attribute in traits in
+the future, [RFC 2091] prohibits their implementation without a follow-up RFC.
+
+[RFC 2091]: https://github.com/rust-lang/rfcs/blob/master/text/2091-inline-semantic.md
+"##,
+
 ;
 //  E0006, // merged with E0005
 //  E0101, // replaced with E0282
@@ -2063,7 +2297,7 @@ rejected in your own crates.
 //  E0272, // on_unimplemented #0
 //  E0273, // on_unimplemented #1
 //  E0274, // on_unimplemented #2
-    E0278, // requirement is not satisfied
+//  E0278, // requirement is not satisfied
     E0279, // requirement is not satisfied
     E0280, // requirement is not satisfied
 //  E0285, // overflow evaluation builtin bounds
@@ -2095,9 +2329,6 @@ rejected in your own crates.
     E0488, // lifetime of variable does not enclose its declaration
     E0489, // type/lifetime parameter not in scope here
     E0490, // a value of type `..` is borrowed for too long
-    E0495, // cannot infer an appropriate lifetime due to conflicting
-           // requirements
-    E0566, // conflicting representation hints
     E0623, // lifetime mismatch where both parameters are anonymous regions
     E0628, // generators cannot have explicit parameters
     E0631, // type mismatch in closure arguments
@@ -2105,15 +2336,14 @@ rejected in your own crates.
     E0657, // `impl Trait` can only capture lifetimes bound at the fn level
     E0687, // in-band lifetimes cannot be used in `fn`/`Fn` syntax
     E0688, // in-band lifetimes cannot be mixed with explicit lifetime binders
-    E0697, // closures cannot be static
-    E0707, // multiple elided lifetimes used in arguments of `async fn`
+//  E0707, // multiple elided lifetimes used in arguments of `async fn`
     E0708, // `async` non-`move` closures with parameters are not currently
            // supported
-    E0709, // multiple different lifetimes used in arguments of `async fn`
+//  E0709, // multiple different lifetimes used in arguments of `async fn`
     E0710, // an unknown tool name found in scoped lint
     E0711, // a feature has been declared with conflicting stability attributes
 //  E0702, // replaced with a generic attribute input check
     E0726, // non-explicit (not `'_`) elided lifetime in unsupported position
     E0727, // `async` generators are not yet supported
-    E0728, // `await` must be in an `async` function or block
+    E0739, // invalid track_caller application/syntax
 }

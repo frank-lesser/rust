@@ -182,6 +182,7 @@ pub fn check_impl_item(tcx: TyCtxt<'_>, def_id: DefId) {
         hir::ImplItemKind::Method(ref sig, _) => Some(sig),
         _ => None
     };
+
     check_associated_item(tcx, impl_item.hir_id, impl_item.span, method_sig);
 }
 
@@ -394,7 +395,7 @@ fn check_item_type(
 
 fn check_impl<'tcx>(
     tcx: TyCtxt<'tcx>,
-    item: &hir::Item,
+    item: &'tcx hir::Item,
     ast_self_ty: &hir::Ty,
     ast_trait_ref: &Option<hir::TraitRef>,
 ) {
@@ -409,15 +410,18 @@ fn check_impl<'tcx>(
                 // therefore don't need to be WF (the trait's `Self: Trait` predicate
                 // won't hold).
                 let trait_ref = fcx.tcx.impl_trait_ref(item_def_id).unwrap();
-                let trait_ref =
-                    fcx.normalize_associated_types_in(
-                        ast_trait_ref.path.span, &trait_ref);
-                let obligations =
-                    ty::wf::trait_obligations(fcx,
-                                              fcx.param_env,
-                                              fcx.body_id,
-                                              &trait_ref,
-                                              ast_trait_ref.path.span);
+                let trait_ref = fcx.normalize_associated_types_in(
+                    ast_trait_ref.path.span,
+                    &trait_ref,
+                );
+                let obligations = ty::wf::trait_obligations(
+                    fcx,
+                    fcx.param_env,
+                    fcx.body_id,
+                    &trait_ref,
+                    ast_trait_ref.path.span,
+                    Some(item),
+                );
                 for obligation in obligations {
                     fcx.register_predicate(obligation);
                 }
@@ -755,7 +759,7 @@ fn check_opaque_types<'fcx, 'tcx>(
                         "check_opaque_types: may define, predicates={:#?}",
                         predicates,
                     );
-                    for &(pred, _) in predicates.predicates.iter() {
+                    for &(pred, _) in predicates.predicates {
                         let substituted_pred = pred.subst(fcx.tcx, substs);
                         // Avoid duplication of predicates that contain no parameters, for example.
                         if !predicates.predicates.iter().any(|&(p, _)| p == substituted_pred) {
@@ -975,7 +979,7 @@ fn check_variances_for_type_defn<'tcx>(
 
     identify_constrained_generic_params(
         tcx,
-        &ty_predicates,
+        ty_predicates,
         None,
         &mut constrained_parameters,
     );

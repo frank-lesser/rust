@@ -19,10 +19,11 @@ use rustc::mir::interpret::GlobalId;
 use rustc_codegen_ssa::common::{IntPredicate, TypeKind};
 use rustc::hir;
 use syntax::ast::{self, FloatTy};
+use rustc_target::abi::HasDataLayout;
 
+use rustc_codegen_ssa::common::span_invalid_monomorphization_error;
 use rustc_codegen_ssa::traits::*;
 
-use rustc::session::Session;
 use syntax_pos::Span;
 
 use std::cmp::Ordering;
@@ -694,6 +695,23 @@ impl IntrinsicCallMethods<'tcx> for Builder<'a, 'll, 'tcx> {
                 return;
             }
 
+            "ptr_offset_from" => {
+                let ty = substs.type_at(0);
+                let pointee_size = self.size_of(ty);
+
+                // This is the same sequence that Clang emits for pointer subtraction.
+                // It can be neither `nsw` nor `nuw` because the input is treated as
+                // unsigned but then the output is treated as signed, so neither works.
+                let a = args[0].immediate();
+                let b = args[1].immediate();
+                let a = self.ptrtoint(a, self.type_isize());
+                let b = self.ptrtoint(b, self.type_isize());
+                let d = self.sub(a, b);
+                let pointee_size = self.const_usize(pointee_size.bytes());
+                // this is where the signed magic happens (notice the `s` in `exactsdiv`)
+                self.exactsdiv(d, pointee_size)
+            }
+
             _ => bug!("unknown intrinsic '{}'", name),
         };
 
@@ -722,6 +740,13 @@ impl IntrinsicCallMethods<'tcx> for Builder<'a, 'll, 'tcx> {
     fn expect(&mut self, cond: Self::Value, expected: bool) -> Self::Value {
         let expect = self.get_intrinsic(&"llvm.expect.i1");
         self.call(expect, &[cond, self.const_bool(expected)], None)
+    }
+
+    fn sideeffect(&mut self) {
+        if self.tcx.sess.opts.debugging_opts.insert_sideeffect {
+            let fnname = self.get_intrinsic(&("llvm.sideeffect"));
+            self.call(fnname, &[], None);
+        }
     }
 
     fn va_start(&mut self, va_list: &'ll Value) -> &'ll Value {
@@ -810,6 +835,7 @@ fn codegen_msvc_try(
 ) {
     let llfn = get_rust_try_fn(bx, &mut |mut bx| {
         bx.set_personality_fn(bx.eh_personality());
+        bx.sideeffect();
 
         let mut normal = bx.build_sibling_block("normal");
         let mut catchswitch = bx.build_sibling_block("catchswitch");
@@ -823,7 +849,7 @@ fn codegen_msvc_try(
         // We're generating an IR snippet that looks like:
         //
         //   declare i32 @rust_try(%func, %data, %ptr) {
-        //      %slot = alloca i64*
+        //      %slot = alloca [2 x i64]
         //      invoke %func(%data) to label %normal unwind label %catchswitch
         //
         //   normal:
@@ -847,21 +873,25 @@ fn codegen_msvc_try(
         //
         //      #include <stdint.h>
         //
+        //      struct rust_panic {
+        //          uint64_t x[2];
+        //      }
+        //
         //      int bar(void (*foo)(void), uint64_t *ret) {
         //          try {
         //              foo();
         //              return 0;
-        //          } catch(uint64_t a[2]) {
-        //              ret[0] = a[0];
-        //              ret[1] = a[1];
+        //          } catch(rust_panic a) {
+        //              ret[0] = a.x[0];
+        //              ret[1] = a.x[1];
         //              return 1;
         //          }
         //      }
         //
         // More information can be found in libstd's seh.rs implementation.
-        let i64p = bx.type_ptr_to(bx.type_i64());
-        let ptr_align = bx.tcx().data_layout.pointer_align.abi;
-        let slot = bx.alloca(i64p, ptr_align);
+        let i64_2 = bx.type_array(bx.type_i64(), 2);
+        let i64_align = bx.tcx().data_layout.i64_align.abi;
+        let slot = bx.alloca(i64_2, i64_align);
         bx.invoke(func, &[data], normal.llbb(), catchswitch.llbb(), None);
 
         normal.ret(bx.const_i32(0));
@@ -869,22 +899,15 @@ fn codegen_msvc_try(
         let cs = catchswitch.catch_switch(None, None, 1);
         catchswitch.add_handler(cs, catchpad.llbb());
 
-        let tydesc = match bx.tcx().lang_items().msvc_try_filter() {
+        let tydesc = match bx.tcx().lang_items().eh_catch_typeinfo() {
             Some(did) => bx.get_static(did),
-            None => bug!("msvc_try_filter not defined"),
+            None => bug!("eh_catch_typeinfo not defined, but needed for SEH unwinding"),
         };
         let funclet = catchpad.catch_pad(cs, &[tydesc, bx.const_i32(0), slot]);
-        let addr = catchpad.load(slot, ptr_align);
 
-        let i64_align = bx.tcx().data_layout.i64_align.abi;
-        let arg1 = catchpad.load(addr, i64_align);
-        let val1 = bx.const_i32(1);
-        let gep1 = catchpad.inbounds_gep(addr, &[val1]);
-        let arg2 = catchpad.load(gep1, i64_align);
-        let local_ptr = catchpad.bitcast(local_ptr, i64p);
-        let gep2 = catchpad.inbounds_gep(local_ptr, &[val1]);
-        catchpad.store(arg1, local_ptr, i64_align);
-        catchpad.store(arg2, gep2, i64_align);
+        let payload = catchpad.load(slot, i64_align);
+        let local_ptr = catchpad.bitcast(local_ptr, bx.type_ptr_to(i64_2));
+        catchpad.store(payload, local_ptr, i64_align);
         catchpad.catch_ret(&funclet, caught.llbb());
 
         caught.ret(bx.const_i32(1));
@@ -933,6 +956,8 @@ fn codegen_gnu_try(
         // expected to be `*mut *mut u8` for this to actually work, but that's
         // managed by the standard library.
 
+        bx.sideeffect();
+
         let mut then = bx.build_sibling_block("then");
         let mut catch = bx.build_sibling_block("catch");
 
@@ -950,7 +975,14 @@ fn codegen_gnu_try(
         // rust_try ignores the selector.
         let lpad_ty = bx.type_struct(&[bx.type_i8p(), bx.type_i32()], false);
         let vals = catch.landing_pad(lpad_ty, bx.eh_personality(), 1);
-        catch.add_clause(vals, bx.const_null(bx.type_i8p()));
+        let tydesc = match bx.tcx().lang_items().eh_catch_typeinfo() {
+            Some(tydesc) => {
+                let tydesc = bx.get_static(tydesc);
+                bx.bitcast(tydesc, bx.type_i8p())
+            }
+            None => bx.const_null(bx.type_i8p()),
+        };
+        catch.add_clause(vals, tydesc);
         let ptr = catch.extract_value(vals, 0);
         let ptr_align = bx.tcx().data_layout.pointer_align.abi;
         let bitcast = catch.bitcast(local_ptr, bx.type_ptr_to(bx.type_i8p()));
@@ -1014,10 +1046,6 @@ fn get_rust_try_fn<'ll, 'tcx>(
     let rust_try = gen_fn(cx, "__rust_try", vec![fn_ty, i8p, i8p], output, codegen);
     cx.rust_try_fn.set(Some(rust_try));
     rust_try
-}
-
-fn span_invalid_monomorphization_error(a: &Session, b: Span, c: &str) {
-    span_err!(a, b, E0511, "{}", c);
 }
 
 fn generic_simd_intrinsic(
@@ -1218,7 +1246,6 @@ fn generic_simd_intrinsic(
         // The `fn simd_bitmask(vector) -> unsigned integer` intrinsic takes a
         // vector mask and returns an unsigned integer containing the most
         // significant bit (MSB) of each lane.
-        use rustc_target::abi::HasDataLayout;
 
         // If the vector has less than 8 lanes, an u8 is returned with zeroed
         // trailing bits.

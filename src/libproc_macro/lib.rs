@@ -25,8 +25,7 @@
 #![feature(extern_types)]
 #![feature(in_band_lifetimes)]
 #![feature(optin_builtin_traits)]
-#![feature(mem_take)]
-#![feature(non_exhaustive)]
+#![cfg_attr(bootstrap, feature(non_exhaustive))]
 #![feature(rustc_attrs)]
 #![feature(specialization)]
 

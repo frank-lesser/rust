@@ -22,11 +22,12 @@ use rustc::util::common::{time_depth, set_time_depth, print_time_passes_entry};
 use rustc::util::profiling::SelfProfilerRef;
 use rustc_fs_util::link_or_copy;
 use rustc_data_structures::svh::Svh;
-use rustc_errors::{Handler, Level, FatalError, DiagnosticId};
+use rustc_data_structures::sync::Lrc;
+use rustc_errors::{Handler, Level, FatalError, DiagnosticId, SourceMapperDyn};
 use rustc_errors::emitter::{Emitter};
 use rustc_target::spec::MergeFunctions;
 use syntax::attr;
-use syntax::ext::hygiene::ExpnId;
+use syntax_pos::hygiene::ExpnId;
 use syntax_pos::symbol::{Symbol, sym};
 use jobserver::{Client, Acquired};
 
@@ -142,15 +143,12 @@ impl ModuleConfig {
         // Copy what clang does by turning on loop vectorization at O2 and
         // slp vectorization at O3. Otherwise configure other optimization aspects
         // of this pass manager builder.
-        // Turn off vectorization for emscripten, as it's not very well supported.
         self.vectorize_loop = !sess.opts.cg.no_vectorize_loops &&
                              (sess.opts.optimize == config::OptLevel::Default ||
-                              sess.opts.optimize == config::OptLevel::Aggressive) &&
-                             !sess.target.target.options.is_like_emscripten;
+                              sess.opts.optimize == config::OptLevel::Aggressive);
 
         self.vectorize_slp = !sess.opts.cg.no_vectorize_slp &&
-                            sess.opts.optimize == config::OptLevel::Aggressive &&
-                            !sess.target.target.options.is_like_emscripten;
+                            sess.opts.optimize == config::OptLevel::Aggressive;
 
         // Some targets (namely, NVPTX) interact badly with the MergeFunctions
         // pass. This is because MergeFunctions can generate new function calls
@@ -261,7 +259,7 @@ fn generate_lto_work<B: ExtraBackendMethods>(
     needs_thin_lto: Vec<(String, B::ThinBuffer)>,
     import_only_modules: Vec<(SerializedModule<B::ModuleBuffer>, WorkProduct)>
 ) -> Vec<(WorkItem<B>, u64)> {
-    let _prof_timer = cgcx.prof.generic_activity("codegen_run_lto");
+    let _prof_timer = cgcx.prof.generic_activity("codegen_generate_lto_work");
 
     let (lto_modules, copy_jobs) = if !needs_fat_lto.is_empty() {
         assert!(needs_thin_lto.is_empty());
@@ -323,8 +321,6 @@ pub fn start_async_codegen<B: ExtraBackendMethods>(
 ) -> OngoingCodegen<B> {
     let (coordinator_send, coordinator_receive) = channel();
     let sess = tcx.sess;
-
-    sess.prof.generic_activity_start("codegen_and_optimize_crate");
 
     let crate_name = tcx.crate_name(LOCAL_CRATE);
     let crate_hash = tcx.crate_hash(LOCAL_CRATE);
@@ -678,11 +674,11 @@ impl<B: WriteBackendMethods> WorkItem<B> {
         }
     }
 
-    pub fn name(&self) -> String {
+    fn profiling_event_id(&self) -> &'static str {
         match *self {
-            WorkItem::Optimize(ref m) => format!("optimize: {}", m.name),
-            WorkItem::CopyPostLtoArtifacts(ref m) => format!("copy post LTO artifacts: {}", m.name),
-            WorkItem::LTO(ref m) => format!("lto: {}", m.name()),
+            WorkItem::Optimize(_) => "codegen_module_optimize",
+            WorkItem::CopyPostLtoArtifacts(_) => "codegen_copy_artifacts_from_incr_cache",
+            WorkItem::LTO(_) => "codegen_module_perform_lto",
         }
     }
 }
@@ -1591,7 +1587,7 @@ fn spawn_work<B: ExtraBackendMethods>(
         // as a diagnostic was already sent off to the main thread - just
         // surface that there was an error in this worker.
         bomb.result = {
-            let _prof_timer = cgcx.prof.generic_activity(&work.name());
+            let _prof_timer = cgcx.prof.generic_activity(work.profiling_event_id());
             execute_work_item(&cgcx, work).ok()
         };
     });
@@ -1668,13 +1664,13 @@ impl SharedEmitter {
 }
 
 impl Emitter for SharedEmitter {
-    fn emit_diagnostic(&mut self, db: &rustc_errors::Diagnostic) {
+    fn emit_diagnostic(&mut self, diag: &rustc_errors::Diagnostic) {
         drop(self.sender.send(SharedEmitterMessage::Diagnostic(Diagnostic {
-            msg: db.message(),
-            code: db.code.clone(),
-            lvl: db.level,
+            msg: diag.message(),
+            code: diag.code.clone(),
+            lvl: diag.level,
         })));
-        for child in &db.children {
+        for child in &diag.children {
             drop(self.sender.send(SharedEmitterMessage::Diagnostic(Diagnostic {
                 msg: child.message(),
                 code: None,
@@ -1682,6 +1678,9 @@ impl Emitter for SharedEmitter {
             })));
         }
         drop(self.sender.send(SharedEmitterMessage::AbortIfErrors));
+    }
+    fn source_map(&self) -> Option<&Lrc<SourceMapperDyn>> {
+        None
     }
 }
 
@@ -1776,8 +1775,6 @@ impl<B: ExtraBackendMethods> OngoingCodegen<B> {
         if sess.codegen_units() == 1 && sess.time_llvm_passes() {
             self.backend.print_pass_timings()
         }
-
-        sess.prof.generic_activity_end("codegen_and_optimize_crate");
 
         (CodegenResults {
             crate_name: self.crate_name,

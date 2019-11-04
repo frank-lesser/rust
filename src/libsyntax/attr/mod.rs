@@ -13,15 +13,16 @@ use crate::ast::{AttrItem, AttrId, AttrStyle, Name, Ident, Path, PathSegment};
 use crate::ast::{MetaItem, MetaItemKind, NestedMetaItem};
 use crate::ast::{Lit, LitKind, Expr, Item, Local, Stmt, StmtKind, GenericParam};
 use crate::mut_visit::visit_clobber;
-use crate::source_map::{BytePos, Spanned, DUMMY_SP};
-use crate::parse::lexer::comments::{doc_comment_style, strip_doc_comment_decoration};
-use crate::parse::parser::Parser;
-use crate::parse::{ParseSess, PResult};
+use crate::source_map::{BytePos, Spanned};
+use crate::parse::lexer::comments::doc_comment_style;
+use crate::parse;
+use crate::parse::PResult;
 use crate::parse::token::{self, Token};
 use crate::ptr::P;
+use crate::sess::ParseSess;
 use crate::symbol::{sym, Symbol};
 use crate::ThinVec;
-use crate::tokenstream::{TokenStream, TokenTree, DelimSpan};
+use crate::tokenstream::{DelimSpan, TokenStream, TokenTree, TreeAndJoint};
 use crate::GLOBALS;
 
 use log::debug;
@@ -279,75 +280,12 @@ impl Attribute {
         self.item.meta(self.span)
     }
 
-    pub fn parse<'a, T, F>(&self, sess: &'a ParseSess, mut f: F) -> PResult<'a, T>
-        where F: FnMut(&mut Parser<'a>) -> PResult<'a, T>,
-    {
-        let mut parser = Parser::new(
-            sess,
-            self.tokens.clone(),
-            None,
-            false,
-            false,
-            Some("attribute"),
-        );
-        let result = f(&mut parser)?;
-        if parser.token != token::Eof {
-            parser.unexpected()?;
-        }
-        Ok(result)
-    }
-
-    pub fn parse_list<'a, T, F>(&self, sess: &'a ParseSess, mut f: F) -> PResult<'a, Vec<T>>
-        where F: FnMut(&mut Parser<'a>) -> PResult<'a, T>,
-    {
-        if self.tokens.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.parse(sess, |parser| {
-            parser.expect(&token::OpenDelim(token::Paren))?;
-            let mut list = Vec::new();
-            while !parser.eat(&token::CloseDelim(token::Paren)) {
-                list.push(f(parser)?);
-                if !parser.eat(&token::Comma) {
-                   parser.expect(&token::CloseDelim(token::Paren))?;
-                    break
-                }
-            }
-            Ok(list)
-        })
-    }
-
     pub fn parse_meta<'a>(&self, sess: &'a ParseSess) -> PResult<'a, MetaItem> {
         Ok(MetaItem {
             path: self.path.clone(),
-            kind: self.parse(sess, |parser| parser.parse_meta_item_kind())?,
+            kind: parse::parse_in_attr(sess, self, |p| p.parse_meta_item_kind())?,
             span: self.span,
         })
-    }
-
-    /// Converts `self` to a normal `#[doc="foo"]` comment, if it is a
-    /// comment like `///` or `/** */`. (Returns `self` unchanged for
-    /// non-sugared doc attributes.)
-    pub fn with_desugared_doc<T, F>(&self, f: F) -> T where
-        F: FnOnce(&Attribute) -> T,
-    {
-        if self.is_sugared_doc {
-            let comment = self.value_str().unwrap();
-            let meta = mk_name_value_item_str(
-                Ident::with_dummy_span(sym::doc),
-                Symbol::intern(&strip_doc_comment_decoration(&comment.as_str())),
-                DUMMY_SP,
-            );
-            f(&Attribute {
-                item: AttrItem { path: meta.path, tokens: meta.kind.tokens(meta.span) },
-                id: self.id,
-                style: self.style,
-                is_sugared_doc: true,
-                span: self.span,
-            })
-        } else {
-            f(self)
-        }
     }
 }
 
@@ -475,7 +413,7 @@ pub fn first_attr_value_str_by_name(attrs: &[Attribute], name: Symbol) -> Option
 }
 
 impl MetaItem {
-    fn tokens(&self) -> TokenStream {
+    fn token_trees_and_joints(&self) -> Vec<TreeAndJoint> {
         let mut idents = vec![];
         let mut last_pos = BytePos(0 as u32);
         for (i, segment) in self.path.segments.iter().enumerate() {
@@ -489,8 +427,8 @@ impl MetaItem {
             idents.push(TokenTree::Token(Token::from_ast_ident(segment.ident)).into());
             last_pos = segment.ident.span.hi();
         }
-        self.kind.tokens(self.span).append_to_tree_and_joint_vec(&mut idents);
-        TokenStream::new(idents)
+        idents.extend(self.kind.token_trees_and_joints(self.span));
+        idents
     }
 
     fn from_tokens<I>(tokens: &mut iter::Peekable<I>) -> Option<MetaItem>
@@ -549,13 +487,14 @@ impl MetaItem {
 }
 
 impl MetaItemKind {
-    pub fn tokens(&self, span: Span) -> TokenStream {
+    pub fn token_trees_and_joints(&self, span: Span) -> Vec<TreeAndJoint> {
         match *self {
-            MetaItemKind::Word => TokenStream::empty(),
+            MetaItemKind::Word => vec![],
             MetaItemKind::NameValue(ref lit) => {
-                let mut vec = vec![TokenTree::token(token::Eq, span).into()];
-                lit.tokens().append_to_tree_and_joint_vec(&mut vec);
-                TokenStream::new(vec)
+                vec![
+                    TokenTree::token(token::Eq, span).into(),
+                    lit.token_tree().into(),
+                ]
             }
             MetaItemKind::List(ref list) => {
                 let mut tokens = Vec::new();
@@ -563,15 +502,24 @@ impl MetaItemKind {
                     if i > 0 {
                         tokens.push(TokenTree::token(token::Comma, span).into());
                     }
-                    item.tokens().append_to_tree_and_joint_vec(&mut tokens);
+                    tokens.extend(item.token_trees_and_joints())
                 }
-                TokenTree::Delimited(
-                    DelimSpan::from_single(span),
-                    token::Paren,
-                    TokenStream::new(tokens).into(),
-                ).into()
+                vec![
+                    TokenTree::Delimited(
+                        DelimSpan::from_single(span),
+                        token::Paren,
+                        TokenStream::new(tokens).into(),
+                    ).into()
+                ]
             }
         }
+    }
+
+    // Premature conversions of `TokenTree`s to `TokenStream`s can hurt
+    // performance. Do not use this function if `token_trees_and_joints()` can
+    // be used instead.
+    pub fn tokens(&self, span: Span) -> TokenStream {
+        TokenStream::new(self.token_trees_and_joints(span))
     }
 
     fn from_tokens<I>(tokens: &mut iter::Peekable<I>) -> Option<MetaItemKind>
@@ -615,10 +563,10 @@ impl NestedMetaItem {
         }
     }
 
-    fn tokens(&self) -> TokenStream {
+    fn token_trees_and_joints(&self) -> Vec<TreeAndJoint> {
         match *self {
-            NestedMetaItem::MetaItem(ref item) => item.tokens(),
-            NestedMetaItem::Literal(ref lit) => lit.tokens(),
+            NestedMetaItem::MetaItem(ref item) => item.token_trees_and_joints(),
+            NestedMetaItem::Literal(ref lit) => vec![lit.token_tree().into()],
         }
     }
 

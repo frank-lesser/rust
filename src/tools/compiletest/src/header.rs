@@ -141,7 +141,6 @@ impl EarlyProps {
                 if config.target == "wasm32-unknown-unknown" && config.parse_check_run_results(ln) {
                     props.ignore = Ignore::Ignore;
                 }
-
             }
 
             if (config.mode == common::DebugInfoGdb || config.mode == common::DebugInfoGdbLldb) &&

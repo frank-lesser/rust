@@ -32,7 +32,7 @@ use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::BTreeMap;
 use std::fmt;
 use syntax::ast;
-use syntax_pos::symbol::InternedString;
+use syntax_pos::symbol::Symbol;
 use syntax_pos::Span;
 
 use self::combine::CombineFields;
@@ -392,7 +392,7 @@ pub enum RegionVariableOrigin {
     Coercion(Span),
 
     /// Region variables created as the values for early-bound regions
-    EarlyBoundRegion(Span, InternedString),
+    EarlyBoundRegion(Span, Symbol),
 
     /// Region variables created for bound regions
     /// in a function or method that is called
@@ -407,7 +407,7 @@ pub enum RegionVariableOrigin {
     NLL(NLLRegionVariableOrigin),
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug)]
 pub enum NLLRegionVariableOrigin {
     /// During NLL region processing, we create variables for free
     /// regions that we encounter in the function signature and
@@ -814,16 +814,16 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     /// Executes `f` and commit the bindings.
     pub fn commit_unconditionally<R, F>(&self, f: F) -> R
     where
-        F: FnOnce() -> R,
+        F: FnOnce(&CombinedSnapshot<'a, 'tcx>) -> R,
     {
-        debug!("commit()");
+        debug!("commit_unconditionally()");
         let snapshot = self.start_snapshot();
-        let r = f();
+        let r = f(&snapshot);
         self.commit_from(snapshot);
         r
     }
 
-    /// Executes `f` and commit the bindings if closure `f` returns `Ok(_)`.
+    /// Execute `f` and commit the bindings if closure `f` returns `Ok(_)`.
     pub fn commit_if_ok<T, E, F>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce(&CombinedSnapshot<'a, 'tcx>) -> Result<T, E>,
@@ -843,19 +843,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         r
     }
 
-    /// Execute `f` in a snapshot, and commit the bindings it creates.
-    pub fn in_snapshot<T, F>(&self, f: F) -> T
-    where
-        F: FnOnce(&CombinedSnapshot<'a, 'tcx>) -> T,
-    {
-        debug!("in_snapshot()");
-        let snapshot = self.start_snapshot();
-        let r = f(&snapshot);
-        self.commit_from(snapshot);
-        r
-    }
-
-    /// Executes `f` then unroll any bindings it creates.
+    /// Execute `f` then unroll any bindings it creates.
     pub fn probe<R, F>(&self, f: F) -> R
     where
         F: FnOnce(&CombinedSnapshot<'a, 'tcx>) -> R,

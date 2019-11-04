@@ -1,5 +1,5 @@
-use crate::parse::ParseSess;
 use crate::parse::token::{self, Token, TokenKind};
+use crate::sess::ParseSess;
 use crate::symbol::{sym, Symbol};
 use crate::parse::unescape_error_reporting::{emit_unescape_error, push_escaped_char};
 
@@ -23,7 +23,7 @@ mod unicode_chars;
 #[derive(Clone, Debug)]
 pub struct UnmatchedBrace {
     pub expected_delim: token::DelimToken,
-    pub found_delim: token::DelimToken,
+    pub found_delim: Option<token::DelimToken>,
     pub found_span: Span,
     pub unclosed_span: Option<Span>,
     pub candidate_span: Option<Span>,

@@ -1,6 +1,6 @@
 use rustc::ty::subst::SubstsRef;
-use rustc::ty::{self, Ty, TypeFoldable};
-use rustc::mir::{Location, Body, Promoted};
+use rustc::ty::{self, Ty, TyCtxt, TypeFoldable};
+use rustc::mir::{Body, Location, PlaceElem, Promoted};
 use rustc::mir::visit::{MutVisitor, TyContext};
 use rustc::infer::{InferCtxt, NLLRegionVariableOrigin};
 use rustc_index::vec::IndexVec;
@@ -54,12 +54,31 @@ impl<'a, 'tcx> NLLVisitor<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> MutVisitor<'tcx> for NLLVisitor<'a, 'tcx> {
+    fn tcx(&self) -> TyCtxt<'tcx> {
+        self.infcx.tcx
+    }
+
     fn visit_ty(&mut self, ty: &mut Ty<'tcx>, ty_context: TyContext) {
         debug!("visit_ty(ty={:?}, ty_context={:?})", ty, ty_context);
 
         *ty = self.renumber_regions(ty);
 
         debug!("visit_ty: ty={:?}", ty);
+    }
+
+    fn process_projection_elem(
+        &mut self,
+        elem: &PlaceElem<'tcx>,
+    ) -> Option<PlaceElem<'tcx>> {
+        if let PlaceElem::Field(field, ty) = elem {
+            let new_ty = self.renumber_regions(ty);
+
+            if new_ty != *ty {
+                return Some(PlaceElem::Field(*field, new_ty));
+            }
+        }
+
+        None
     }
 
     fn visit_substs(&mut self, substs: &mut SubstsRef<'tcx>, location: Location) {

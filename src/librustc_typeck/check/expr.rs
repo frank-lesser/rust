@@ -87,10 +87,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         if let Some(mut err) = self.demand_suptype_diag(expr.span, expected_ty, ty) {
-            let expr = match &expr.kind {
-                ExprKind::DropTemps(expr) => expr,
-                _ => expr,
-            };
+            let expr = expr.peel_drop_temps();
+            self.suggest_ref_or_into(&mut err, expr, expected_ty, ty);
             extend_err(&mut err);
             // Error possibly reported in `check_assign` so avoid emitting error again.
             err.emit_unless(self.is_assign_to_bool(expr, expected_ty));
@@ -568,7 +566,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // the `enclosing_loops` field and let's coerce the
             // type of `expr_opt` into what is expected.
             let mut enclosing_breakables = self.enclosing_breakables.borrow_mut();
-            let ctxt = enclosing_breakables.find_breakable(target_id);
+            let ctxt = match enclosing_breakables.opt_find_breakable(target_id) {
+                Some(ctxt) => ctxt,
+                None => { // Avoid ICE when `break` is inside a closure (#65383).
+                    self.tcx.sess.delay_span_bug(
+                        expr.span,
+                        "break was outside loop, but no error was emitted",
+                    );
+                    return tcx.types.err;
+                }
+            };
+
             if let Some(ref mut coerce) = ctxt.coerce {
                 if let Some(ref e) = expr_opt {
                     coerce.coerce(self, &cause, e, e_ty);
@@ -594,7 +602,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
             } else {
                 // If `ctxt.coerce` is `None`, we can just ignore
-                // the type of the expresison.  This is because
+                // the type of the expression.  This is because
                 // either this was a break *without* a value, in
                 // which case it is always a legal type (`()`), or
                 // else an error would have been flagged by the
@@ -1012,7 +1020,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expr: &'tcx hir::Expr,
     ) -> Ty<'tcx> {
         let flds = expected.only_has_type(self).and_then(|ty| {
-            let ty = self.resolve_type_vars_with_obligations(ty);
+            let ty = self.resolve_vars_with_obligations(ty);
             match ty.kind {
                 ty::Tuple(ref flds) => Some(&flds[..]),
                 _ => None

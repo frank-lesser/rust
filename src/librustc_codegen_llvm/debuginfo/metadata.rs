@@ -46,7 +46,7 @@ use std::iter;
 use std::ptr;
 use std::path::{Path, PathBuf};
 use syntax::ast;
-use syntax::symbol::{Interner, InternedString};
+use syntax::symbol::{Interner, Symbol};
 use syntax_pos::{self, Span, FileName};
 
 impl PartialEq for llvm::Metadata {
@@ -2069,11 +2069,9 @@ fn set_members_of_composite_type(cx: &CodegenCx<'ll, 'tcx>,
     {
         let mut composite_types_completed =
             debug_context(cx).composite_types_completed.borrow_mut();
-        if composite_types_completed.contains(&composite_type_metadata) {
+        if !composite_types_completed.insert(&composite_type_metadata) {
             bug!("debuginfo::set_members_of_composite_type() - \
                   Already completed forward declaration re-encountered.");
-        } else {
-            composite_types_completed.insert(composite_type_metadata);
         }
     }
 
@@ -2127,7 +2125,7 @@ fn compute_type_parameters(cx: &CodegenCx<'ll, 'tcx>, ty: Ty<'tcx>) -> Option<&'
 
     fn get_parameter_names(cx: &CodegenCx<'_, '_>,
                            generics: &ty::Generics)
-                           -> Vec<InternedString> {
+                           -> Vec<Symbol> {
         let mut names = generics.parent.map_or(vec![], |def_id| {
             get_parameter_names(cx, cx.tcx.generics_of(def_id))
         });

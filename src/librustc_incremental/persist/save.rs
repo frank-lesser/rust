@@ -22,6 +22,10 @@ pub fn save_dep_graph(tcx: TyCtxt<'_>) {
         if sess.opts.incremental.is_none() {
             return;
         }
+        // This is going to be deleted in finalize_session_directory, so let's not create it
+        if sess.has_errors_or_delayed_span_bugs() {
+            return;
+        }
 
         let query_cache_path = query_cache_path(sess);
         let dep_graph_path = dep_graph_path(sess);
@@ -59,6 +63,10 @@ pub fn save_work_product_index(sess: &Session,
                                new_work_products: FxHashMap<WorkProductId, WorkProduct>) {
     if sess.opts.incremental.is_none() {
         return;
+    }
+    // This is going to be deleted in finalize_session_directory, so let's not create it
+    if sess.has_errors_or_delayed_span_bugs() {
+            return;
     }
 
     debug!("save_work_product_index()");
@@ -241,6 +249,8 @@ fn encode_work_product_index(work_products: &FxHashMap<WorkProductId, WorkProduc
 
 fn encode_query_cache(tcx: TyCtxt<'_>, encoder: &mut Encoder) {
     time(tcx.sess, "serialize query result cache", || {
+        let _timer = tcx.prof.generic_activity("incr_comp_serialize_result_cache");
+
         tcx.serialize_query_result_cache(encoder).unwrap();
     })
 }
