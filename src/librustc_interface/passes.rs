@@ -16,15 +16,18 @@ use rustc::traits;
 use rustc::util::common::{time, ErrorReported};
 use rustc::session::Session;
 use rustc::session::config::{self, CrateType, Input, OutputFilenames, OutputType};
+use rustc::session::config::{PpMode, PpSourceMode};
 use rustc::session::search_paths::PathKind;
 use rustc_codegen_ssa::back::link::emit_metadata;
 use rustc_codegen_utils::codegen_backend::CodegenBackend;
 use rustc_codegen_utils::link::filename_for_metadata;
 use rustc_data_structures::{box_region_allow_access, declare_box_region_type, parallel};
 use rustc_data_structures::sync::{Lrc, ParallelIterator, par_iter};
+use rustc_errors::PResult;
 use rustc_incremental;
 use rustc_metadata::cstore;
 use rustc_mir as mir;
+use rustc_parse::{parse_crate_from_file, parse_crate_from_source_str};
 use rustc_passes::{self, ast_validation, hir_stats, layout_test};
 use rustc_plugin as plugin;
 use rustc_plugin::registry::Registry;
@@ -36,7 +39,6 @@ use syntax::{self, ast, visit};
 use syntax::early_buffered_lints::BufferedEarlyLint;
 use syntax_expand::base::{NamedSyntaxExtension, ExtCtxt};
 use syntax::mut_visit::MutVisitor;
-use syntax::parse::{self, PResult};
 use syntax::util::node_count::NodeCounter;
 use syntax::symbol::Symbol;
 use syntax_pos::FileName;
@@ -59,12 +61,11 @@ pub fn parse<'a>(sess: &'a Session, input: &Input) -> PResult<'a, ast::Crate> {
     let krate = time(sess, "parsing", || {
         let _prof_timer = sess.prof.generic_activity("parse_crate");
 
-        match *input {
-            Input::File(ref file) => parse::parse_crate_from_file(file, &sess.parse_sess),
-            Input::Str {
-                ref input,
-                ref name,
-            } => parse::parse_crate_from_source_str(name.clone(), input.clone(), &sess.parse_sess),
+        match input {
+            Input::File(file) => parse_crate_from_file(file, &sess.parse_sess),
+            Input::Str { input, name } => {
+                parse_crate_from_source_str(name.clone(), input.clone(), &sess.parse_sess)
+            }
         }
     })?;
 
@@ -180,7 +181,7 @@ pub fn register_plugins<'a>(
         )
     });
 
-    let (krate, features) = syntax::config::features(
+    let (krate, features) = syntax_expand::config::features(
         krate,
         &sess.parse_sess,
         sess.edition(),
@@ -267,6 +268,7 @@ fn configure_and_expand_inner<'a>(
             lint_store,
             &krate,
             true,
+            None,
             rustc_lint::BuiltinCombinedPreExpansionLintPass::new());
     });
 
@@ -292,6 +294,8 @@ fn configure_and_expand_inner<'a>(
         }
         krate
     });
+
+    util::check_attr_crate_type(&krate.attrs, &mut resolver.lint_buffer());
 
     syntax_ext::plugin_macro_defs::inject(
         &mut krate, &mut resolver, plugin_info.syntax_exts, sess.edition()
@@ -366,7 +370,7 @@ fn configure_and_expand_inner<'a>(
         for span in missing_fragment_specifiers {
             let lint = lint::builtin::MISSING_FRAGMENT_SPECIFIER;
             let msg = "missing fragment specifier";
-            sess.buffer_lint(lint, ast::CRATE_NODE_ID, span, msg);
+            resolver.lint_buffer().buffer_lint(lint, ast::CRATE_NODE_ID, span, msg);
         }
         if cfg!(windows) {
             env::set_var("PATH", &old_path);
@@ -390,12 +394,16 @@ fn configure_and_expand_inner<'a>(
 
     // If we're actually rustdoc then there's no need to actually compile
     // anything, so switch everything to just looping
-    if sess.opts.actually_rustdoc {
-        util::ReplaceBodyWithLoop::new(sess).visit_crate(&mut krate);
+    let mut should_loop = sess.opts.actually_rustdoc;
+    if let Some((PpMode::PpmSource(PpSourceMode::PpmEveryBodyLoops), _)) = sess.opts.pretty {
+        should_loop |= true;
+    }
+    if should_loop {
+        util::ReplaceBodyWithLoop::new(&mut resolver).visit_crate(&mut krate);
     }
 
     let has_proc_macro_decls = time(sess, "AST validation", || {
-        ast_validation::check_crate(sess, &krate)
+        ast_validation::check_crate(sess, &krate, &mut resolver.lint_buffer())
     });
 
 
@@ -464,7 +472,7 @@ fn configure_and_expand_inner<'a>(
         info!("{} parse sess buffered_lints", buffered_lints.len());
         for BufferedEarlyLint{id, span, msg, lint_id} in buffered_lints.drain(..) {
             let lint = lint::Lint::from_parser_lint_id(lint_id);
-            sess.buffer_lint(lint, id, span, &msg);
+            resolver.lint_buffer().buffer_lint(lint, id, span, &msg);
         }
     });
 
@@ -480,7 +488,7 @@ pub fn lower_to_hir(
 ) -> Result<hir::map::Forest> {
     // Lower AST to HIR.
     let hir_forest = time(sess, "lowering AST -> HIR", || {
-        let nt_to_tokenstream = syntax::parse::nt_to_tokenstream;
+        let nt_to_tokenstream = rustc_parse::nt_to_tokenstream;
         let hir_crate = lower_crate(sess, &dep_graph, &krate, resolver, nt_to_tokenstream);
 
         if sess.opts.debugging_opts.hir_stats {
@@ -496,6 +504,7 @@ pub fn lower_to_hir(
             lint_store,
             &krate,
             false,
+            Some(std::mem::take(resolver.lint_buffer())),
             rustc_lint::BuiltinCombinedEarlyLintPass::new(),
         )
     });
@@ -777,6 +786,7 @@ pub fn create_global_ctxt(
     let codegen_backend = compiler.codegen_backend().clone();
     let crate_name = crate_name.to_string();
     let defs = mem::take(&mut resolver_outputs.definitions);
+    let override_queries = compiler.override_queries;
 
     let ((), result) = BoxedGlobalCtxt::new(static move || {
         let sess = &*sess;
@@ -800,6 +810,10 @@ pub fn create_global_ctxt(
         let mut extern_providers = local_providers;
         default_provide_extern(&mut extern_providers);
         codegen_backend.provide_extern(&mut extern_providers);
+
+        if let Some(callback) = override_queries {
+            callback(sess, &mut local_providers, &mut extern_providers);
+        }
 
         let gcx = TyCtxt::create_global_ctxt(
             sess,
@@ -861,6 +875,7 @@ fn analysis(tcx: TyCtxt<'_>, cnum: CrateNum) -> Result<()> {
                 tcx.ensure().check_mod_loops(local_def_id);
                 tcx.ensure().check_mod_attrs(local_def_id);
                 tcx.ensure().check_mod_unstable_api_usage(local_def_id);
+                tcx.ensure().check_mod_const_bodies(local_def_id);
             });
         });
     });

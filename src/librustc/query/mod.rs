@@ -93,7 +93,7 @@ rustc_queries! {
         /// Maps DefId's that have an associated `mir::Body` to the result
         /// of the MIR qualify_consts pass. The actual meaning of
         /// the value isn't known except to the pass itself.
-        query mir_const_qualif(key: DefId) -> (u8, &'tcx BitSet<mir::Local>) {
+        query mir_const_qualif(key: DefId) -> u8 {
             desc { |tcx| "const checking `{}`", tcx.def_path_str(key) }
             cache_on_disk_if { key.is_local() }
         }
@@ -228,12 +228,6 @@ rustc_queries! {
             cycle_delay_bug
         }
 
-        query trivial_dropck_outlives(ty: Ty<'tcx>) -> bool {
-            anon
-            no_force
-            desc { "checking if `{:?}` has trivial dropck", ty }
-        }
-
         query adt_dtorck_constraint(
             _: DefId
         ) -> Result<DtorckConstraint<'tcx>, NoSolution> {}
@@ -333,6 +327,11 @@ rustc_queries! {
 
         query check_mod_unstable_api_usage(key: DefId) -> () {
             desc { |tcx| "checking for unstable API usage in {}", key.describe_as_module(tcx) }
+        }
+
+        /// Checks the const bodies in the module for illegal operations (e.g. `if` or `loop`).
+        query check_mod_const_bodies(key: DefId) -> () {
+            desc { |tcx| "checking consts in {}", key.describe_as_module(tcx) }
         }
 
         /// Checks the loops in the module.

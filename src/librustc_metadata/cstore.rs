@@ -1,7 +1,7 @@
 // The crate store - a central repo for information collected about external
 // crates and libraries
 
-use crate::schema;
+use crate::rmeta;
 use rustc::dep_graph::DepNodeIndex;
 use rustc::hir::def_id::{CrateNum, DefIndex};
 use rustc::hir::map::definitions::DefPathTable;
@@ -14,10 +14,11 @@ use rustc_data_structures::svh::Svh;
 use syntax::ast;
 use syntax::edition::Edition;
 use syntax_expand::base::SyntaxExtension;
+use syntax::expand::allocator::AllocatorKind;
 use syntax_pos;
 use proc_macro::bridge::client::ProcMacro;
 
-pub use crate::cstore_impl::{provide, provide_extern};
+pub use crate::rmeta::{provide, provide_extern};
 
 // A map from external crate numbers (as decoded from some crate file) to
 // local crate numbers (as generated during this session). Each external
@@ -49,7 +50,7 @@ crate struct CrateMetadata {
     /// lifetime is only used behind `Lazy`, and therefore acts like an
     /// universal (`for<'tcx>`), that is paired up with whichever `TyCtxt`
     /// is being used to decode those values.
-    crate root: schema::CrateRoot<'static>,
+    crate root: rmeta::CrateRoot<'static>,
     /// For each definition in this crate, we encode a key. When the
     /// crate is loaded, we read all the keys and put them in this
     /// hashmap, which gives the reverse mapping. This allows us to
@@ -59,7 +60,7 @@ crate struct CrateMetadata {
     /// Trait impl data.
     /// FIXME: Used only from queries and can use query cache,
     /// so pre-decoding can probably be avoided.
-    crate trait_impls: FxHashMap<(u32, DefIndex), schema::Lazy<[DefIndex]>>,
+    crate trait_impls: FxHashMap<(u32, DefIndex), rmeta::Lazy<[DefIndex]>>,
     /// Proc macro descriptions for this crate, if it's a proc macro crate.
     crate raw_proc_macros: Option<&'static [ProcMacro]>,
     /// Source maps for code from the crate.
@@ -101,6 +102,8 @@ crate struct CrateMetadata {
 #[derive(Clone)]
 pub struct CStore {
     metas: IndexVec<CrateNum, Option<Lrc<CrateMetadata>>>,
+    pub(crate) injected_panic_runtime: Option<CrateNum>,
+    pub(crate) allocator_kind: Option<AllocatorKind>,
 }
 
 pub enum LoadedMacro {
@@ -116,6 +119,8 @@ impl Default for CStore {
             // corresponding `CrateNum`. This first entry will always remain
             // `None`.
             metas: IndexVec::from_elem_n(None, 1),
+            injected_panic_runtime: None,
+            allocator_kind: None,
         }
     }
 }

@@ -608,17 +608,15 @@ fn parse_extern_html_roots(
 /// Extracts `--extern CRATE=PATH` arguments from `matches` and
 /// returns a map mapping crate names to their paths or else an
 /// error message.
+/// Also handles `--extern-private` which for the purposes of rustdoc
+/// we can treat as `--extern`
 // FIXME(eddyb) This shouldn't be duplicated with `rustc::session`.
 fn parse_externs(matches: &getopts::Matches) -> Result<Externs, String> {
     let mut externs: BTreeMap<_, ExternEntry> = BTreeMap::new();
-    for arg in &matches.opt_strs("extern") {
+    for arg in matches.opt_strs("extern").iter().chain(matches.opt_strs("extern-private").iter()) {
         let mut parts = arg.splitn(2, '=');
         let name = parts.next().ok_or("--extern value must not be empty".to_string())?;
         let location = parts.next().map(|s| s.to_string());
-        if location.is_none() && !nightly_options::is_unstable_enabled(matches) {
-            return Err("the `-Z unstable-options` flag must also be passed to \
-                        enable `--extern crate_name` without `=path`".to_string());
-        }
         let name = name.to_string();
         // For Rustdoc purposes, we can treat all externs as public
         externs.entry(name)

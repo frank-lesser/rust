@@ -36,7 +36,10 @@ use core::raw;
 use core::panic::BoxMeUp;
 
 cfg_if::cfg_if! {
-    if #[cfg(target_os = "emscripten")] {
+    if #[cfg(miri)] {
+        #[path = "miri.rs"]
+        mod imp;
+    } else if #[cfg(target_os = "emscripten")] {
         #[path = "emcc.rs"]
         mod imp;
     } else if #[cfg(target_arch = "wasm32")] {
@@ -69,6 +72,7 @@ mod dwarf;
 // hairy and tightly coupled, for more information see the compiler's
 // implementation of this.
 #[no_mangle]
+#[allow(improper_ctypes)]
 pub unsafe extern "C" fn __rust_maybe_catch_panic(f: fn(*mut u8),
                                                   data: *mut u8,
                                                   data_ptr: *mut usize,

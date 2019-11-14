@@ -335,7 +335,7 @@ This works because `Box` is a pointer, so its size is well-known.
 "##,
 
 E0080: r##"
-This error indicates that the compiler was unable to sensibly evaluate an
+This error indicates that the compiler was unable to sensibly evaluate a
 constant expression that had to be evaluated. Attempting to divide by 0
 or causing integer overflow are two ways to induce this error. For example:
 
@@ -607,7 +607,7 @@ position that needs that trait. For example, when the following code is
 compiled:
 
 ```compile_fail
-#![feature(on_unimplemented)]
+#![feature(rustc_attrs)]
 
 fn foo<T: Index<u8>>(x: T){}
 
@@ -639,7 +639,7 @@ position that needs that trait. For example, when the following code is
 compiled:
 
 ```compile_fail
-#![feature(on_unimplemented)]
+#![feature(rustc_attrs)]
 
 fn foo<T: Index<u8>>(x: T){}
 
@@ -669,7 +669,7 @@ position that needs that trait. For example, when the following code is
 compiled:
 
 ```compile_fail
-#![feature(on_unimplemented)]
+#![feature(rustc_attrs)]
 
 fn foo<T: Index<u8>>(x: T){}
 
@@ -1896,6 +1896,51 @@ fn foo<'a>(x: &'a i32, y: &i32) -> &'a i32 {
 ```
 "##,
 
+E0623: r##"
+A lifetime didn't match what was expected.
+
+Erroneous code example:
+
+```compile_fail,E0623
+struct Foo<'a> {
+    x: &'a isize,
+}
+
+fn bar<'short, 'long>(c: Foo<'short>, l: &'long isize) {
+    let _: Foo<'long> = c; // error!
+}
+```
+
+In this example, we tried to set a value with an incompatible lifetime to
+another one (`'long` is unrelated to `'short`). We can solve this issue in
+two different ways:
+
+Either we make `'short` live at least as long as `'long`:
+
+```
+struct Foo<'a> {
+    x: &'a isize,
+}
+
+// we set 'short to live at least as long as 'long
+fn bar<'short: 'long, 'long>(c: Foo<'short>, l: &'long isize) {
+    let _: Foo<'long> = c; // ok!
+}
+```
+
+Or we use only one lifetime:
+
+```
+struct Foo<'a> {
+    x: &'a isize,
+}
+
+fn bar<'short>(c: Foo<'short>, l: &'short isize) {
+    let _: Foo<'short> = c; // ok!
+}
+```
+"##,
+
 E0635: r##"
 The `#![feature]` attribute specified an unknown feature.
 
@@ -2329,13 +2374,13 @@ the future, [RFC 2091] prohibits their implementation without a follow-up RFC.
     E0488, // lifetime of variable does not enclose its declaration
     E0489, // type/lifetime parameter not in scope here
     E0490, // a value of type `..` is borrowed for too long
-    E0623, // lifetime mismatch where both parameters are anonymous regions
     E0628, // generators cannot have explicit parameters
     E0631, // type mismatch in closure arguments
     E0637, // "'_" is not a valid lifetime bound
     E0657, // `impl Trait` can only capture lifetimes bound at the fn level
     E0687, // in-band lifetimes cannot be used in `fn`/`Fn` syntax
     E0688, // in-band lifetimes cannot be mixed with explicit lifetime binders
+    E0703, // invalid ABI
 //  E0707, // multiple elided lifetimes used in arguments of `async fn`
     E0708, // `async` non-`move` closures with parameters are not currently
            // supported

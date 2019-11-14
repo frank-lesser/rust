@@ -46,11 +46,11 @@ use crate::ty::CanonicalPolyFnSig;
 use crate::util::common::ErrorReported;
 use crate::util::nodemap::{DefIdMap, DefIdSet, ItemLocalMap, ItemLocalSet, NodeMap};
 use crate::util::nodemap::{FxHashMap, FxHashSet};
-use crate::util::profiling::SelfProfilerRef;
 
 use errors::DiagnosticBuilder;
 use arena::SyncDroplessArena;
 use smallvec::SmallVec;
+use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_data_structures::stable_hasher::{
     HashStable, StableHasher, StableVec, hash_stable_hashmap,
 };
@@ -75,6 +75,7 @@ use syntax::source_map::MultiSpan;
 use syntax::feature_gate;
 use syntax::symbol::{Symbol, kw, sym};
 use syntax_pos::Span;
+use syntax::expand::allocator::AllocatorKind;
 
 pub struct AllArenas {
     pub interner: SyncDroplessArena,
@@ -1338,6 +1339,14 @@ impl<'tcx> TyCtxt<'tcx> {
         self.all_crate_nums(LOCAL_CRATE)
     }
 
+    pub fn injected_panic_runtime(self) -> Option<CrateNum> {
+        self.cstore.injected_panic_runtime()
+    }
+
+    pub fn allocator_kind(self) -> Option<AllocatorKind> {
+        self.cstore.allocator_kind()
+    }
+
     pub fn features(self) -> &'tcx feature_gate::Features {
         self.features_query(LOCAL_CRATE)
     }
@@ -2410,22 +2419,22 @@ impl<'tcx> TyCtxt<'tcx> {
 
     #[inline]
     pub fn mk_mut_ref(self, r: Region<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
-        self.mk_ref(r, TypeAndMut {ty: ty, mutbl: hir::MutMutable})
+        self.mk_ref(r, TypeAndMut {ty: ty, mutbl: hir::Mutability::Mutable})
     }
 
     #[inline]
     pub fn mk_imm_ref(self, r: Region<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
-        self.mk_ref(r, TypeAndMut {ty: ty, mutbl: hir::MutImmutable})
+        self.mk_ref(r, TypeAndMut {ty: ty, mutbl: hir::Mutability::Immutable})
     }
 
     #[inline]
     pub fn mk_mut_ptr(self, ty: Ty<'tcx>) -> Ty<'tcx> {
-        self.mk_ptr(TypeAndMut {ty: ty, mutbl: hir::MutMutable})
+        self.mk_ptr(TypeAndMut {ty: ty, mutbl: hir::Mutability::Mutable})
     }
 
     #[inline]
     pub fn mk_imm_ptr(self, ty: Ty<'tcx>) -> Ty<'tcx> {
-        self.mk_ptr(TypeAndMut {ty: ty, mutbl: hir::MutImmutable})
+        self.mk_ptr(TypeAndMut {ty: ty, mutbl: hir::Mutability::Immutable})
     }
 
     #[inline]
@@ -2516,7 +2525,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn mk_generator(self,
                         id: DefId,
                         generator_substs: SubstsRef<'tcx>,
-                        movability: hir::GeneratorMovability)
+                        movability: hir::Movability)
                         -> Ty<'tcx> {
         self.mk_ty(Generator(id, generator_substs, movability))
     }
@@ -3044,5 +3053,10 @@ pub fn provide(providers: &mut ty::query::Providers<'_>) {
     providers.is_compiler_builtins = |tcx, cnum| {
         assert_eq!(cnum, LOCAL_CRATE);
         attr::contains_name(tcx.hir().krate_attrs(), sym::compiler_builtins)
+    };
+    providers.has_panic_handler = |tcx, cnum| {
+        assert_eq!(cnum, LOCAL_CRATE);
+        // We want to check if the panic handler was defined in this crate
+        tcx.lang_items().panic_impl().map_or(false, |did| did.is_local())
     };
 }

@@ -2,7 +2,7 @@
 
 use crate::cstore::{self, CStore, MetadataBlob};
 use crate::locator::{self, CratePaths};
-use crate::schema::{CrateRoot, CrateDep};
+use crate::rmeta::{CrateRoot, CrateDep};
 use rustc_data_structures::sync::{Lock, Once, AtomicCell};
 
 use rustc::hir::def_id::CrateNum;
@@ -121,7 +121,7 @@ impl<'a> CrateLoader<'a> {
             // `source` stores paths which are normalized which may be different
             // from the strings on the command line.
             let source = &self.cstore.get_crate_data(cnum).source;
-            if let Some(entry) = self.sess.opts.externs.get(&*name.as_str()) {
+            if let Some(entry) = self.sess.opts.externs.get(&name.as_str()) {
                 // Only use `--extern crate_name=path` here, not `--extern crate_name`.
                 let found = entry.locations.iter().filter_map(|l| l.as_ref()).any(|l| {
                     let l = fs::canonicalize(l).ok();
@@ -531,7 +531,7 @@ impl<'a> CrateLoader<'a> {
         });
         if !any_non_rlib {
             info!("panic runtime injection skipped, only generating rlib");
-            self.sess.injected_panic_runtime.set(None);
+            self.cstore.injected_panic_runtime = None;
             return
         }
 
@@ -563,7 +563,7 @@ impl<'a> CrateLoader<'a> {
         // we just don't need one at all, then we're done here and there's
         // nothing else to do.
         if !needs_panic_runtime || runtime_found {
-            self.sess.injected_panic_runtime.set(None);
+            self.cstore.injected_panic_runtime = None;
             return
         }
 
@@ -600,7 +600,7 @@ impl<'a> CrateLoader<'a> {
                                    name, desired_strategy.desc()));
         }
 
-        self.sess.injected_panic_runtime.set(Some(cnum));
+        self.cstore.injected_panic_runtime = Some(cnum);
         self.inject_dependency_if(cnum, "a panic runtime",
                                   &|data| data.root.needs_panic_runtime);
     }
@@ -722,7 +722,7 @@ impl<'a> CrateLoader<'a> {
         }
     }
 
-    fn inject_allocator_crate(&self, krate: &ast::Crate) {
+    fn inject_allocator_crate(&mut self, krate: &ast::Crate) {
         let has_global_allocator = match &*global_allocator_spans(krate) {
             [span1, span2, ..] => {
                 self.sess.struct_span_err(*span2, "cannot define multiple global allocators")
@@ -742,7 +742,7 @@ impl<'a> CrateLoader<'a> {
             needs_allocator = needs_allocator || data.root.needs_allocator;
         });
         if !needs_allocator {
-            self.sess.allocator_kind.set(None);
+            self.cstore.allocator_kind = None;
             return
         }
 
@@ -758,7 +758,7 @@ impl<'a> CrateLoader<'a> {
                 }
             });
         if all_rlib {
-            self.sess.allocator_kind.set(None);
+            self.cstore.allocator_kind = None;
             return
         }
 
@@ -795,7 +795,7 @@ impl<'a> CrateLoader<'a> {
             }
         });
         if global_allocator.is_some() {
-            self.sess.allocator_kind.set(Some(AllocatorKind::Global));
+            self.cstore.allocator_kind = Some(AllocatorKind::Global);
             return
         }
 
@@ -816,7 +816,7 @@ impl<'a> CrateLoader<'a> {
                            add `#[global_allocator]` to a static item \
                            that implements the GlobalAlloc trait.");
         }
-        self.sess.allocator_kind.set(Some(AllocatorKind::DefaultLib));
+        self.cstore.allocator_kind = Some(AllocatorKind::DefaultLib);
     }
 
     fn inject_dependency_if(&self,

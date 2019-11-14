@@ -11,16 +11,17 @@ use rustc_codegen_utils::codegen_backend::CodegenBackend;
 use rustc_data_structures::OnDrop;
 use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::fx::{FxHashSet, FxHashMap};
+use rustc_parse::new_parser_from_source_str;
+use rustc::ty;
 use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Mutex};
-use syntax::{self, parse};
 use syntax::ast::{self, MetaItemKind};
-use syntax::parse::token;
-use syntax::source_map::{FileName, FilePathMapping, FileLoader, SourceMap};
+use syntax::token;
+use syntax::source_map::{FileName, FileLoader, SourceMap};
 use syntax::sess::ParseSess;
+use syntax_expand::config::process_configure_mod;
 use syntax_pos::edition;
-use rustc_errors::{Diagnostic, emitter::Emitter, Handler, SourceMapperDyn};
 
 pub type Result<T> = result::Result<T, ErrorReported>;
 
@@ -38,6 +39,8 @@ pub struct Compiler {
     pub(crate) queries: Queries,
     pub(crate) crate_name: Option<String>,
     pub(crate) register_lints: Option<Box<dyn Fn(&Session, &mut lint::LintStore) + Send + Sync>>,
+    pub(crate) override_queries:
+        Option<fn(&Session, &mut ty::query::Providers<'_>, &mut ty::query::Providers<'_>)>,
 }
 
 impl Compiler {
@@ -63,20 +66,11 @@ impl Compiler {
 
 /// Converts strings provided as `--cfg [cfgspec]` into a `crate_cfg`.
 pub fn parse_cfgspecs(cfgspecs: Vec<String>) -> FxHashSet<(String, Option<String>)> {
-    struct NullEmitter;
-    impl Emitter for NullEmitter {
-        fn emit_diagnostic(&mut self, _: &Diagnostic) {}
-        fn source_map(&self) -> Option<&Lrc<SourceMapperDyn>> { None }
-    }
-
     syntax::with_default_globals(move || {
         let cfg = cfgspecs.into_iter().map(|s| {
-
-            let cm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
-            let handler = Handler::with_emitter(false, None, Box::new(NullEmitter));
-            let sess = ParseSess::with_span_handler(handler, cm);
+            let sess = ParseSess::with_silent_emitter(process_configure_mod);
             let filename = FileName::cfg_spec_source_code(&s);
-            let mut parser = parse::new_parser_from_source_str(&sess, filename, s.to_string());
+            let mut parser = new_parser_from_source_str(&sess, filename, s.to_string());
 
             macro_rules! error {($reason: expr) => {
                 early_error(ErrorOutputType::default(),
@@ -140,6 +134,13 @@ pub struct Config {
     /// Note that if you find a Some here you probably want to call that function in the new
     /// function being registered.
     pub register_lints: Option<Box<dyn Fn(&Session, &mut lint::LintStore) + Send + Sync>>,
+
+    /// This is a callback from the driver that is called just after we have populated
+    /// the list of queries.
+    ///
+    /// The second parameter is local providers and the third parameter is external providers.
+    pub override_queries:
+        Option<fn(&Session, &mut ty::query::Providers<'_>, &mut ty::query::Providers<'_>)>,
 }
 
 pub fn run_compiler_in_existing_thread_pool<F, R>(config: Config, f: F) -> R
@@ -166,6 +167,7 @@ where
         queries: Default::default(),
         crate_name: config.crate_name,
         register_lints: config.register_lints,
+        override_queries: config.override_queries,
     };
 
     let _sess_abort_error = OnDrop(|| {
