@@ -1,5 +1,5 @@
-use crate::ops::Try;
 use crate::iter::LoopState;
+use crate::ops::Try;
 
 /// An iterator able to yield elements from both ends.
 ///
@@ -113,7 +113,9 @@ pub trait DoubleEndedIterator: Iterator {
     #[stable(feature = "iter_nth_back", since = "1.37.0")]
     fn nth_back(&mut self, mut n: usize) -> Option<Self::Item> {
         for x in self.rev() {
-            if n == 0 { return Some(x) }
+            if n == 0 {
+                return Some(x);
+            }
             n -= 1;
         }
         None
@@ -157,7 +159,7 @@ pub trait DoubleEndedIterator: Iterator {
     where
         Self: Sized,
         F: FnMut(B, Self::Item) -> R,
-        R: Try<Ok=B>
+        R: Try<Ok = B>,
     {
         let mut accum = init;
         while let Some(x) = self.next_back() {
@@ -219,17 +221,16 @@ pub trait DoubleEndedIterator: Iterator {
     /// ```
     #[inline]
     #[stable(feature = "iter_rfold", since = "1.27.0")]
-    fn rfold<B, F>(mut self, accum: B, f: F) -> B
+    fn rfold<B, F>(mut self, init: B, mut f: F) -> B
     where
         Self: Sized,
         F: FnMut(B, Self::Item) -> B,
     {
-        #[inline]
-        fn ok<B, T>(mut f: impl FnMut(B, T) -> B) -> impl FnMut(B, T) -> Result<B, !> {
-            move |acc, x| Ok(f(acc, x))
+        let mut accum = init;
+        while let Some(x) = self.next_back() {
+            accum = f(accum, x);
         }
-
-        self.try_rfold(accum, ok(f)).unwrap()
+        accum
     }
 
     /// Searches for an element of an iterator from the back that satisfies a predicate.
@@ -279,7 +280,7 @@ pub trait DoubleEndedIterator: Iterator {
     fn rfind<P>(&mut self, predicate: P) -> Option<Self::Item>
     where
         Self: Sized,
-        P: FnMut(&Self::Item) -> bool
+        P: FnMut(&Self::Item) -> bool,
     {
         #[inline]
         fn check<T>(

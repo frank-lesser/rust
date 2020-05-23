@@ -1,13 +1,14 @@
 // Regression test for Issue #53787: Fix ICE when creating a label in inline assembler with macros.
 
+// build-fail
 // ignore-emscripten
 
-#![feature(asm)]
+#![feature(llvm_asm)]
 
 macro_rules! fake_jump {
     ($id:expr) => {
         unsafe {
-            asm!(
+            llvm_asm!(
             "
             jmp $0
             lea eax, [ebx]

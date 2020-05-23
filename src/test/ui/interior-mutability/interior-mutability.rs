@@ -1,4 +1,3 @@
-// ignore-x86 FIXME: missing sysroot spans (#53081)
 use std::cell::Cell;
 use std::panic::catch_unwind;
 fn main() {

@@ -1,8 +1,7 @@
-#![feature(slice_patterns)]
 #![deny(unreachable_patterns)]
 
 fn main() {
-    let s: &[bool] = &[true; 0];
+    let s: &[bool] = &[];
 
     match s {
         [true, ..] => {}

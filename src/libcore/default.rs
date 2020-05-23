@@ -54,7 +54,7 @@
 ///
 /// ## How can I implement `Default`?
 ///
-/// Provides an implementation for the `default()` method that returns the value of
+/// Provide an implementation for the `default()` method that returns the value of
 /// your type that should be the default:
 ///
 /// ```
@@ -119,7 +119,9 @@ pub trait Default: Sized {
 #[rustc_builtin_macro]
 #[stable(feature = "builtin_macro_prelude", since = "1.38.0")]
 #[allow_internal_unstable(core_intrinsics)]
-pub macro Default($item:item) { /* compiler built-in */ }
+pub macro Default($item:item) {
+    /* compiler built-in */
+}
 
 macro_rules! default_impl {
     ($t:ty, $v:expr, $doc:tt) => {

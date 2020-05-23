@@ -2,7 +2,8 @@
 //!
 //! [`Box<T>`], casually referred to as a 'box', provides the simplest form of
 //! heap allocation in Rust. Boxes provide ownership for this allocation, and
-//! drop their contents when they go out of scope.
+//! drop their contents when they go out of scope. Boxes also ensure that they
+//! never allocate more than `isize::MAX` bytes.
 //!
 //! # Examples
 //!
@@ -61,7 +62,60 @@
 //! T` obtained from [`Box::<T>::into_raw`] may be deallocated using the
 //! [`Global`] allocator with [`Layout::for_value(&*value)`].
 //!
+//! So long as `T: Sized`, a `Box<T>` is guaranteed to be represented
+//! as a single pointer and is also ABI-compatible with C pointers
+//! (i.e. the C type `T*`). This means that if you have extern "C"
+//! Rust functions that will be called from C, you can define those
+//! Rust functions using `Box<T>` types, and use `T*` as corresponding
+//! type on the C side. As an example, consider this C header which
+//! declares functions that create and destroy some kind of `Foo`
+//! value:
 //!
+//! ```c
+//! /* C header */
+//!
+//! /* Returns ownership to the caller */
+//! struct Foo* foo_new(void);
+//!
+//! /* Takes ownership from the caller; no-op when invoked with NULL */
+//! void foo_delete(struct Foo*);
+//! ```
+//!
+//! These two functions might be implemented in Rust as follows. Here, the
+//! `struct Foo*` type from C is translated to `Box<Foo>`, which captures
+//! the ownership constraints. Note also that the nullable argument to
+//! `foo_delete` is represented in Rust as `Option<Box<Foo>>`, since `Box<Foo>`
+//! cannot be null.
+//!
+//! ```
+//! #[repr(C)]
+//! pub struct Foo;
+//!
+//! #[no_mangle]
+//! pub extern "C" fn foo_new() -> Box<Foo> {
+//!     Box::new(Foo)
+//! }
+//!
+//! #[no_mangle]
+//! pub extern "C" fn foo_delete(_: Option<Box<Foo>>) {}
+//! ```
+//!
+//! Even though `Box<T>` has the same representation and C ABI as a C pointer,
+//! this does not mean that you can convert an arbitrary `T*` into a `Box<T>`
+//! and expect things to work. `Box<T>` values will always be fully aligned,
+//! non-null pointers. Moreover, the destructor for `Box<T>` will attempt to
+//! free the value with the global allocator. In general, the best practice
+//! is to only use `Box<T>` for pointers that originated from the global
+//! allocator.
+//!
+//! **Important.** At least at present, you should avoid using
+//! `Box<T>` types for functions that are defined in C but invoked
+//! from Rust. In those cases, you should directly mirror the C types
+//! as closely as possible. Using types like `Box<T>` where the C
+//! definition is just using `T*` can lead to undefined behavior, as
+//! described in [rust-lang/unsafe-code-guidelines#198][ucg#198].
+//!
+//! [ucg#198]: https://github.com/rust-lang/unsafe-code-guidelines/issues/198
 //! [dereferencing]: ../../std/ops/trait.Deref.html
 //! [`Box`]: struct.Box.html
 //! [`Box<T>`]: struct.Box.html
@@ -81,21 +135,21 @@ use core::convert::{From, TryFrom};
 use core::fmt;
 use core::future::Future;
 use core::hash::{Hash, Hasher};
-use core::iter::{Iterator, FromIterator, FusedIterator};
+use core::iter::{FromIterator, FusedIterator, Iterator};
 use core::marker::{Unpin, Unsize};
 use core::mem;
-use core::pin::Pin;
 use core::ops::{
-    CoerceUnsized, DispatchFromDyn, Deref, DerefMut, Receiver, Generator, GeneratorState
+    CoerceUnsized, Deref, DerefMut, DispatchFromDyn, Generator, GeneratorState, Receiver,
 };
+use core::pin::Pin;
 use core::ptr::{self, NonNull, Unique};
-use core::slice;
 use core::task::{Context, Poll};
 
-use crate::alloc::{self, Global, Alloc};
-use crate::vec::Vec;
+use crate::alloc::{self, AllocInit, AllocRef, Global};
+use crate::borrow::Cow;
 use crate::raw_vec::RawVec;
 use crate::str::from_boxed_utf8_unchecked;
+use crate::vec::Vec;
 
 /// A pointer type for heap allocation.
 ///
@@ -142,14 +196,41 @@ impl<T> Box<T> {
     #[unstable(feature = "new_uninit", issue = "63291")]
     pub fn new_uninit() -> Box<mem::MaybeUninit<T>> {
         let layout = alloc::Layout::new::<mem::MaybeUninit<T>>();
-        if layout.size() == 0 {
-            return Box(NonNull::dangling().into())
-        }
-        let ptr = unsafe {
-            Global.alloc(layout)
-                .unwrap_or_else(|_| alloc::handle_alloc_error(layout))
-        };
-        Box(ptr.cast().into())
+        let ptr = Global
+            .alloc(layout, AllocInit::Uninitialized)
+            .unwrap_or_else(|_| alloc::handle_alloc_error(layout))
+            .ptr
+            .cast();
+        unsafe { Box::from_raw(ptr.as_ptr()) }
+    }
+
+    /// Constructs a new `Box` with uninitialized contents, with the memory
+    /// being filled with `0` bytes.
+    ///
+    /// See [`MaybeUninit::zeroed`][zeroed] for examples of correct and incorrect usage
+    /// of this method.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit)]
+    ///
+    /// let zero = Box::<u32>::new_zeroed();
+    /// let zero = unsafe { zero.assume_init() };
+    ///
+    /// assert_eq!(*zero, 0)
+    /// ```
+    ///
+    /// [zeroed]: ../../std/mem/union.MaybeUninit.html#method.zeroed
+    #[unstable(feature = "new_uninit", issue = "63291")]
+    pub fn new_zeroed() -> Box<mem::MaybeUninit<T>> {
+        let layout = alloc::Layout::new::<mem::MaybeUninit<T>>();
+        let ptr = Global
+            .alloc(layout, AllocInit::Zeroed)
+            .unwrap_or_else(|_| alloc::handle_alloc_error(layout))
+            .ptr
+            .cast();
+        unsafe { Box::from_raw(ptr.as_ptr()) }
     }
 
     /// Constructs a new `Pin<Box<T>>`. If `T` does not implement `Unpin`, then
@@ -158,6 +239,16 @@ impl<T> Box<T> {
     #[inline(always)]
     pub fn pin(x: T) -> Pin<Box<T>> {
         (box x).into()
+    }
+
+    /// Converts a `Box<T>` into a `Box<[T]>`
+    ///
+    /// This conversion does not allocate on the heap and happens in place.
+    ///
+    #[unstable(feature = "box_into_boxed_slice", issue = "71582")]
+    pub fn into_boxed_slice(boxed: Box<T>) -> Box<[T]> {
+        // *mut T and *mut [T; 1] have the same size and alignment
+        unsafe { Box::from_raw(Box::into_raw(boxed) as *mut [T; 1] as *mut [T]) }
     }
 }
 
@@ -184,18 +275,7 @@ impl<T> Box<[T]> {
     /// ```
     #[unstable(feature = "new_uninit", issue = "63291")]
     pub fn new_uninit_slice(len: usize) -> Box<[mem::MaybeUninit<T>]> {
-        let layout = alloc::Layout::array::<mem::MaybeUninit<T>>(len).unwrap();
-        let ptr = if layout.size() == 0 {
-            NonNull::dangling()
-        } else {
-            unsafe {
-                Global.alloc(layout)
-                    .unwrap_or_else(|_| alloc::handle_alloc_error(layout))
-                    .cast()
-            }
-        };
-        let slice = unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), len) };
-        Box(Unique::from(slice))
+        unsafe { RawVec::with_capacity(len).into_box(len) }
     }
 }
 
@@ -231,7 +311,7 @@ impl<T> Box<mem::MaybeUninit<T>> {
     #[unstable(feature = "new_uninit", issue = "63291")]
     #[inline]
     pub unsafe fn assume_init(self) -> Box<T> {
-        Box(Box::into_unique(self).cast())
+        Box::from_raw(Box::into_raw(self) as *mut T)
     }
 }
 
@@ -269,7 +349,7 @@ impl<T> Box<[mem::MaybeUninit<T>]> {
     #[unstable(feature = "new_uninit", issue = "63291")]
     #[inline]
     pub unsafe fn assume_init(self) -> Box<[T]> {
-        Box(Unique::new_unchecked(Box::into_raw(self) as _))
+        Box::from_raw(Box::into_raw(self) as *mut [T])
     }
 }
 
@@ -359,7 +439,12 @@ impl<T: ?Sized> Box<T> {
     #[stable(feature = "box_raw", since = "1.4.0")]
     #[inline]
     pub fn into_raw(b: Box<T>) -> *mut T {
-        Box::into_raw_non_null(b).as_ptr()
+        // Box is recognized as a "unique pointer" by Stacked Borrows, but internally it is a
+        // raw pointer for the type system. Turning it directly into a raw pointer would not be
+        // recognized as "releasing" the unique pointer to permit aliased raw accesses,
+        // so all raw pointer methods go through `leak` which creates a (unique)
+        // mutable reference. Turning *that* to a raw pointer behaves correctly.
+        Box::leak(b) as *mut T
     }
 
     /// Consumes the `Box`, returning the wrapped pointer as `NonNull<T>`.
@@ -382,6 +467,7 @@ impl<T: ?Sized> Box<T> {
     ///
     /// ```
     /// #![feature(box_into_raw_non_null)]
+    /// #![allow(deprecated)]
     ///
     /// let x = Box::new(5);
     /// let ptr = Box::into_raw_non_null(x);
@@ -391,24 +477,34 @@ impl<T: ?Sized> Box<T> {
     /// let x = unsafe { Box::from_raw(ptr.as_ptr()) };
     /// ```
     #[unstable(feature = "box_into_raw_non_null", issue = "47336")]
+    #[rustc_deprecated(
+        since = "1.44.0",
+        reason = "use `Box::leak(b).into()` or `NonNull::from(Box::leak(b))` instead"
+    )]
     #[inline]
     pub fn into_raw_non_null(b: Box<T>) -> NonNull<T> {
-        Box::into_unique(b).into()
+        // Box is recognized as a "unique pointer" by Stacked Borrows, but internally it is a
+        // raw pointer for the type system. Turning it directly into a raw pointer would not be
+        // recognized as "releasing" the unique pointer to permit aliased raw accesses,
+        // so all raw pointer methods go through `leak` which creates a (unique)
+        // mutable reference. Turning *that* to a raw pointer behaves correctly.
+        Box::leak(b).into()
     }
 
-    #[unstable(feature = "ptr_internals", issue = "0", reason = "use into_raw_non_null instead")]
+    #[unstable(
+        feature = "ptr_internals",
+        issue = "none",
+        reason = "use `Box::leak(b).into()` or `Unique::from(Box::leak(b))` instead"
+    )]
     #[inline]
     #[doc(hidden)]
     pub fn into_unique(b: Box<T>) -> Unique<T> {
-        let mut unique = b.0;
-        mem::forget(b);
-        // Box is kind-of a library type, but recognized as a "unique pointer" by
-        // Stacked Borrows.  This function here corresponds to "reborrowing to
-        // a raw pointer", but there is no actual reborrow here -- so
-        // without some care, the pointer we are returning here still carries
-        // the tag of `b`, with `Unique` permission.
-        // We round-trip through a mutable reference to avoid that.
-        unsafe { Unique::new_unchecked(unique.as_mut() as *mut T) }
+        // Box is recognized as a "unique pointer" by Stacked Borrows, but internally it is a
+        // raw pointer for the type system. Turning it directly into a raw pointer would not be
+        // recognized as "releasing" the unique pointer to permit aliased raw accesses,
+        // so all raw pointer methods go through `leak` which creates a (unique)
+        // mutable reference. Turning *that* to a raw pointer behaves correctly.
+        Box::leak(b).into()
     }
 
     /// Consumes and leaks the `Box`, returning a mutable reference,
@@ -452,9 +548,9 @@ impl<T: ?Sized> Box<T> {
     #[inline]
     pub fn leak<'a>(b: Box<T>) -> &'a mut T
     where
-        T: 'a // Technically not needed, but kept to be explicit.
+        T: 'a, // Technically not needed, but kept to be explicit.
     {
-        unsafe { &mut *Box::into_raw(b) }
+        unsafe { &mut *mem::ManuallyDrop::new(b).0.as_ptr() }
     }
 
     /// Converts a `Box<T>` into a `Pin<Box<T>>`
@@ -545,15 +641,12 @@ impl<T: Clone> Clone for Box<T> {
     }
 }
 
-
 #[stable(feature = "box_slice_clone", since = "1.3.0")]
 impl Clone for Box<str> {
     fn clone(&self) -> Self {
         // this makes a copy of the data
         let buf: Box<[u8]> = self.as_bytes().into();
-        unsafe {
-            from_boxed_utf8_unchecked(buf)
-        }
+        unsafe { from_boxed_utf8_unchecked(buf) }
     }
 }
 
@@ -703,7 +796,18 @@ impl<T: Copy> From<&[T]> for Box<[T]> {
         let buf = RawVec::with_capacity(len);
         unsafe {
             ptr::copy_nonoverlapping(slice.as_ptr(), buf.ptr(), len);
-            buf.into_box()
+            buf.into_box(slice.len()).assume_init()
+        }
+    }
+}
+
+#[stable(feature = "box_from_cow", since = "1.45.0")]
+impl<T: Copy> From<Cow<'_, [T]>> for Box<[T]> {
+    #[inline]
+    fn from(cow: Cow<'_, [T]>) -> Box<[T]> {
+        match cow {
+            Cow::Borrowed(slice) => Box::from(slice),
+            Cow::Owned(slice) => Box::from(slice),
         }
     }
 }
@@ -723,6 +827,17 @@ impl From<&str> for Box<str> {
     #[inline]
     fn from(s: &str) -> Box<str> {
         unsafe { from_boxed_utf8_unchecked(Box::from(s.as_bytes())) }
+    }
+}
+
+#[stable(feature = "box_from_cow", since = "1.45.0")]
+impl From<Cow<'_, str>> for Box<str> {
+    #[inline]
+    fn from(cow: Cow<'_, str>) -> Box<str> {
+        match cow {
+            Cow::Borrowed(s) => Box::from(s),
+            Cow::Owned(s) => Box::from(s),
+        }
     }
 }
 
@@ -750,7 +865,7 @@ impl From<Box<str>> for Box<[u8]> {
     }
 }
 
-#[unstable(feature = "boxed_slice_try_from", issue = "0")]
+#[stable(feature = "boxed_slice_try_from", since = "1.43.0")]
 impl<T, const N: usize> TryFrom<Box<[T]>> for Box<[T; N]>
 where
     [T; N]: LengthAtMost32,
@@ -866,7 +981,7 @@ impl<T: ?Sized> DerefMut for Box<T> {
     }
 }
 
-#[unstable(feature = "receiver_trait", issue = "0")]
+#[unstable(feature = "receiver_trait", issue = "none")]
 impl<T: ?Sized> Receiver for Box<T> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -960,7 +1075,7 @@ impl<A, F: Fn<A> + ?Sized> Fn<A> for Box<F> {
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Box<U>> for Box<T> {}
 
-#[unstable(feature = "dispatch_from_dyn", issue = "0")]
+#[unstable(feature = "dispatch_from_dyn", issue = "none")]
 impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Box<U>> for Box<T> {}
 
 #[stable(feature = "boxed_slice_from_iter", since = "1.32.0")]
@@ -973,51 +1088,7 @@ impl<A> FromIterator<A> for Box<[A]> {
 #[stable(feature = "box_slice_clone", since = "1.3.0")]
 impl<T: Clone> Clone for Box<[T]> {
     fn clone(&self) -> Self {
-        let mut new = BoxBuilder {
-            data: RawVec::with_capacity(self.len()),
-            len: 0,
-        };
-
-        let mut target = new.data.ptr();
-
-        for item in self.iter() {
-            unsafe {
-                ptr::write(target, item.clone());
-                target = target.offset(1);
-            };
-
-            new.len += 1;
-        }
-
-        return unsafe { new.into_box() };
-
-        // Helper type for responding to panics correctly.
-        struct BoxBuilder<T> {
-            data: RawVec<T>,
-            len: usize,
-        }
-
-        impl<T> BoxBuilder<T> {
-            unsafe fn into_box(self) -> Box<[T]> {
-                let raw = ptr::read(&self.data);
-                mem::forget(self);
-                raw.into_box()
-            }
-        }
-
-        impl<T> Drop for BoxBuilder<T> {
-            fn drop(&mut self) {
-                let mut data = self.data.ptr();
-                let max = unsafe { data.add(self.len) };
-
-                while data != max {
-                    unsafe {
-                        ptr::read(data);
-                        data = data.offset(1);
-                    }
-                }
-            }
-        }
+        self.to_vec().into_boxed_slice()
     }
 }
 
@@ -1072,25 +1143,25 @@ impl<T: ?Sized> AsMut<T> for Box<T> {
  *  could have a method to project a Pin<T> from it.
  */
 #[stable(feature = "pin", since = "1.33.0")]
-impl<T: ?Sized> Unpin for Box<T> { }
+impl<T: ?Sized> Unpin for Box<T> {}
 
 #[unstable(feature = "generator_trait", issue = "43122")]
-impl<G: ?Sized + Generator + Unpin> Generator for Box<G> {
+impl<G: ?Sized + Generator<R> + Unpin, R> Generator<R> for Box<G> {
     type Yield = G::Yield;
     type Return = G::Return;
 
-    fn resume(mut self: Pin<&mut Self>) -> GeneratorState<Self::Yield, Self::Return> {
-        G::resume(Pin::new(&mut *self))
+    fn resume(mut self: Pin<&mut Self>, arg: R) -> GeneratorState<Self::Yield, Self::Return> {
+        G::resume(Pin::new(&mut *self), arg)
     }
 }
 
 #[unstable(feature = "generator_trait", issue = "43122")]
-impl<G: ?Sized + Generator> Generator for Pin<Box<G>> {
+impl<G: ?Sized + Generator<R>, R> Generator<R> for Pin<Box<G>> {
     type Yield = G::Yield;
     type Return = G::Return;
 
-    fn resume(mut self: Pin<&mut Self>) -> GeneratorState<Self::Yield, Self::Return> {
-        G::resume((*self).as_mut())
+    fn resume(mut self: Pin<&mut Self>, arg: R) -> GeneratorState<Self::Yield, Self::Return> {
+        G::resume((*self).as_mut(), arg)
     }
 }
 

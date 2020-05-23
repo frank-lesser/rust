@@ -2,7 +2,7 @@ error[E0271]: type mismatch resolving `for<'r> <[closure@$DIR/closure-mismatch.r
   --> $DIR/closure-mismatch.rs:8:5
    |
 LL | fn baz<T: Foo>(_: T) {}
-   |    ---    --- required by this bound in `baz`
+   |           --- required by this bound in `baz`
 ...
 LL |     baz(|_| ());
    |     ^^^ expected bound lifetime parameter, found concrete lifetime
@@ -13,7 +13,7 @@ error[E0631]: type mismatch in closure arguments
   --> $DIR/closure-mismatch.rs:8:5
    |
 LL | fn baz<T: Foo>(_: T) {}
-   |    ---    --- required by this bound in `baz`
+   |           --- required by this bound in `baz`
 ...
 LL |     baz(|_| ());
    |     ^^^ ------ found signature of `fn(_) -> _`
@@ -24,4 +24,5 @@ LL |     baz(|_| ());
 
 error: aborting due to 2 previous errors
 
-For more information about this error, try `rustc --explain E0271`.
+Some errors have detailed explanations: E0271, E0631.
+For more information about an error, try `rustc --explain E0271`.

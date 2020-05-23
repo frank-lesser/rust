@@ -1,24 +1,25 @@
 use crate::clean;
 use crate::docfs::PathError;
 use crate::fold::DocFolder;
+use crate::html::format::Buffer;
+use crate::html::highlight;
 use crate::html::layout;
 use crate::html::render::{Error, SharedContext, BASIC_KEYWORDS};
-use crate::html::highlight;
-use crate::html::format::Buffer;
+use rustc_hir::def_id::LOCAL_CRATE;
+use rustc_span::source_map::FileName;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use syntax::source_map::FileName;
 
-crate fn render(dst: &Path, scx: &mut SharedContext,
-                  krate: clean::Crate) -> Result<clean::Crate, Error> {
+crate fn render(
+    dst: &Path,
+    scx: &mut SharedContext,
+    krate: clean::Crate,
+) -> Result<clean::Crate, Error> {
     info!("emitting source files");
     let dst = dst.join("src").join(&krate.name);
     scx.ensure_dir(&dst)?;
-    let mut folder = SourceCollector {
-        dst,
-        scx,
-    };
+    let mut folder = SourceCollector { dst, scx };
     Ok(folder.fold_crate(krate))
 }
 
@@ -35,23 +36,24 @@ impl<'a> DocFolder for SourceCollector<'a> {
         // If we're including source files, and we haven't seen this file yet,
         // then we need to render it out to the filesystem.
         if self.scx.include_sources
-            // skip all invalid or macro spans
+            // skip all synthetic "files"
             && item.source.filename.is_real()
-            // skip non-local items
-            && item.def_id.is_local() {
-
+            // skip non-local files
+            && item.source.cnum == LOCAL_CRATE
+        {
             // If it turns out that we couldn't read this file, then we probably
             // can't read any of the files (generating html output from json or
             // something like that), so just don't include sources for the
             // entire crate. The other option is maintaining this mapping on a
             // per-file basis, but that's probably not worth it...
-            self.scx
-                .include_sources = match self.emit_source(&item.source.filename) {
+            self.scx.include_sources = match self.emit_source(&item.source.filename) {
                 Ok(()) => true,
                 Err(e) => {
-                    println!("warning: source code was requested to be rendered, \
+                    println!(
+                        "warning: source code was requested to be rendered, \
                               but processing `{}` had an error: {}",
-                             item.source.filename, e);
+                        item.source.filename, e
+                    );
                     println!("         skipping rendering of source code");
                     false
                 }
@@ -81,11 +83,8 @@ impl<'a> SourceCollector<'a> {
         };
 
         // Remove the utf-8 BOM if any
-        let contents = if contents.starts_with("\u{feff}") {
-            &contents[3..]
-        } else {
-            &contents[..]
-        };
+        let contents =
+            if contents.starts_with("\u{feff}") { &contents[3..] } else { &contents[..] };
 
         // Create the intermediate directories
         let mut cur = self.dst.clone();
@@ -98,15 +97,15 @@ impl<'a> SourceCollector<'a> {
             href.push('/');
         });
         self.scx.ensure_dir(&cur)?;
-        let mut fname = p.file_name()
-                         .expect("source has no filename")
-                         .to_os_string();
+        let mut fname = p.file_name().expect("source has no filename").to_os_string();
         fname.push(".html");
         cur.push(&fname);
         href.push_str(&fname.to_string_lossy());
 
-        let title = format!("{} -- source", cur.file_name().expect("failed to get file name")
-                                               .to_string_lossy());
+        let title = format!(
+            "{} -- source",
+            cur.file_name().expect("failed to get file name").to_string_lossy()
+        );
         let desc = format!("Source to the Rust file `{}`.", filename);
         let page = layout::Page {
             title: &title,
@@ -119,9 +118,13 @@ impl<'a> SourceCollector<'a> {
             extra_scripts: &[&format!("source-files{}", self.scx.resource_suffix)],
             static_extra_scripts: &[&format!("source-script{}", self.scx.resource_suffix)],
         };
-        let v = layout::render(&self.scx.layout,
-                       &page, "", |buf: &mut _| print_src(buf, &contents),
-                       &self.scx.themes);
+        let v = layout::render(
+            &self.scx.layout,
+            &page,
+            "",
+            |buf: &mut _| print_src(buf, &contents),
+            &self.scx.themes,
+        );
         self.scx.fs.write(&cur, v.as_bytes())?;
         self.scx.local_sources.insert(p.clone(), href);
         Ok(())
@@ -170,6 +173,5 @@ fn print_src(buf: &mut Buffer, s: &str) {
         write!(buf, "<span id=\"{0}\">{0:1$}</span>\n", i, cols);
     }
     write!(buf, "</pre>");
-    write!(buf, "{}",
-            highlight::render_with_highlighting(s, None, None, None));
+    write!(buf, "{}", highlight::render_with_highlighting(s, None, None, None));
 }

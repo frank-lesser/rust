@@ -1,7 +1,6 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fmt::Debug;
@@ -12,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use build_helper::t;
+use build_helper::{output, t};
 
 use crate::cache::{Cache, Interned, INTERNER};
 use crate::check;
@@ -22,15 +21,13 @@ use crate::doc;
 use crate::flags::Subcommand;
 use crate::install;
 use crate::native;
+use crate::run;
 use crate::test;
 use crate::tool;
-use crate::util::{self, add_lib_path, exe, libdir};
-use crate::{Build, DocTests, Mode, GitRepo};
+use crate::util::{self, add_dylib_path, add_link_lib_path, exe, libdir};
+use crate::{Build, DocTests, GitRepo, Mode};
 
 pub use crate::Compiler;
-
-use petgraph::graph::NodeIndex;
-use petgraph::Graph;
 
 pub struct Builder<'a> {
     pub build: &'a Build,
@@ -40,9 +37,6 @@ pub struct Builder<'a> {
     stack: RefCell<Vec<Box<dyn Any>>>,
     time_spent_on_dependencies: Cell<Duration>,
     pub paths: Vec<PathBuf>,
-    graph_nodes: RefCell<HashMap<String, NodeIndex>>,
-    graph: RefCell<Graph<String, bool>>,
-    parent: Cell<Option<NodeIndex>>,
 }
 
 impl<'a> Deref for Builder<'a> {
@@ -129,11 +123,7 @@ impl PathSet {
 
     fn path(&self, builder: &Builder<'_>) -> PathBuf {
         match self {
-            PathSet::Set(set) => set
-                .iter()
-                .next()
-                .unwrap_or(&builder.build.src)
-                .to_path_buf(),
+            PathSet::Set(set) => set.iter().next().unwrap_or(&builder.build.src).to_path_buf(),
             PathSet::Suite(path) => PathBuf::from(path),
         }
     }
@@ -187,10 +177,8 @@ impl StepDescription {
     }
 
     fn run(v: &[StepDescription], builder: &Builder<'_>, paths: &[PathBuf]) {
-        let should_runs = v
-            .iter()
-            .map(|desc| (desc.should_run)(ShouldRun::new(builder)))
-            .collect::<Vec<_>>();
+        let should_runs =
+            v.iter().map(|desc| (desc.should_run)(ShouldRun::new(builder))).collect::<Vec<_>>();
 
         // sanity checks on rules
         for (desc, should_run) in v.iter().zip(&should_runs) {
@@ -287,8 +275,7 @@ impl<'a> ShouldRun<'a> {
 
     // multiple aliases for the same job
     pub fn paths(mut self, paths: &[&str]) -> Self {
-        self.paths
-            .insert(PathSet::Set(paths.iter().map(PathBuf::from).collect()));
+        self.paths.insert(PathSet::Set(paths.iter().map(PathBuf::from).collect()));
         self
     }
 
@@ -321,11 +308,13 @@ pub enum Kind {
     Check,
     Clippy,
     Fix,
+    Format,
     Test,
     Bench,
     Dist,
     Doc,
     Install,
+    Run,
 }
 
 impl<'a> Builder<'a> {
@@ -339,7 +328,6 @@ impl<'a> Builder<'a> {
             Kind::Build => describe!(
                 compile::Std,
                 compile::Rustc,
-                compile::CodegenBackend,
                 compile::StartupObjects,
                 tool::BuildManifest,
                 tool::Rustbook,
@@ -357,21 +345,20 @@ impl<'a> Builder<'a> {
                 tool::Rustdoc,
                 tool::Clippy,
                 native::Llvm,
+                native::Sanitizers,
                 tool::Rustfmt,
                 tool::Miri,
                 native::Lld
             ),
-            Kind::Check | Kind::Clippy | Kind::Fix => describe!(
-                check::Std,
-                check::Rustc,
-                check::CodegenBackend,
-                check::Rustdoc
-            ),
+            Kind::Check | Kind::Clippy | Kind::Fix | Kind::Format => {
+                describe!(check::Std, check::Rustc, check::Rustdoc, check::Clippy)
+            }
             Kind::Test => describe!(
+                crate::toolstate::ToolStateCheck,
+                test::ExpandYamlAnchors,
                 test::Tidy,
                 test::Ui,
                 test::CompileFail,
-                test::RunFail,
                 test::RunPassValgrind,
                 test::MirOpt,
                 test::Codegen,
@@ -382,7 +369,6 @@ impl<'a> Builder<'a> {
                 test::UiFullDeps,
                 test::Rustdoc,
                 test::Pretty,
-                test::RunFailPretty,
                 test::RunPassValgrindPretty,
                 test::Crate,
                 test::CrateLibrustc,
@@ -453,7 +439,6 @@ impl<'a> Builder<'a> {
                 dist::Clippy,
                 dist::Miri,
                 dist::LlvmTools,
-                dist::Lldb,
                 dist::Extended,
                 dist::HashSign
             ),
@@ -469,6 +454,7 @@ impl<'a> Builder<'a> {
                 install::Src,
                 install::Rustc
             ),
+            Kind::Run => describe!(run::ExpandYamlAnchors,),
         }
     }
 
@@ -491,9 +477,6 @@ impl<'a> Builder<'a> {
             stack: RefCell::new(Vec::new()),
             time_spent_on_dependencies: Cell::new(Duration::new(0, 0)),
             paths: vec![],
-            graph_nodes: RefCell::new(HashMap::new()),
-            graph: RefCell::new(Graph::new()),
-            parent: Cell::new(None),
         };
 
         let builder = &builder;
@@ -525,10 +508,11 @@ impl<'a> Builder<'a> {
             Subcommand::Bench { ref paths, .. } => (Kind::Bench, &paths[..]),
             Subcommand::Dist { ref paths } => (Kind::Dist, &paths[..]),
             Subcommand::Install { ref paths } => (Kind::Install, &paths[..]),
-            Subcommand::Clean { .. } => panic!(),
+            Subcommand::Run { ref paths } => (Kind::Run, &paths[..]),
+            Subcommand::Format { .. } | Subcommand::Clean { .. } => panic!(),
         };
 
-        let builder = Builder {
+        Builder {
             build,
             top_stage: build.config.stage.unwrap_or(2),
             kind,
@@ -536,17 +520,11 @@ impl<'a> Builder<'a> {
             stack: RefCell::new(Vec::new()),
             time_spent_on_dependencies: Cell::new(Duration::new(0, 0)),
             paths: paths.to_owned(),
-            graph_nodes: RefCell::new(HashMap::new()),
-            graph: RefCell::new(Graph::new()),
-            parent: Cell::new(None),
-        };
-
-        builder
+        }
     }
 
-    pub fn execute_cli(&self) -> Graph<String, bool> {
+    pub fn execute_cli(&self) {
         self.run_step_descriptions(&Builder::get_step_descriptions(self.kind), &self.paths);
-        self.graph.borrow().clone()
     }
 
     pub fn default_doc(&self, paths: Option<&[PathBuf]>) {
@@ -563,9 +541,7 @@ impl<'a> Builder<'a> {
     /// obtained through this function, since it ensures that they are valid
     /// (i.e., built and assembled).
     pub fn compiler(&self, stage: u32, host: Interned<String>) -> Compiler {
-        self.ensure(compile::Assemble {
-            target_compiler: Compiler { stage, host },
-        })
+        self.ensure(compile::Assemble { target_compiler: Compiler { stage, host } })
     }
 
     /// Similar to `compiler`, except handles the full-bootstrap option to
@@ -631,11 +607,6 @@ impl<'a> Builder<'a> {
         self.ensure(Libdir { compiler, target })
     }
 
-    pub fn sysroot_codegen_backends(&self, compiler: Compiler) -> PathBuf {
-        self.sysroot_libdir(compiler, compiler.host)
-            .with_file_name(self.config.rust_codegen_backends_dir.clone())
-    }
-
     /// Returns the compiler's libdir where it stores the dynamic libraries that
     /// it itself links against.
     ///
@@ -646,9 +617,10 @@ impl<'a> Builder<'a> {
             self.rustc_snapshot_libdir()
         } else {
             match self.config.libdir_relative() {
-                Some(relative_libdir) if compiler.stage >= 1
-                    => self.sysroot(compiler).join(relative_libdir),
-                _ => self.sysroot(compiler).join(libdir(&compiler.host))
+                Some(relative_libdir) if compiler.stage >= 1 => {
+                    self.sysroot(compiler).join(relative_libdir)
+                }
+                _ => self.sysroot(compiler).join(libdir(&compiler.host)),
             }
         }
     }
@@ -663,9 +635,8 @@ impl<'a> Builder<'a> {
             libdir(&self.config.build).as_ref()
         } else {
             match self.config.libdir_relative() {
-                Some(relative_libdir) if compiler.stage >= 1
-                    => relative_libdir,
-                _ => libdir(&compiler.host).as_ref()
+                Some(relative_libdir) if compiler.stage >= 1 => relative_libdir,
+                _ => libdir(&compiler.host).as_ref(),
             }
         }
     }
@@ -676,9 +647,8 @@ impl<'a> Builder<'a> {
     /// For example this returns `lib` on Unix and Windows.
     pub fn sysroot_libdir_relative(&self, compiler: Compiler) -> &Path {
         match self.config.libdir_relative() {
-            Some(relative_libdir) if compiler.stage >= 1
-                => relative_libdir,
-            _ => Path::new("lib")
+            Some(relative_libdir) if compiler.stage >= 1 => relative_libdir,
+            _ => Path::new("lib"),
         }
     }
 
@@ -692,7 +662,7 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        add_lib_path(vec![self.rustc_libdir(compiler)], &mut cmd.command);
+        add_dylib_path(vec![self.rustc_libdir(compiler)], &mut cmd.command);
     }
 
     /// Gets a path to the compiler specified.
@@ -700,19 +670,8 @@ impl<'a> Builder<'a> {
         if compiler.is_snapshot(self) {
             self.initial_rustc.clone()
         } else {
-            self.sysroot(compiler)
-                .join("bin")
-                .join(exe("rustc", &compiler.host))
+            self.sysroot(compiler).join("bin").join(exe("rustc", &compiler.host))
         }
-    }
-
-    /// Gets the paths to all of the compiler's codegen backends.
-    fn codegen_backends(&self, compiler: Compiler) -> impl Iterator<Item = PathBuf> {
-        fs::read_dir(self.sysroot_codegen_backends(compiler))
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
     }
 
     pub fn rustdoc(&self, compiler: Compiler) -> PathBuf {
@@ -735,10 +694,24 @@ impl<'a> Builder<'a> {
         cmd.env_remove("MAKEFLAGS");
         cmd.env_remove("MFLAGS");
 
-        if let Some(linker) = self.linker(compiler.host) {
+        if let Some(linker) = self.linker(compiler.host, true) {
             cmd.env("RUSTC_TARGET_LINKER", linker);
         }
         cmd
+    }
+
+    /// Return the path to `llvm-config` for the target, if it exists.
+    ///
+    /// Note that this returns `None` if LLVM is disabled, or if we're in a
+    /// check build or dry-run, where there's no need to build all of LLVM.
+    fn llvm_config(&self, target: Interned<String>) -> Option<PathBuf> {
+        if self.config.llvm_enabled() && self.kind != Kind::Check && !self.config.dry_run {
+            let llvm_config = self.ensure(native::Llvm { target });
+            if llvm_config.is_file() {
+                return Some(llvm_config);
+            }
+        }
+        None
     }
 
     /// Prepares an invocation of `cargo` to be run.
@@ -758,12 +731,6 @@ impl<'a> Builder<'a> {
         let mut cargo = Command::new(&self.initial_cargo);
         let out_dir = self.stage_out(compiler, mode);
 
-        // Codegen backends are not yet tracked by -Zbinary-dep-depinfo,
-        // so we need to explicitly clear out if they've been updated.
-        for backend in self.codegen_backends(compiler) {
-            self.clear_if_dirty(&out_dir, &backend);
-        }
-
         if cmd == "doc" || cmd == "rustdoc" {
             let my_out = match mode {
                 // This is the intended out directory for compiler documentation.
@@ -774,17 +741,10 @@ impl<'a> Builder<'a> {
             self.clear_if_dirty(&my_out, &rustdoc);
         }
 
-        cargo
-            .env("CARGO_TARGET_DIR", out_dir)
-            .arg(cmd)
-            .arg("-Zconfig-profile");
+        cargo.env("CARGO_TARGET_DIR", &out_dir).arg(cmd);
 
         let profile_var = |name: &str| {
-            let profile = if self.config.rust_optimize {
-                "RELEASE"
-            } else {
-                "DEV"
-            };
+            let profile = if self.config.rust_optimize { "RELEASE" } else { "DEV" };
             format!("CARGO_PROFILE_{}_{}", profile, name)
         };
 
@@ -796,25 +756,31 @@ impl<'a> Builder<'a> {
         }
 
         if cmd != "install" {
-            cargo.arg("--target")
-                 .arg(target);
+            cargo.arg("--target").arg(target);
         } else {
             assert_eq!(target, compiler.host);
         }
 
         // Set a flag for `check`/`clippy`/`fix`, so that certain build
-        // scripts can do less work (e.g. not building/requiring LLVM).
+        // scripts can do less work (i.e. not building/requiring LLVM).
         if cmd == "check" || cmd == "clippy" || cmd == "fix" {
-            cargo.env("RUST_CHECK", "1");
+            // If we've not yet built LLVM, or it's stale, then bust
+            // the librustc_llvm cache. That will always work, even though it
+            // may mean that on the next non-check build we'll need to rebuild
+            // librustc_llvm. But if LLVM is stale, that'll be a tiny amount
+            // of work comparitively, and we'd likely need to rebuild it anyway,
+            // so that's okay.
+            if crate::native::prebuilt_llvm_config(self, target).is_err() {
+                cargo.env("RUST_CHECK", "1");
+            }
         }
 
-        let stage;
-        if compiler.stage == 0 && self.local_rebuild {
+        let stage = if compiler.stage == 0 && self.local_rebuild {
             // Assume the local-rebuild rustc already has stage1 features.
-            stage = 1;
+            1
         } else {
-            stage = compiler.stage;
-        }
+            compiler.stage
+        };
 
         let mut rustflags = Rustflags::new(&target);
         if stage != 0 {
@@ -830,19 +796,24 @@ impl<'a> Builder<'a> {
             rustflags.arg("--cfg=bootstrap");
         }
 
+        // FIXME: It might be better to use the same value for both `RUSTFLAGS` and `RUSTDOCFLAGS`,
+        // but this breaks CI. At the very least, stage0 `rustdoc` needs `--cfg bootstrap`. See
+        // #71458.
+        let rustdocflags = rustflags.clone();
+
         if let Ok(s) = env::var("CARGOFLAGS") {
             cargo.args(s.split_whitespace());
         }
 
         match mode {
-            Mode::Std | Mode::ToolBootstrap | Mode::ToolStd => {},
+            Mode::Std | Mode::ToolBootstrap | Mode::ToolStd => {}
             Mode::Rustc | Mode::Codegen | Mode::ToolRustc => {
                 // Build proc macros both for the host and the target
                 if target != compiler.host && cmd != "check" {
                     cargo.arg("-Zdual-proc-macros");
                     rustflags.arg("-Zdual-proc-macros");
                 }
-            },
+            }
         }
 
         // This tells Cargo (and in turn, rustc) to output more complete
@@ -905,7 +876,7 @@ impl<'a> Builder<'a> {
             rustflags.arg("-Zforce-unstable-if-unmarked");
         }
 
-        rustflags.arg("-Zexternal-macro-backtrace");
+        rustflags.arg("-Zmacro-backtrace");
 
         let want_rustdoc = self.doc_tests != DocTests::No;
 
@@ -918,12 +889,20 @@ impl<'a> Builder<'a> {
         assert!(!use_snapshot || stage == 0 || self.local_rebuild);
 
         let maybe_sysroot = self.sysroot(compiler);
-        let sysroot = if use_snapshot {
-            self.rustc_snapshot_sysroot()
-        } else {
-            &maybe_sysroot
-        };
+        let sysroot = if use_snapshot { self.rustc_snapshot_sysroot() } else { &maybe_sysroot };
         let libdir = self.rustc_libdir(compiler);
+
+        // Clear the output directory if the real rustc we're using has changed;
+        // Cargo cannot detect this as it thinks rustc is bootstrap/debug/rustc.
+        //
+        // Avoid doing this during dry run as that usually means the relevant
+        // compiler is not yet linked/copied properly.
+        //
+        // Only clear out the directory if we're compiling std; otherwise, we
+        // should let Cargo take care of things for us (via depdep info)
+        if !self.config.dry_run && mode == Mode::Std && cmd == "build" {
+            self.clear_if_dirty(&out_dir, &self.rustc(compiler));
+        }
 
         // Customize the compiler we're running. Specify the compiler to cargo
         // as our shim and then pass it some various options used to configure
@@ -938,7 +917,11 @@ impl<'a> Builder<'a> {
             .env("RUSTC_STAGE", stage.to_string())
             .env(
                 "RUSTC_DEBUG_ASSERTIONS",
-                self.config.rust_debug_assertions.to_string(),
+                if mode == Mode::Std {
+                    self.config.rust_debug_assertions_std.to_string()
+                } else {
+                    self.config.rust_debug_assertions.to_string()
+                },
             )
             .env("RUSTC_SYSROOT", &sysroot)
             .env("RUSTC_LIBDIR", &libdir)
@@ -980,9 +963,8 @@ impl<'a> Builder<'a> {
         // argument manually via `-C link-args=-Wl,-rpath,...`. Plus isn't it
         // fun to pass a flag to a tool to pass a flag to pass a flag to a tool
         // to change a flag in a binary?
-        if self.config.rust_rpath {
+        if self.config.rust_rpath && util::use_host_linker(&target) {
             let rpath = if target.contains("apple") {
-
                 // Note that we need to take one extra step on macOS to also pass
                 // `-Wl,-instal_name,@rpath/...` to get things to work right. To
                 // do that we pass a weird flag to the compiler to get it to do
@@ -990,10 +972,7 @@ impl<'a> Builder<'a> {
                 // flesh out rpath support more fully in the future.
                 rustflags.arg("-Zosx-rpath-install-name");
                 Some("-Wl,-rpath,@loader_path/../lib")
-            } else if !target.contains("windows") &&
-                      !target.contains("wasm32") &&
-                      !target.contains("emscripten") &&
-                      !target.contains("fuchsia") {
+            } else if !target.contains("windows") {
                 Some("-Wl,-rpath,$ORIGIN/../lib")
             } else {
                 None
@@ -1003,10 +982,15 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if let Some(host_linker) = self.linker(compiler.host) {
+        // FIXME: Don't use LLD if we're compiling libtest, since it fails to link it.
+        // See https://github.com/rust-lang/rust/issues/68647.
+        let can_use_lld = mode != Mode::Std;
+
+        if let Some(host_linker) = self.linker(compiler.host, can_use_lld) {
             cargo.env("RUSTC_HOST_LINKER", host_linker);
         }
-        if let Some(target_linker) = self.linker(target) {
+
+        if let Some(target_linker) = self.linker(target, can_use_lld) {
             let target = crate::envify(&target);
             cargo.env(&format!("CARGO_TARGET_{}_LINKER", target), target_linker);
         }
@@ -1017,8 +1001,9 @@ impl<'a> Builder<'a> {
         let debuginfo_level = match mode {
             Mode::Rustc | Mode::Codegen => self.config.rust_debuginfo_level_rustc,
             Mode::Std => self.config.rust_debuginfo_level_std,
-            Mode::ToolBootstrap | Mode::ToolStd |
-            Mode::ToolRustc => self.config.rust_debuginfo_level_tools,
+            Mode::ToolBootstrap | Mode::ToolStd | Mode::ToolRustc => {
+                self.config.rust_debuginfo_level_tools
+            }
         };
         cargo.env(profile_var("DEBUG"), debuginfo_level.to_string());
 
@@ -1038,8 +1023,13 @@ impl<'a> Builder<'a> {
             cargo.env("RUSTC_HOST_CRT_STATIC", x.to_string());
         }
 
-        if let Some(map) = self.build.debuginfo_map(GitRepo::Rustc) {
+        if let Some(map_to) = self.build.debuginfo_map_to(GitRepo::Rustc) {
+            let map = format!("{}={}", self.build.src.display(), map_to);
             cargo.env("RUSTC_DEBUGINFO_MAP", map);
+
+            // `rustc` needs to know the virtual `/rustc/$hash` we're mapping to,
+            // in order to opportunistically reverse it later.
+            cargo.env("CFG_VIRTUAL_RUST_SOURCE_BASE_DIR", map_to);
         }
 
         // Enable usage of unstable features
@@ -1067,6 +1057,17 @@ impl<'a> Builder<'a> {
             cargo
                 .env("RUSTC_SNAPSHOT", self.rustc(compiler))
                 .env("RUSTC_SNAPSHOT_LIBDIR", self.rustc_libdir(compiler));
+        }
+
+        // Tools that use compiler libraries may inherit the `-lLLVM` link
+        // requirement, but the `-L` library path is not propagated across
+        // separate Cargo projects. We can add LLVM's library path to the
+        // platform-specific environment variable as a workaround.
+        if mode == Mode::ToolRustc {
+            if let Some(llvm_config) = self.llvm_config(target) {
+                let llvm_libdir = output(Command::new(&llvm_config).arg("--libdir"));
+                add_link_lib_path(vec![llvm_libdir.trim().into()], &mut cargo);
+            }
         }
 
         if self.config.incremental {
@@ -1099,6 +1100,13 @@ impl<'a> Builder<'a> {
 
             if self.config.deny_warnings {
                 rustflags.arg("-Dwarnings");
+            }
+
+            // FIXME(#58633) hide "unused attribute" errors in incremental
+            // builds of the standard library, as the underlying checks are
+            // not yet properly integrated with incremental recompilation.
+            if mode == Mode::Std && compiler.stage == 0 && self.config.incremental {
+                rustflags.arg("-Aunused-attributes");
             }
         }
 
@@ -1139,14 +1147,11 @@ impl<'a> Builder<'a> {
             cargo.env(format!("CC_{}", target), &cc);
 
             let cflags = self.cflags(target, GitRepo::Rustc).join(" ");
-            cargo
-                .env(format!("CFLAGS_{}", target), cflags.clone());
+            cargo.env(format!("CFLAGS_{}", target), cflags.clone());
 
             if let Some(ar) = self.ar(target) {
                 let ranlib = format!("{} s", ar.display());
-                cargo
-                    .env(format!("AR_{}", target), ar)
-                    .env(format!("RANLIB_{}", target), ranlib);
+                cargo.env(format!("AR_{}", target), ar).env(format!("RANLIB_{}", target), ranlib);
             }
 
             if let Ok(cxx) = self.cxx(target) {
@@ -1157,15 +1162,28 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if mode == Mode::Std
-            && self.config.extended
-            && compiler.is_final_stage(self)
-        {
+        if mode == Mode::Std && self.config.extended && compiler.is_final_stage(self) {
             rustflags.arg("-Zsave-analysis");
-            cargo.env("RUST_SAVE_ANALYSIS_CONFIG",
-                      "{\"output_file\": null,\"full_docs\": false,\
+            cargo.env(
+                "RUST_SAVE_ANALYSIS_CONFIG",
+                "{\"output_file\": null,\"full_docs\": false,\
                        \"pub_only\": true,\"reachable_only\": false,\
-                       \"distro_crate\": true,\"signatures\": false,\"borrow_data\": false}");
+                       \"distro_crate\": true,\"signatures\": false,\"borrow_data\": false}",
+            );
+        }
+
+        // If Control Flow Guard is enabled, pass the `control_flow_guard=checks` flag to rustc
+        // when compiling the standard library, since this might be linked into the final outputs
+        // produced by rustc. Since this mitigation is only available on Windows, only enable it
+        // for the standard library in case the compiler is run on a non-Windows platform.
+        // This is not needed for stage 0 artifacts because these will only be used for building
+        // the stage 1 compiler.
+        if cfg!(windows)
+            && mode == Mode::Std
+            && self.config.control_flow_guard
+            && compiler.stage >= 1
+        {
+            rustflags.arg("-Zcontrol_flow_guard=checks");
         }
 
         // For `cargo doc` invocations, make rustdoc print the Rust version into the docs
@@ -1219,8 +1237,7 @@ impl<'a> Builder<'a> {
         }
 
         match (mode, self.config.rust_codegen_units_std, self.config.rust_codegen_units) {
-            (Mode::Std, Some(n), _) |
-            (_, _, Some(n)) => {
+            (Mode::Std, Some(n), _) | (_, _, Some(n)) => {
                 cargo.env(profile_var("CODEGEN_UNITS"), n.to_string());
             }
             _ => {
@@ -1254,10 +1271,22 @@ impl<'a> Builder<'a> {
             rustflags.arg("-Cprefer-dynamic");
         }
 
-        Cargo {
-            command: cargo,
-            rustflags,
+        // When building incrementally we default to a lower ThinLTO import limit
+        // (unless explicitly specified otherwise). This will produce a somewhat
+        // slower code but give way better compile times.
+        {
+            let limit = match self.config.rust_thin_lto_import_instr_limit {
+                Some(limit) => Some(limit),
+                None if self.config.incremental => Some(10),
+                _ => None,
+            };
+
+            if let Some(limit) = limit {
+                rustflags.arg(&format!("-Cllvm-args=-import-instr-limit={}", limit));
+            }
         }
+
+        Cargo { command: cargo, rustflags, rustdocflags }
     }
 
     /// Ensure that a given step is built, returning its output. This will
@@ -1268,10 +1297,7 @@ impl<'a> Builder<'a> {
             let mut stack = self.stack.borrow_mut();
             for stack_step in stack.iter() {
                 // should skip
-                if stack_step
-                    .downcast_ref::<S>()
-                    .map_or(true, |stack_step| *stack_step != step)
-                {
+                if stack_step.downcast_ref::<S>().map_or(true, |stack_step| *stack_step != step) {
                     continue;
                 }
                 let mut out = String::new();
@@ -1284,39 +1310,10 @@ impl<'a> Builder<'a> {
             if let Some(out) = self.cache.get(&step) {
                 self.verbose(&format!("{}c {:?}", "  ".repeat(stack.len()), step));
 
-                {
-                    let mut graph = self.graph.borrow_mut();
-                    let parent = self.parent.get();
-                    let us = *self
-                        .graph_nodes
-                        .borrow_mut()
-                        .entry(format!("{:?}", step))
-                        .or_insert_with(|| graph.add_node(format!("{:?}", step)));
-                    if let Some(parent) = parent {
-                        graph.add_edge(parent, us, false);
-                    }
-                }
-
                 return out;
             }
             self.verbose(&format!("{}> {:?}", "  ".repeat(stack.len()), step));
             stack.push(Box::new(step.clone()));
-        }
-
-        let prev_parent = self.parent.get();
-
-        {
-            let mut graph = self.graph.borrow_mut();
-            let parent = self.parent.get();
-            let us = *self
-                .graph_nodes
-                .borrow_mut()
-                .entry(format!("{:?}", step))
-                .or_insert_with(|| graph.add_node(format!("{:?}", step)));
-            self.parent.set(Some(us));
-            if let Some(parent) = parent {
-                graph.add_edge(parent, us, true);
-            }
         }
 
         let (out, dur) = {
@@ -1329,15 +1326,8 @@ impl<'a> Builder<'a> {
             (out, dur - deps)
         };
 
-        self.parent.set(prev_parent);
-
         if self.config.print_step_timings && dur > Duration::from_millis(100) {
-            println!(
-                "[TIMING] {:?} -- {}.{:03}",
-                step,
-                dur.as_secs(),
-                dur.subsec_nanos() / 1_000_000
-            );
+            println!("[TIMING] {:?} -- {}.{:03}", step, dur.as_secs(), dur.subsec_millis());
         }
 
         {
@@ -1345,11 +1335,7 @@ impl<'a> Builder<'a> {
             let cur_step = stack.pop().expect("step stack empty");
             assert_eq!(cur_step.downcast_ref(), Some(&step));
         }
-        self.verbose(&format!(
-            "{}< {:?}",
-            "  ".repeat(self.stack.borrow().len()),
-            step
-        ));
+        self.verbose(&format!("{}< {:?}", "  ".repeat(self.stack.borrow().len()), step));
         self.cache.put(step, out.clone());
         out
     }
@@ -1358,7 +1344,7 @@ impl<'a> Builder<'a> {
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Rustflags(String);
 
 impl Rustflags {
@@ -1386,7 +1372,7 @@ impl Rustflags {
 
     fn arg(&mut self, arg: &str) -> &mut Self {
         assert_eq!(arg.split_whitespace().count(), 1);
-        if self.0.len() > 0 {
+        if !self.0.is_empty() {
             self.0.push_str(" ");
         }
         self.0.push_str(arg);
@@ -1398,6 +1384,7 @@ impl Rustflags {
 pub struct Cargo {
     command: Command,
     rustflags: Rustflags,
+    rustdocflags: Rustflags,
 }
 
 impl Cargo {
@@ -1412,7 +1399,9 @@ impl Cargo {
     }
 
     pub fn args<I, S>(&mut self, args: I) -> &mut Cargo
-        where I: IntoIterator<Item=S>, S: AsRef<OsStr>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
     {
         for arg in args {
             self.arg(arg.as_ref());
@@ -1428,7 +1417,16 @@ impl Cargo {
 
 impl From<Cargo> for Command {
     fn from(mut cargo: Cargo) -> Command {
-        cargo.command.env("RUSTFLAGS", &cargo.rustflags.0);
+        let rustflags = &cargo.rustflags.0;
+        if !rustflags.is_empty() {
+            cargo.command.env("RUSTFLAGS", rustflags);
+        }
+
+        let rustdocflags = &cargo.rustdocflags.0;
+        if !rustdocflags.is_empty() {
+            cargo.command.env("RUSTDOCFLAGS", rustdocflags);
+        }
+
         cargo.command
     }
 }

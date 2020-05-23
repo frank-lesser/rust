@@ -1,5 +1,8 @@
 // run-pass
 
+// revisions: default nomiropt
+//[nomiropt]compile-flags: -Z mir-opt-level=0
+
 #![feature(generators, generator_trait)]
 
 use std::ops::Generator;
@@ -30,7 +33,7 @@ fn t1() {
     };
 
     let n = A.load(Ordering::SeqCst);
-    drop(Pin::new(&mut foo).resume());
+    drop(Pin::new(&mut foo).resume(()));
     assert_eq!(A.load(Ordering::SeqCst), n);
     drop(foo);
     assert_eq!(A.load(Ordering::SeqCst), n + 1);
@@ -43,7 +46,7 @@ fn t2() {
     };
 
     let n = A.load(Ordering::SeqCst);
-    drop(Pin::new(&mut foo).resume());
+    drop(Pin::new(&mut foo).resume(()));
     assert_eq!(A.load(Ordering::SeqCst), n + 1);
     drop(foo);
     assert_eq!(A.load(Ordering::SeqCst), n + 1);

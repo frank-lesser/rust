@@ -8,7 +8,7 @@
 use crate::spec::{LinkerFlavor, LldFlavor, Target, TargetResult};
 
 pub fn target() -> TargetResult {
-    let mut base = super::uefi_base::opts();
+    let mut base = super::uefi_msvc_base::opts();
     base.cpu = "pentium4".to_string();
     base.max_atomic_width = Some(64);
 
@@ -23,16 +23,11 @@ pub fn target() -> TargetResult {
     // arguments, thus giving you access to full MMX/SSE acceleration.
     base.features = "-mmx,-sse,+soft-float".to_string();
 
-    // UEFI mirrors the calling-conventions used on windows. In case of i686 this means small
-    // structs will be returned as int. This shouldn't matter much, since the restrictions placed
-    // by the UEFI specifications forbid any ABI to return structures.
-    base.abi_return_struct_as_int = true;
-
     // Use -GNU here, because of the reason below:
-    // Backgound and Problem:
+    // Background and Problem:
     //   If we use i686-unknown-windows, the LLVM IA32 MSVC generates compiler intrinsic
     //   _alldiv, _aulldiv, _allrem, _aullrem, _allmul, which will cause undefined symbol.
-    //   A real issue is __aulldiv() is refered by __udivdi3() - udivmod_inner!(), from
+    //   A real issue is __aulldiv() is referred by __udivdi3() - udivmod_inner!(), from
     //   https://github.com/rust-lang-nursery/compiler-builtins.
     //   As result, rust-lld generates link error finally.
     // Root-cause:
@@ -64,7 +59,7 @@ pub fn target() -> TargetResult {
     //      i386/umoddi3.S
     // Possible solution:
     //   1. Eliminate Intrinsics generation.
-    //      1.1 Choose differnt target to bypass isTargetKnownWindowsMSVC().
+    //      1.1 Choose different target to bypass isTargetKnownWindowsMSVC().
     //      1.2 Remove the "Setup Windows compiler runtime calls" in LLVM
     //   2. Implement Intrinsics.
     //   We evaluated all options.
@@ -86,7 +81,9 @@ pub fn target() -> TargetResult {
         target_endian: "little".to_string(),
         target_pointer_width: "32".to_string(),
         target_c_int_width: "32".to_string(),
-        data_layout: "e-m:x-p:32:32-i64:64-f80:32-n8:16:32-a:0:32-S32".to_string(),
+        data_layout: "e-m:x-p:32:32-p270:32:32-p271:32:32-p272:64:64-\
+            i64:64-f80:32-n8:16:32-a:0:32-S32"
+            .to_string(),
         target_os: "uefi".to_string(),
         target_env: "".to_string(),
         target_vendor: "unknown".to_string(),

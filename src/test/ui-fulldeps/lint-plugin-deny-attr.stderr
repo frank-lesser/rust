@@ -12,11 +12,11 @@ error: item is named 'lintme'
 LL | fn lintme() { }
    | ^^^^^^^^^^^^^^^
    |
-note: lint level defined here
+note: the lint level is defined here
   --> $DIR/lint-plugin-deny-attr.rs:7:9
    |
 LL | #![deny(test_lint)]
    |         ^^^^^^^^^
 
-error: aborting due to previous error
+error: aborting due to previous error; 1 warning emitted
 

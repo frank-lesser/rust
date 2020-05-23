@@ -1,5 +1,4 @@
 // edition:2018
-// ignore-x86 FIXME: missing sysroot spans (#53081)
 
 async fn print_dur() {}
 

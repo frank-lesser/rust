@@ -1,4 +1,3 @@
-// ignore-x86 FIXME: missing sysroot spans (#53081)
 use std::mem;
 
 struct Misc<T:?Sized>(T);

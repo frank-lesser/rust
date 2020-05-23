@@ -12,19 +12,25 @@ fn allocator_param() {
     //
     // Instead, this just checks that the `RawVec` methods do at
     // least go through the Allocator API when it reserves
+
     // storage.
 
     // A dumb allocator that consumes a fixed amount of fuel
     // before allocation attempts start failing.
-    struct BoundedAlloc { fuel: usize }
-    unsafe impl Alloc for BoundedAlloc {
-        unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
+    struct BoundedAlloc {
+        fuel: usize,
+    }
+    unsafe impl AllocRef for BoundedAlloc {
+        fn alloc(&mut self, layout: Layout, init: AllocInit) -> Result<MemoryBlock, AllocErr> {
             let size = layout.size();
             if size > self.fuel {
                 return Err(AllocErr);
             }
-            match Global.alloc(layout) {
-                ok @ Ok(_) => { self.fuel -= size; ok }
+            match Global.alloc(layout, init) {
+                ok @ Ok(_) => {
+                    self.fuel -= size;
+                    ok
+                }
                 err @ Err(_) => err,
             }
         }
@@ -35,9 +41,9 @@ fn allocator_param() {
 
     let a = BoundedAlloc { fuel: 500 };
     let mut v: RawVec<u8, _> = RawVec::with_capacity_in(50, a);
-    assert_eq!(v.a.fuel, 450);
+    assert_eq!(v.alloc.fuel, 450);
     v.reserve(50, 150); // (causes a realloc, thus using 50 + 150 = 200 units of fuel)
-    assert_eq!(v.a.fuel, 250);
+    assert_eq!(v.alloc.fuel, 250);
 }
 
 #[test]
@@ -53,7 +59,7 @@ fn reserve_does_not_overallocate() {
         let mut v: RawVec<u32> = RawVec::new();
         v.reserve(0, 7);
         assert_eq!(7, v.capacity());
-        // 97 if more than double of 7, so `reserve` should work
+        // 97 is more than double of 7, so `reserve` should work
         // like `reserve_exact`.
         v.reserve(7, 90);
         assert_eq!(97, v.capacity());

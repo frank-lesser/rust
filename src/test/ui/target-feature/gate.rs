@@ -25,7 +25,7 @@
 // gate-test-movbe_target_feature
 // gate-test-rtm_target_feature
 // gate-test-f16c_target_feature
-// min-llvm-version 6.0
+// gate-test-riscv_target_feature
 
 #[target_feature(enable = "avx512bw")]
 //~^ ERROR: currently unstable

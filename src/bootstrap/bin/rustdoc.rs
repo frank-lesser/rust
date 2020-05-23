@@ -3,9 +3,9 @@
 //! See comments in `src/bootstrap/rustc.rs` for more information.
 
 use std::env;
-use std::process::Command;
-use std::path::PathBuf;
 use std::ffi::OsString;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn main() {
     let args = env::args_os().skip(1).collect::<Vec<_>>();
@@ -35,8 +35,7 @@ fn main() {
         .arg("dox")
         .arg("--sysroot")
         .arg(&sysroot)
-        .env(bootstrap::util::dylib_path_var(),
-             env::join_paths(&dylib_path).unwrap());
+        .env(bootstrap::util::dylib_path_var(), env::join_paths(&dylib_path).unwrap());
 
     // Force all crates compiled by this compiler to (a) be unstable and (b)
     // allow the `rustc_private` feature to link to other unstable crates
@@ -53,21 +52,14 @@ fn main() {
     // Bootstrap's Cargo-command builder sets this variable to the current Rust version; let's pick
     // it up so we can make rustdoc print this into the docs
     if let Some(version) = env::var_os("RUSTDOC_CRATE_VERSION") {
-        // This "unstable-options" can be removed when `--crate-version` is stabilized
-        if !has_unstable {
-            cmd.arg("-Z")
-               .arg("unstable-options");
-        }
         cmd.arg("--crate-version").arg(version);
-        has_unstable = true;
     }
 
     // Needed to be able to run all rustdoc tests.
-    if let Some(_) = env::var_os("RUSTDOC_GENERATE_REDIRECT_PAGES") {
+    if env::var_os("RUSTDOC_GENERATE_REDIRECT_PAGES").is_some() {
         // This "unstable-options" can be removed when `--generate-redirect-pages` is stabilized
         if !has_unstable {
-            cmd.arg("-Z")
-               .arg("unstable-options");
+            cmd.arg("-Z").arg("unstable-options");
         }
         cmd.arg("--generate-redirect-pages");
         has_unstable = true;
@@ -77,8 +69,7 @@ fn main() {
     if let Some(ref x) = env::var_os("RUSTDOC_RESOURCE_SUFFIX") {
         // This "unstable-options" can be removed when `--resource-suffix` is stabilized
         if !has_unstable {
-            cmd.arg("-Z")
-               .arg("unstable-options");
+            cmd.arg("-Z").arg("unstable-options");
         }
         cmd.arg("--resource-suffix").arg(x);
     }

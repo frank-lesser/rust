@@ -1,7 +1,7 @@
-use rustc::ty::TyCtxt;
-use rustc::mir::*;
-use rustc_index::vec::{Idx, IndexVec};
 use crate::transform::{MirPass, MirSource};
+use rustc_index::vec::{Idx, IndexVec};
+use rustc_middle::mir::*;
+use rustc_middle::ty::TyCtxt;
 
 #[derive(PartialEq)]
 pub enum AddCallGuards {
@@ -38,8 +38,7 @@ impl<'tcx> MirPass<'tcx> for AddCallGuards {
 
 impl AddCallGuards {
     pub fn add_call_guards(&self, body: &mut Body<'_>) {
-        let pred_count: IndexVec<_, _> =
-            body.predecessors().iter().map(|ps| ps.len()).collect();
+        let pred_count: IndexVec<_, _> = body.predecessors().iter().map(|ps| ps.len()).collect();
 
         // We need a place to store the new blocks generated
         let mut new_blocks = Vec::new();
@@ -49,13 +48,15 @@ impl AddCallGuards {
         for block in body.basic_blocks_mut() {
             match block.terminator {
                 Some(Terminator {
-                    kind: TerminatorKind::Call {
-                        destination: Some((_, ref mut destination)),
-                        cleanup,
-                        ..
-                    }, source_info
-                }) if pred_count[*destination] > 1 &&
-                      (cleanup.is_some() || self == &AllCallEdges) =>
+                    kind:
+                        TerminatorKind::Call {
+                            destination: Some((_, ref mut destination)),
+                            cleanup,
+                            ..
+                        },
+                    source_info,
+                }) if pred_count[*destination] > 1
+                    && (cleanup.is_some() || self == &AllCallEdges) =>
                 {
                     // It's a critical edge, break it
                     let call_guard = BasicBlockData {
@@ -63,8 +64,8 @@ impl AddCallGuards {
                         is_cleanup: block.is_cleanup,
                         terminator: Some(Terminator {
                             source_info,
-                            kind: TerminatorKind::Goto { target: *destination }
-                        })
+                            kind: TerminatorKind::Goto { target: *destination },
+                        }),
                     };
 
                     // Get the index it will be when inserted into the MIR

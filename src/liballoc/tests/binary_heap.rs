@@ -1,6 +1,8 @@
-use std::collections::BinaryHeap;
 use std::collections::binary_heap::{Drain, PeekMut};
+use std::collections::BinaryHeap;
 use std::iter::TrustedLen;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[test]
 fn test_iterator() {
@@ -276,6 +278,37 @@ fn test_drain_sorted() {
 }
 
 #[test]
+fn test_drain_sorted_leak() {
+    static DROPS: AtomicU32 = AtomicU32::new(0);
+
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct D(u32, bool);
+
+    impl Drop for D {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+
+            if self.1 {
+                panic!("panic in `drop`");
+            }
+        }
+    }
+
+    let mut q = BinaryHeap::from(vec![
+        D(0, false),
+        D(1, false),
+        D(2, false),
+        D(3, true),
+        D(4, false),
+        D(5, false),
+    ]);
+
+    catch_unwind(AssertUnwindSafe(|| drop(q.drain_sorted()))).ok();
+
+    assert_eq!(DROPS.load(Ordering::SeqCst), 6);
+}
+
+#[test]
 fn test_extend_ref() {
     let mut a = BinaryHeap::new();
     a.push(1);
@@ -339,6 +372,14 @@ fn assert_covariance() {
     }
 }
 
+#[test]
+fn test_retain() {
+    let mut a = BinaryHeap::from(vec![-10, -5, 1, 2, 4, 13]);
+    a.retain(|x| x % 2 == 0);
+
+    assert_eq!(a.into_sorted_vec(), [-10, 2, 4])
+}
+
 // old binaryheap failed this test
 //
 // Integrity means that all elements are present after a comparison panics,
@@ -347,12 +388,12 @@ fn assert_covariance() {
 // Destructors must be called exactly once per element.
 // FIXME: re-enable emscripten once it can unwind again
 #[test]
-#[cfg(not(any(miri, target_os = "emscripten")))] // Miri does not support catching panics
+#[cfg(not(target_os = "emscripten"))]
 fn panic_safe() {
+    use rand::{seq::SliceRandom, thread_rng};
     use std::cmp;
     use std::panic::{self, AssertUnwindSafe};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use rand::{thread_rng, seq::SliceRandom};
 
     static DROP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -376,20 +417,19 @@ fn panic_safe() {
     }
     let mut rng = thread_rng();
     const DATASZ: usize = 32;
-    const NTEST: usize = 10;
+    // Miri is too slow
+    let ntest = if cfg!(miri) { 1 } else { 10 };
 
     // don't use 0 in the data -- we want to catch the zeroed-out case.
     let data = (1..=DATASZ).collect::<Vec<_>>();
 
     // since it's a fuzzy test, run several tries.
-    for _ in 0..NTEST {
+    for _ in 0..ntest {
         for i in 1..=DATASZ {
             DROP_COUNTER.store(0, Ordering::SeqCst);
 
-            let mut panic_ords: Vec<_> = data.iter()
-                                             .filter(|&&x| x != i)
-                                             .map(|&x| PanicOrd(x, false))
-                                             .collect();
+            let mut panic_ords: Vec<_> =
+                data.iter().filter(|&&x| x != i).map(|&x| PanicOrd(x, false)).collect();
             let panic_item = PanicOrd(i, true);
 
             // heapify the sane items

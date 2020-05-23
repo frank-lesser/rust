@@ -46,9 +46,12 @@ error[E0423]: expected value, found struct variant `E::V`
   --> $DIR/struct-literal-variant-in-if.rs:10:13
    |
 LL |     if x == E::V { field } {}
-   |             ^^^^----------
-   |             |
-   |             help: surround the struct literal with parenthesis: `(E::V { field })`
+   |             ^^^^
+   |
+help: surround the struct literal with parentheses
+   |
+LL |     if x == (E::V { field }) {}
+   |             ^              ^
 
 error[E0308]: mismatched types
   --> $DIR/struct-literal-variant-in-if.rs:10:20
@@ -56,20 +59,16 @@ error[E0308]: mismatched types
 LL |     if x == E::V { field } {}
    |     ---------------^^^^^--- help: consider using a semicolon here
    |     |              |
-   |     |              expected (), found bool
+   |     |              expected `()`, found `bool`
    |     expected this to be `()`
-   |
-   = note: expected type `()`
-              found type `bool`
 
 error[E0308]: mismatched types
   --> $DIR/struct-literal-variant-in-if.rs:21:20
    |
 LL |     let y: usize = ();
-   |                    ^^ expected usize, found ()
-   |
-   = note: expected type `usize`
-              found type `()`
+   |            -----   ^^ expected `usize`, found `()`
+   |            |
+   |            expected due to this
 
 error: aborting due to 7 previous errors
 

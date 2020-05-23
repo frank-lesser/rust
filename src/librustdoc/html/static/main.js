@@ -138,13 +138,25 @@ function getSearchElement() {
         }
     }
 
+    function showSearchResults(search) {
+        if (search === null || typeof search === 'undefined') {
+            search = getSearchElement();
+        }
+        addClass(main, "hidden");
+        removeClass(search, "hidden");
+    }
+
+    function hideSearchResults(search) {
+        if (search === null || typeof search === 'undefined') {
+            search = getSearchElement();
+        }
+        addClass(search, "hidden");
+        removeClass(main, "hidden");
+    }
+
     // used for special search precedence
     var TY_PRIMITIVE = itemTypes.indexOf("primitive");
     var TY_KEYWORD = itemTypes.indexOf("keyword");
-
-    onEachLazy(document.getElementsByClassName("js-only"), function(e) {
-        removeClass(e, "js-only");
-    });
 
     function getQueryStringParams() {
         var params = {};
@@ -173,8 +185,7 @@ function getSearchElement() {
         if (ev !== null && search && !hasClass(search, "hidden") && ev.newURL) {
             // This block occurs when clicking on an element in the navbar while
             // in a search.
-            addClass(search, "hidden");
-            removeClass(main, "hidden");
+            hideSearchResults(search);
             var hash = ev.newURL.slice(ev.newURL.indexOf("#") + 1);
             if (browserSupportsHistoryApi()) {
                 history.replaceState(hash, "", "?search=#" + hash);
@@ -330,13 +341,11 @@ function getSearchElement() {
     function handleEscape(ev) {
         var help = getHelpElement();
         var search = getSearchElement();
-        hideModal();
         if (hasClass(help, "hidden") === false) {
             displayHelp(false, ev, help);
         } else if (hasClass(search, "hidden") === false) {
             ev.preventDefault();
-            addClass(search, "hidden");
-            removeClass(main, "hidden");
+            hideSearchResults(search);
             document.title = titleBeforeSearch;
         }
         defocusSearchBar();
@@ -363,7 +372,6 @@ function getSearchElement() {
             case "s":
             case "S":
                 displayHelp(false, ev);
-                hideModal();
                 ev.preventDefault();
                 focusSearchBar();
                 break;
@@ -376,7 +384,6 @@ function getSearchElement() {
 
             case "?":
                 if (ev.shiftKey) {
-                    hideModal();
                     displayHelp(true, ev);
                 }
                 break;
@@ -394,40 +401,53 @@ function getSearchElement() {
         return null;
     }
 
-    document.onkeypress = handleShortcut;
-    document.onkeydown = handleShortcut;
-    document.onclick = function(ev) {
+    document.addEventListener("keypress", handleShortcut);
+    document.addEventListener("keydown", handleShortcut);
+
+    var handleSourceHighlight = (function() {
+        var prev_line_id = 0;
+
+        var set_fragment = function(name) {
+            var x = window.scrollX,
+                y = window.scrollY;
+            if (browserSupportsHistoryApi()) {
+                history.replaceState(null, null, "#" + name);
+                highlightSourceLines();
+            } else {
+                location.replace("#" + name);
+            }
+            // Prevent jumps when selecting one or many lines
+            window.scrollTo(x, y);
+        };
+
+        return function(ev) {
+            var cur_line_id = parseInt(ev.target.id, 10);
+            ev.preventDefault();
+
+            if (ev.shiftKey && prev_line_id) {
+                // Swap selection if needed
+                if (prev_line_id > cur_line_id) {
+                    var tmp = prev_line_id;
+                    prev_line_id = cur_line_id;
+                    cur_line_id = tmp;
+                }
+
+                set_fragment(prev_line_id + "-" + cur_line_id);
+            } else {
+                prev_line_id = cur_line_id;
+
+                set_fragment(cur_line_id);
+            }
+        }
+    })();
+
+    document.addEventListener("click", function(ev) {
         if (hasClass(ev.target, "collapse-toggle")) {
             collapseDocs(ev.target, "toggle");
         } else if (hasClass(ev.target.parentNode, "collapse-toggle")) {
             collapseDocs(ev.target.parentNode, "toggle");
         } else if (ev.target.tagName === "SPAN" && hasClass(ev.target.parentNode, "line-numbers")) {
-            var prev_id = 0;
-
-            var set_fragment = function(name) {
-                if (browserSupportsHistoryApi()) {
-                    history.replaceState(null, null, "#" + name);
-                    highlightSourceLines();
-                } else {
-                    location.replace("#" + name);
-                }
-            };
-
-            var cur_id = parseInt(ev.target.id, 10);
-
-            if (ev.shiftKey && prev_id) {
-                if (prev_id > cur_id) {
-                    var tmp = prev_id;
-                    prev_id = cur_id;
-                    cur_id = tmp;
-                }
-
-                set_fragment(prev_id + "-" + cur_id);
-            } else {
-                prev_id = cur_id;
-
-                set_fragment(cur_id);
-            }
+            handleSourceHighlight(ev);
         } else if (hasClass(getHelpElement(), "hidden") === false) {
             var help = getHelpElement();
             var is_inside_help_popup = ev.target !== help && help.contains(ev.target);
@@ -443,7 +463,7 @@ function getSearchElement() {
                 expandSection(a.hash.replace(/^#/, ""));
             }
         }
-    };
+    });
 
     var x = document.getElementsByClassName("version-selector");
     if (x.length > 0) {
@@ -503,29 +523,16 @@ function getSearchElement() {
     }
 
     function initSearch(rawSearchIndex) {
-        var currentResults, index, searchIndex;
         var MAX_LEV_DISTANCE = 3;
         var MAX_RESULTS = 200;
         var GENERICS_DATA = 1;
         var NAME = 0;
         var INPUTS_DATA = 0;
         var OUTPUT_DATA = 1;
+        var NO_TYPE_FILTER = -1;
+        var currentResults, index, searchIndex;
+        var ALIASES = {};
         var params = getQueryStringParams();
-
-        // Set the crate filter from saved storage, if the current page has the saved crate filter.
-        //
-        // If not, ignore the crate filter -- we want to support filtering for crates on sites like
-        // doc.rust-lang.org where the crates may differ from page to page while on the same domain.
-        var savedCrate = getCurrentValue("rustdoc-saved-filter-crate");
-        if (savedCrate !== null) {
-            onEachLazy(document.getElementById("crate-search").getElementsByTagName("option"),
-                       function(e) {
-                if (e.value === savedCrate) {
-                    document.getElementById("crate-search").value = e.value;
-                    return true;
-                }
-            });
-        }
 
         // Populate search bar with query string search term when provided,
         // but only if the input bar is empty. This avoid the obnoxious issue
@@ -551,7 +558,7 @@ function getSearchElement() {
                         return i;
                     }
                 }
-                return -1;
+                return NO_TYPE_FILTER;
             }
 
             var valLower = query.query.toLowerCase(),
@@ -714,6 +721,13 @@ function getSearchElement() {
                 };
             }
 
+            function getObjectFromId(id) {
+                if (typeof id === "number") {
+                    return searchIndex[id];
+                }
+                return {'name': id};
+            }
+
             function checkGenerics(obj, val) {
                 // The names match, but we need to be sure that all generics kinda
                 // match as well.
@@ -730,8 +744,10 @@ function getSearchElement() {
                         for (var y = 0; y < vlength; ++y) {
                             var lev = { pos: -1, lev: MAX_LEV_DISTANCE + 1};
                             var elength = elems.length;
+                            var firstGeneric = getObjectFromId(val.generics[y]).name;
                             for (var x = 0; x < elength; ++x) {
-                                var tmp_lev = levenshtein(elems[x], val.generics[y]);
+                                var tmp_lev = levenshtein(getObjectFromId(elems[x]).name,
+                                                          firstGeneric);
                                 if (tmp_lev < lev.lev) {
                                     lev.lev = tmp_lev;
                                     lev.pos = x;
@@ -766,8 +782,9 @@ function getSearchElement() {
 
                                 for (var y = 0; allFound === true && y < val.generics.length; ++y) {
                                     allFound = false;
+                                    var firstGeneric = getObjectFromId(val.generics[y]).name;
                                     for (x = 0; allFound === false && x < elems.length; ++x) {
-                                        allFound = elems[x] === val.generics[y];
+                                        allFound = getObjectFromId(elems[x]).name === firstGeneric;
                                     }
                                     if (allFound === true) {
                                         elems.splice(x - 1, 1);
@@ -824,16 +841,22 @@ function getSearchElement() {
                 return lev_distance + 1;
             }
 
-            function findArg(obj, val, literalSearch) {
+            function findArg(obj, val, literalSearch, typeFilter) {
                 var lev_distance = MAX_LEV_DISTANCE + 1;
 
-                if (obj && obj.type && obj.type[INPUTS_DATA] &&
-                      obj.type[INPUTS_DATA].length > 0) {
+                if (obj && obj.type && obj.type[INPUTS_DATA] && obj.type[INPUTS_DATA].length > 0) {
                     var length = obj.type[INPUTS_DATA].length;
                     for (var i = 0; i < length; i++) {
-                        var tmp = checkType(obj.type[INPUTS_DATA][i], val, literalSearch);
-                        if (literalSearch === true && tmp === true) {
-                            return true;
+                        var tmp = obj.type[INPUTS_DATA][i];
+                        if (typePassesFilter(typeFilter, tmp[1]) === false) {
+                            continue;
+                        }
+                        tmp = checkType(tmp, val, literalSearch);
+                        if (literalSearch === true) {
+                            if (tmp === true) {
+                                return true;
+                            }
+                            continue;
                         }
                         lev_distance = Math.min(tmp, lev_distance);
                         if (lev_distance === 0) {
@@ -844,20 +867,20 @@ function getSearchElement() {
                 return literalSearch === true ? false : lev_distance;
             }
 
-            function checkReturned(obj, val, literalSearch) {
+            function checkReturned(obj, val, literalSearch, typeFilter) {
                 var lev_distance = MAX_LEV_DISTANCE + 1;
 
                 if (obj && obj.type && obj.type.length > OUTPUT_DATA) {
                     var ret = obj.type[OUTPUT_DATA];
-                    if (!obj.type[OUTPUT_DATA].length) {
+                    if (typeof ret[0] === "string") {
                         ret = [ret];
                     }
                     for (var x = 0; x < ret.length; ++x) {
-                        var r = ret[x];
-                        if (typeof r === "string") {
-                            r = [r];
+                        var tmp = ret[x];
+                        if (typePassesFilter(typeFilter, tmp[1]) === false) {
+                            continue;
                         }
-                        var tmp = checkType(r, val, literalSearch);
+                        tmp = checkType(tmp, val, literalSearch);
                         if (literalSearch === true) {
                             if (tmp === true) {
                                 return true;
@@ -912,7 +935,7 @@ function getSearchElement() {
 
             function typePassesFilter(filter, type) {
                 // No filter
-                if (filter < 0) return true;
+                if (filter <= NO_TYPE_FILTER) return true;
 
                 // Exact match
                 if (filter === type) return true;
@@ -921,11 +944,13 @@ function getSearchElement() {
                 var name = itemTypes[type];
                 switch (itemTypes[filter]) {
                     case "constant":
-                        return (name == "associatedconstant");
+                        return name === "associatedconstant";
                     case "fn":
-                        return (name == "method" || name == "tymethod");
+                        return name === "method" || name === "tymethod";
                     case "type":
-                        return (name == "primitive" || name == "keyword");
+                        return name === "primitive" || name === "associatedtype";
+                    case "trait":
+                        return name === "traitalias";
                 }
 
                 // No match
@@ -937,6 +962,72 @@ function getSearchElement() {
                     return itemTypes[ty.ty] + ty.path + ty.parent.name + ty.name;
                 }
                 return itemTypes[ty.ty] + ty.path + ty.name;
+            }
+
+            function createAliasFromItem(item) {
+                return {
+                    crate: item.crate,
+                    name: item.name,
+                    path: item.path,
+                    desc: item.desc,
+                    ty: item.ty,
+                    parent: item.parent,
+                    type: item.type,
+                    is_alias: true,
+                };
+            }
+
+            function handleAliases(ret, query, filterCrates) {
+                // We separate aliases and crate aliases because we want to have current crate
+                // aliases to be before the others in the displayed results.
+                var aliases = [];
+                var crateAliases = [];
+                var i;
+                if (filterCrates !== undefined &&
+                        ALIASES[filterCrates] &&
+                        ALIASES[filterCrates][query.search]) {
+                    for (i = 0; i < ALIASES[crate][query.search].length; ++i) {
+                        aliases.push(
+                            createAliasFromItem(searchIndex[ALIASES[filterCrates][query.search]]));
+                    }
+                } else {
+                    Object.keys(ALIASES).forEach(function(crate) {
+                        if (ALIASES[crate][query.search]) {
+                            var pushTo = crate === window.currentCrate ? crateAliases : aliases;
+                            for (i = 0; i < ALIASES[crate][query.search].length; ++i) {
+                                pushTo.push(
+                                    createAliasFromItem(
+                                        searchIndex[ALIASES[crate][query.search][i]]));
+                            }
+                        }
+                    });
+                }
+
+                var sortFunc = function(aaa, bbb) {
+                    if (aaa.path < bbb.path) {
+                        return 1;
+                    } else if (aaa.path === bbb.path) {
+                        return 0;
+                    }
+                    return -1;
+                };
+                crateAliases.sort(sortFunc);
+                aliases.sort(sortFunc);
+
+                var pushFunc = function(alias) {
+                    alias.alias = query.raw;
+                    var res = buildHrefAndPath(alias);
+                    alias.displayPath = pathSplitter(res[0]);
+                    alias.fullPath = alias.displayPath + alias.name;
+                    alias.href = res[1];
+
+                    ret.others.unshift(alias);
+                    if (ret.others.length > MAX_RESULTS) {
+                        ret.others.pop();
+                    }
+                };
+                onEach(aliases, pushFunc);
+                onEach(crateAliases, pushFunc);
             }
 
             // quoted values mean literal search
@@ -954,42 +1045,33 @@ function getSearchElement() {
                     if (filterCrates !== undefined && searchIndex[i].crate !== filterCrates) {
                         continue;
                     }
-                    in_args = findArg(searchIndex[i], val, true);
-                    returned = checkReturned(searchIndex[i], val, true);
+                    in_args = findArg(searchIndex[i], val, true, typeFilter);
+                    returned = checkReturned(searchIndex[i], val, true, typeFilter);
                     ty = searchIndex[i];
                     fullId = generateId(ty);
 
-                    if (searchWords[i] === val.name) {
-                        // filter type: ... queries
-                        if (typePassesFilter(typeFilter, searchIndex[i].ty) &&
-                            results[fullId] === undefined)
-                        {
-                            results[fullId] = {id: i, index: -1};
-                        }
-                    } else if ((in_args === true || returned === true) &&
-                               typePassesFilter(typeFilter, searchIndex[i].ty)) {
-                        if (in_args === true || returned === true) {
-                            if (in_args === true) {
-                                results_in_args[fullId] = {
-                                    id: i,
-                                    index: -1,
-                                    dontValidate: true,
-                                };
-                            }
-                            if (returned === true) {
-                                results_returned[fullId] = {
-                                    id: i,
-                                    index: -1,
-                                    dontValidate: true,
-                                };
-                            }
-                        } else {
-                            results[fullId] = {
-                                id: i,
-                                index: -1,
-                                dontValidate: true,
-                            };
-                        }
+                    if (searchWords[i] === val.name
+                        && typePassesFilter(typeFilter, searchIndex[i].ty)
+                        && results[fullId] === undefined) {
+                        results[fullId] = {
+                            id: i,
+                            index: -1,
+                            dontValidate: true,
+                        };
+                    }
+                    if (in_args === true && results_in_args[fullId] === undefined) {
+                        results_in_args[fullId] = {
+                            id: i,
+                            index: -1,
+                            dontValidate: true,
+                        };
+                    }
+                    if (returned === true && results_returned[fullId] === undefined) {
+                        results_returned[fullId] = {
+                            id: i,
+                            index: -1,
+                            dontValidate: true,
+                        };
                     }
                 }
                 query.inputs = [val];
@@ -1020,7 +1102,7 @@ function getSearchElement() {
 
                     // allow searching for void (no output) functions as well
                     var typeOutput = type.length > OUTPUT_DATA ? type[OUTPUT_DATA].name : "";
-                    returned = checkReturned(ty, output, true);
+                    returned = checkReturned(ty, output, true, NO_TYPE_FILTER);
                     if (output.name === "*" || returned === true) {
                         in_args = false;
                         var is_module = false;
@@ -1081,14 +1163,13 @@ function getSearchElement() {
                 val = paths[paths.length - 1];
                 var contains = paths.slice(0, paths.length > 1 ? paths.length - 1 : 1);
 
+                var lev;
+                var lev_distance;
                 for (j = 0; j < nSearchWords; ++j) {
-                    var lev;
-                    var lev_distance;
                     ty = searchIndex[j];
                     if (!ty || (filterCrates !== undefined && ty.crate !== filterCrates)) {
                         continue;
                     }
-                    var lev_distance;
                     var lev_add = 0;
                     if (paths.length > 1) {
                         lev = checkPath(contains, paths[paths.length - 1], ty);
@@ -1122,16 +1203,8 @@ function getSearchElement() {
                             lev += 1;
                         }
                     }
-                    if ((in_args = findArg(ty, valGenerics)) <= MAX_LEV_DISTANCE) {
-                        if (typePassesFilter(typeFilter, ty.ty) === false) {
-                            in_args = MAX_LEV_DISTANCE + 1;
-                        }
-                    }
-                    if ((returned = checkReturned(ty, valGenerics)) <= MAX_LEV_DISTANCE) {
-                        if (typePassesFilter(typeFilter, ty.ty) === false) {
-                            returned = MAX_LEV_DISTANCE + 1;
-                        }
-                    }
+                    in_args = findArg(ty, valGenerics, false, typeFilter);
+                    returned = checkReturned(ty, valGenerics, false, typeFilter);
 
                     lev += lev_add;
                     if (lev > 0 && val.length > 3 && searchWords[j].indexOf(val) > -1) {
@@ -1184,23 +1257,7 @@ function getSearchElement() {
                 "returned": sortResults(results_returned, true),
                 "others": sortResults(results),
             };
-            if (ALIASES && ALIASES[window.currentCrate] &&
-                    ALIASES[window.currentCrate][query.raw]) {
-                var aliases = ALIASES[window.currentCrate][query.raw];
-                for (i = 0; i < aliases.length; ++i) {
-                    aliases[i].is_alias = true;
-                    aliases[i].alias = query.raw;
-                    aliases[i].path = aliases[i].p;
-                    var res = buildHrefAndPath(aliases[i]);
-                    aliases[i].displayPath = pathSplitter(res[0]);
-                    aliases[i].fullPath = aliases[i].displayPath + aliases[i].name;
-                    aliases[i].href = res[1];
-                    ret.others.unshift(aliases[i]);
-                    if (ret.others.length > MAX_RESULTS) {
-                        ret.others.pop();
-                    }
-                }
-            }
+            handleAliases(ret, query, filterCrates);
             return ret;
         }
 
@@ -1228,7 +1285,7 @@ function getSearchElement() {
                     // then an exact path match
                     path.indexOf(keys[i]) > -1 ||
                     // next if there is a parent, check for exact parent match
-                    (parent !== undefined &&
+                    (parent !== undefined && parent.name !== undefined &&
                         parent.name.toLowerCase().indexOf(keys[i]) > -1) ||
                     // lastly check to see if the name was a levenshtein match
                     levenshtein(name, keys[i]) <= MAX_LEV_DISTANCE)) {
@@ -1271,8 +1328,7 @@ function getSearchElement() {
                 }
                 dst = dst[0];
                 if (window.location.pathname === dst.pathname) {
-                    addClass(getSearchElement(), "hidden");
-                    removeClass(main, "hidden");
+                    hideSearchResults();
                     document.location.href = dst.href;
                 }
             };
@@ -1347,8 +1403,6 @@ function getSearchElement() {
                     e.preventDefault();
                 } else if (e.which === 16) { // shift
                     // Does nothing, it's just to avoid losing "focus" on the highlighted element.
-                } else if (e.which === 27) { // escape
-                    handleEscape(e);
                 } else if (actives[currentTab].length > 0) {
                     removeClass(actives[currentTab][0], "highlighted");
                 }
@@ -1360,14 +1414,15 @@ function getSearchElement() {
             var href;
             var type = itemTypes[item.ty];
             var name = item.name;
+            var path = item.path;
 
             if (type === "mod") {
-                displayPath = item.path + "::";
-                href = rootPath + item.path.replace(/::/g, "/") + "/" +
+                displayPath = path + "::";
+                href = rootPath + path.replace(/::/g, "/") + "/" +
                        name + "/index.html";
             } else if (type === "primitive" || type === "keyword") {
                 displayPath = "";
-                href = rootPath + item.path.replace(/::/g, "/") +
+                href = rootPath + path.replace(/::/g, "/") +
                        "/" + type + "." + name + ".html";
             } else if (type === "externcrate") {
                 displayPath = "";
@@ -1376,14 +1431,27 @@ function getSearchElement() {
                 var myparent = item.parent;
                 var anchor = "#" + type + "." + name;
                 var parentType = itemTypes[myparent.ty];
+                var pageType = parentType;
+                var pageName = myparent.name;
+
                 if (parentType === "primitive") {
                     displayPath = myparent.name + "::";
+                } else if (type === "structfield" && parentType === "variant") {
+                    // Structfields belonging to variants are special: the
+                    // final path element is the enum name.
+                    var splitPath = item.path.split("::");
+                    var enumName = splitPath.pop();
+                    path = splitPath.join("::");
+                    displayPath = path + "::" + enumName + "::" + myparent.name + "::";
+                    anchor = "#variant." + myparent.name + ".field." + name;
+                    pageType = "enum";
+                    pageName = enumName;
                 } else {
-                    displayPath = item.path + "::" + myparent.name + "::";
+                    displayPath = path + "::" + myparent.name + "::";
                 }
-                href = rootPath + item.path.replace(/::/g, "/") +
-                       "/" + parentType +
-                       "." + myparent.name +
+                href = rootPath + path.replace(/::/g, "/") +
+                       "/" + pageType +
+                       "." + pageName +
                        ".html" + anchor;
             } else {
                 displayPath = item.path + "::";
@@ -1498,10 +1566,9 @@ function getSearchElement() {
                 "</div><div id=\"results\">" +
                 ret_others[0] + ret_in_args[0] + ret_returned[0] + "</div>";
 
-            addClass(main, "hidden");
             var search = getSearchElement();
-            removeClass(search, "hidden");
             search.innerHTML = output;
+            showSearchResults(search);
             var tds = search.getElementsByTagName("td");
             var td_width = 0;
             if (tds.length > 0) {
@@ -1583,13 +1650,12 @@ function getSearchElement() {
                     "returned": mergeArrays(results.returned),
                     "others": mergeArrays(results.others),
                 };
-            } else {
-                return {
-                    "in_args": results.in_args[0],
-                    "returned": results.returned[0],
-                    "others": results.others[0],
-                };
             }
+            return {
+                "in_args": results.in_args[0],
+                "returned": results.returned[0],
+                "others": results.others[0],
+            };
         }
 
         function getFilterCrates() {
@@ -1633,16 +1699,19 @@ function getSearchElement() {
             }
 
             var filterCrates = getFilterCrates();
-            showResults(execSearch(query, index, filterCrates), filterCrates);
+            showResults(execSearch(query, index, filterCrates));
         }
 
         function buildIndex(rawSearchIndex) {
             searchIndex = [];
             var searchWords = [];
             var i;
+            var currentIndex = 0;
 
             for (var crate in rawSearchIndex) {
                 if (!rawSearchIndex.hasOwnProperty(crate)) { continue; }
+
+                var crateSize = 0;
 
                 searchWords.push(crate);
                 searchIndex.push({
@@ -1653,6 +1722,7 @@ function getSearchElement() {
                     desc: rawSearchIndex[crate].doc,
                     type: null,
                 });
+                currentIndex += 1;
 
                 // an array of [(Number) item type,
                 //              (String) name,
@@ -1664,8 +1734,11 @@ function getSearchElement() {
                 // an array of [(Number) item type,
                 //              (String) name]
                 var paths = rawSearchIndex[crate].p;
+                // a array of [(String) alias name
+                //             [Number] index to items]
+                var aliases = rawSearchIndex[crate].a;
 
-                // convert `paths` into an object form
+                // convert `rawPaths` entries into object form
                 var len = paths.length;
                 for (i = 0; i < len; ++i) {
                     paths[i] = {ty: paths[i][0], name: paths[i][1]};
@@ -1682,9 +1755,18 @@ function getSearchElement() {
                 var lastPath = "";
                 for (i = 0; i < len; ++i) {
                     var rawRow = items[i];
-                    var row = {crate: crate, ty: rawRow[0], name: rawRow[1],
-                               path: rawRow[2] || lastPath, desc: rawRow[3],
-                               parent: paths[rawRow[4]], type: rawRow[5]};
+                    if (!rawRow[2]) {
+                        rawRow[2] = lastPath;
+                    }
+                    var row = {
+                        crate: crate,
+                        ty: rawRow[0],
+                        name: rawRow[1],
+                        path: rawRow[2],
+                        desc: rawRow[3],
+                        parent: paths[rawRow[4]],
+                        type: rawRow[5],
+                    };
                     searchIndex.push(row);
                     if (typeof row.name === "string") {
                         var word = row.name.toLowerCase();
@@ -1693,7 +1775,25 @@ function getSearchElement() {
                         searchWords.push("");
                     }
                     lastPath = row.path;
+                    crateSize += 1;
                 }
+
+                if (aliases) {
+                    ALIASES[crate] = {};
+                    var j, local_aliases;
+                    for (var alias_name in aliases) {
+                        if (!aliases.hasOwnProperty(alias_name)) { continue; }
+
+                        if (!ALIASES[crate].hasOwnProperty(alias_name)) {
+                            ALIASES[crate][alias_name] = [];
+                        }
+                        local_aliases = aliases[alias_name];
+                        for (j = 0; j < local_aliases.length; ++j) {
+                            ALIASES[crate][alias_name].push(local_aliases[j] + currentIndex);
+                        }
+                    }
+                }
+                currentIndex += crateSize;
             }
             return searchWords;
         }
@@ -1706,13 +1806,7 @@ function getSearchElement() {
                     if (browserSupportsHistoryApi()) {
                         history.replaceState("", window.currentCrate + " - Rust", "?search=");
                     }
-                    if (hasClass(main, "content")) {
-                        removeClass(main, "hidden");
-                    }
-                    var search_c = getSearchElement();
-                    if (hasClass(search_c, "content")) {
-                        addClass(search_c, "hidden");
-                    }
+                    hideSearchResults();
                 } else {
                     searchTimeout = setTimeout(search, 500);
                 }
@@ -1725,6 +1819,10 @@ function getSearchElement() {
                 search();
             };
             search_input.onchange = function(e) {
+                if (e.target !== document.activeElement) {
+                    // To prevent doing anything when it's from a blur event.
+                    return;
+                }
                 // Do NOT e.preventDefault() here. It will prevent pasting.
                 clearTimeout(searchTimeout);
                 // zero-timeout necessary here because at the time of event handler execution the
@@ -1748,19 +1846,8 @@ function getSearchElement() {
                 // Store the previous <title> so we can revert back to it later.
                 var previousTitle = document.title;
 
-                window.onpopstate = function(e) {
+                window.addEventListener("popstate", function(e) {
                     var params = getQueryStringParams();
-                    // When browsing back from search results the main page
-                    // visibility must be reset.
-                    if (!params.search) {
-                        if (hasClass(main, "content")) {
-                            removeClass(main, "hidden");
-                        }
-                        var search_c = getSearchElement();
-                        if (hasClass(search_c, "content")) {
-                            addClass(search_c, "hidden");
-                        }
-                    }
                     // Revert to the previous title manually since the History
                     // API ignores the title parameter.
                     document.title = previousTitle;
@@ -1772,18 +1859,21 @@ function getSearchElement() {
                     // perform the search. This will empty the bar if there's
                     // nothing there, which lets you really go back to a
                     // previous state with nothing in the bar.
-                    if (params.search) {
+                    if (params.search && params.search.length > 0) {
                         search_input.value = params.search;
+                        // Some browsers fire "onpopstate" for every page load
+                        // (Chrome), while others fire the event only when actually
+                        // popping a state (Firefox), which is why search() is
+                        // called both here and at the end of the startSearch()
+                        // function.
+                        search(e);
                     } else {
                         search_input.value = "";
+                        // When browsing back from search results the main page
+                        // visibility must be reset.
+                        hideSearchResults();
                     }
-                    // Some browsers fire "onpopstate" for every page load
-                    // (Chrome), while others fire the event only when actually
-                    // popping a state (Firefox), which is why search() is
-                    // called both here and at the end of the startSearch()
-                    // function.
-                    search();
-                };
+                });
             }
             search();
         }
@@ -1902,6 +1992,24 @@ function getSearchElement() {
         var implementors = document.getElementById("implementors-list");
         var synthetic_implementors = document.getElementById("synthetic-implementors-list");
 
+        if (synthetic_implementors) {
+            // This `inlined_types` variable is used to avoid having the same implementation
+            // showing up twice. For example "String" in the "Sync" doc page.
+            //
+            // By the way, this is only used by and useful for traits implemented automatically
+            // (like "Send" and "Sync").
+            var inlined_types = new Set();
+            onEachLazy(synthetic_implementors.getElementsByClassName("impl"), function(el) {
+                var aliases = el.getAttribute("aliases");
+                if (!aliases) {
+                    return;
+                }
+                aliases.split(",").forEach(function(alias) {
+                    inlined_types.add(alias);
+                });
+            });
+        }
+
         var libs = Object.getOwnPropertyNames(imp);
         var llength = libs.length;
         for (var i = 0; i < llength; ++i) {
@@ -1918,10 +2026,10 @@ function getSearchElement() {
                 if (struct.synthetic) {
                     var stlength = struct.types.length;
                     for (var k = 0; k < stlength; k++) {
-                        if (window.inlined_types.has(struct.types[k])) {
+                        if (inlined_types.has(struct.types[k])) {
                             continue struct_loop;
                         }
-                        window.inlined_types.add(struct.types[k]);
+                        inlined_types.add(struct.types[k]);
                     }
                 }
 
@@ -2156,7 +2264,7 @@ function getSearchElement() {
         if (collapse) {
             toggleAllDocs(pageId, true);
         } else if (getCurrentValue("rustdoc-auto-hide-trait-implementations") !== "false") {
-            var impl_list = document.getElementById("implementations-list");
+            var impl_list = document.getElementById("trait-implementations-list");
 
             if (impl_list !== null) {
                 onEachLazy(impl_list.getElementsByClassName("collapse-toggle"), function(e) {
@@ -2479,31 +2587,6 @@ function getSearchElement() {
         lineNumbersFunc(e);
     });
 
-    function showModal(content) {
-        var modal = document.createElement("div");
-        modal.id = "important";
-        addClass(modal, "modal");
-        modal.innerHTML = "<div class=\"modal-content\"><div class=\"close\" id=\"modal-close\">✕" +
-                          "</div><div class=\"whiter\"></div><span class=\"docblock\">" + content +
-                          "</span></div>";
-        document.getElementsByTagName("body")[0].appendChild(modal);
-        document.getElementById("modal-close").onclick = hideModal;
-        modal.onclick = hideModal;
-    }
-
-    function hideModal() {
-        var modal = document.getElementById("important");
-        if (modal) {
-            modal.parentNode.removeChild(modal);
-        }
-    }
-
-    onEachLazy(document.getElementsByClassName("important-traits"), function(e) {
-        e.onclick = function() {
-            showModal(e.lastElementChild.innerHTML);
-        };
-    });
-
     // In the search display, allows to switch between tabs.
     function printTab(nb) {
         if (nb === 0 || nb === 1 || nb === 2) {
@@ -2529,9 +2612,9 @@ function getSearchElement() {
     }
 
     function putBackSearch(search_input) {
-        if (search_input.value !== "") {
-            addClass(main, "hidden");
-            removeClass(getSearchElement(), "hidden");
+        var search = getSearchElement();
+        if (search_input.value !== "" && hasClass(search, "hidden")) {
+            showSearchResults(search);
             if (browserSupportsHistoryApi()) {
                 history.replaceState(search_input.value,
                                      "",
@@ -2548,10 +2631,9 @@ function getSearchElement() {
 
     var params = getQueryStringParams();
     if (params && params.search) {
-        addClass(main, "hidden");
         var search = getSearchElement();
-        removeClass(search, "hidden");
         search.innerHTML = "<h3 style=\"text-align: center;\">Loading search results...</h3>";
+        showSearchResults(search);
     }
 
     var sidebar_menu = document.getElementsByClassName("sidebar-menu")[0];
@@ -2621,12 +2703,26 @@ function getSearchElement() {
             }
             return 0;
         });
+        var savedCrate = getCurrentValue("rustdoc-saved-filter-crate");
         for (var i = 0; i < crates_text.length; ++i) {
             var option = document.createElement("option");
             option.value = crates_text[i];
             option.innerText = crates_text[i];
             elem.appendChild(option);
+            // Set the crate filter from saved storage, if the current page has the saved crate
+            // filter.
+            //
+            // If not, ignore the crate filter -- we want to support filtering for crates on sites
+            // like doc.rust-lang.org where the crates may differ from page to page while on the
+            // same domain.
+            if (crates_text[i] === savedCrate) {
+                elem.value = savedCrate;
+            }
         }
+
+        if (search_input) {
+            search_input.removeAttribute('disabled');
+        };
     }
 
     window.addSearchOptions = addSearchOptions;
@@ -2657,8 +2753,8 @@ function getSearchElement() {
             "Accepted types are: <code>fn</code>, <code>mod</code>, <code>struct</code>, \
              <code>enum</code>, <code>trait</code>, <code>type</code>, <code>macro</code>, \
              and <code>const</code>.",
-            "Search functions by type signature (e.g., <code>vec -> usize</code> or \
-             <code>* -> vec</code>)",
+            "Search functions by type signature (e.g., <code>vec -&gt; usize</code> or \
+             <code>* -&gt; vec</code>)",
             "Search multiple things at once by splitting your query with comma (e.g., \
              <code>str,u8</code> or <code>String,struct:Vec,test</code>)",
             "You can look for items with an exact name by putting double quotes around \
@@ -2676,7 +2772,7 @@ function getSearchElement() {
         insertAfter(popup, getSearchElement());
     }
 
-    onHashChange();
+    onHashChange(null);
     window.onhashchange = onHashChange;
 
     buildHelperPopup();
@@ -2691,3 +2787,9 @@ function focusSearchBar() {
 function defocusSearchBar() {
     getSearchInput().blur();
 }
+
+// This is required in firefox. Explanations: when going back in the history, firefox doesn't re-run
+// the JS, therefore preventing rustdoc from setting a few things required to be able to reload the
+// previous search results (if you navigated to a search result with the keyboard, pressed enter on
+// it to navigate to that result, and then came back to this page).
+window.onunload = function(){};

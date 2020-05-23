@@ -126,9 +126,8 @@ fn add_destdir(path: &Path, destdir: &Option<PathBuf>) -> PathBuf {
         None => return path.to_path_buf(),
     };
     for part in path.components() {
-        match part {
-            Component::Normal(s) => ret.push(s),
-            _ => {}
+        if let Component::Normal(s) = part {
+            ret.push(s)
         }
     }
     ret
@@ -215,10 +214,8 @@ install!((self, builder, _config),
         }
     };
     Clippy, "clippy", Self::should_build(_config), only_hosts: true, {
-        if builder.ensure(dist::Clippy {
-            compiler: self.compiler,
-            target: self.target,
-        }).is_some() || Self::should_install(builder) {
+        builder.ensure(dist::Clippy { compiler: self.compiler, target: self.target });
+        if Self::should_install(builder) {
             install_clippy(builder, self.compiler.stage, self.target);
         } else {
             builder.info(
@@ -260,7 +257,7 @@ install!((self, builder, _config),
     };
     Rustc, "src/librustc", true, only_hosts: true, {
         builder.ensure(dist::Rustc {
-            compiler: self.compiler,
+            compiler: builder.compiler(builder.top_stage, self.target),
         });
         install_rustc(builder, self.compiler.stage, self.target);
     };

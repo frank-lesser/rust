@@ -19,21 +19,23 @@
 
 #![feature(rustc_private)]
 
+extern crate rustc_ast_pretty;
 extern crate rustc_data_structures;
-extern crate syntax;
-extern crate syntax_expand;
+extern crate rustc_ast;
 extern crate rustc_parse;
+extern crate rustc_session;
+extern crate rustc_span;
 
+use rustc_ast_pretty::pprust;
 use rustc_data_structures::thin_vec::ThinVec;
 use rustc_parse::new_parser_from_source_str;
-use syntax::ast::*;
-use syntax::sess::ParseSess;
-use syntax::source_map::{Spanned, DUMMY_SP, FileName};
-use syntax::source_map::FilePathMapping;
-use syntax::mut_visit::{self, MutVisitor, visit_clobber};
-use syntax::print::pprust;
-use syntax::ptr::P;
-use syntax_expand::config::process_configure_mod;
+use rustc_session::parse::ParseSess;
+use rustc_span::source_map::{Spanned, DUMMY_SP, FileName};
+use rustc_span::source_map::FilePathMapping;
+use rustc_span::symbol::Ident;
+use rustc_ast::ast::*;
+use rustc_ast::mut_visit::{self, MutVisitor, visit_clobber};
+use rustc_ast::ptr::P;
 
 fn parse_expr(ps: &ParseSess, src: &str) -> Option<P<Expr>> {
     let src_as_string = src.to_string();
@@ -116,19 +118,19 @@ fn iter_exprs(depth: usize, f: &mut dyn FnMut(P<Expr>)) {
             11 => {
                 let decl = P(FnDecl {
                     inputs: vec![],
-                    output: FunctionRetTy::Default(DUMMY_SP),
+                    output: FnRetTy::Default(DUMMY_SP),
                 });
                 iter_exprs(depth - 1, &mut |e| g(
                         ExprKind::Closure(CaptureBy::Value,
-                                          IsAsync::NotAsync,
+                                          Async::No,
                                           Movability::Movable,
                                           decl.clone(),
                                           e,
                                           DUMMY_SP)));
             },
             12 => {
-                iter_exprs(depth - 1, &mut |e| g(ExprKind::Assign(e, make_x())));
-                iter_exprs(depth - 1, &mut |e| g(ExprKind::Assign(make_x(), e)));
+                iter_exprs(depth - 1, &mut |e| g(ExprKind::Assign(e, make_x(), DUMMY_SP)));
+                iter_exprs(depth - 1, &mut |e| g(ExprKind::Assign(make_x(), e, DUMMY_SP)));
             },
             13 => {
                 iter_exprs(depth - 1, &mut |e| g(ExprKind::Field(e, Ident::from_str("f"))));
@@ -140,7 +142,10 @@ fn iter_exprs(depth: usize, f: &mut dyn FnMut(P<Expr>)) {
                             Some(make_x()), Some(e), RangeLimits::HalfOpen)));
             },
             15 => {
-                iter_exprs(depth - 1, &mut |e| g(ExprKind::AddrOf(Mutability::Immutable, e)));
+                iter_exprs(
+                    depth - 1,
+                    &mut |e| g(ExprKind::AddrOf(BorrowKind::Ref, Mutability::Not, e)),
+                );
             },
             16 => {
                 g(ExprKind::Ret(None));
@@ -201,11 +206,11 @@ impl MutVisitor for AddParens {
 }
 
 fn main() {
-    syntax::with_default_globals(|| run());
+    rustc_ast::with_default_globals(|| run());
 }
 
 fn run() {
-    let ps = ParseSess::new(FilePathMapping::empty(), process_configure_mod);
+    let ps = ParseSess::new(FilePathMapping::empty());
 
     iter_exprs(2, &mut |mut e| {
         // If the pretty printer is correct, then `parse(print(e))` should be identical to `e`,

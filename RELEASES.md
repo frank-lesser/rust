@@ -1,3 +1,524 @@
+Version 1.43.1 (2020-05-07)
+===========================
+
+* [Updated openssl-src to 1.1.1g for CVE-2020-1967.][71430]
+* [Fixed the stabilization of AVX-512 features.][71473]
+* [Fixed `cargo package --list` not working with unpublished dependencies.][cargo/8151]
+
+[71430]: https://github.com/rust-lang/rust/pull/71430
+[71473]: https://github.com/rust-lang/rust/issues/71473
+[cargo/8151]: https://github.com/rust-lang/cargo/issues/8151
+
+
+Version 1.43.0 (2020-04-23)
+==========================
+
+Language
+--------
+- [Fixed using binary operations with `&{number}` (e.g. `&1.0`) not having
+  the type inferred correctly.][68129]
+- [Attributes such as `#[cfg()]` can now be used on `if` expressions.][69201]
+
+**Syntax only changes**
+- [Allow `type Foo: Ord` syntactically.][69361]
+- [Fuse associated and extern items up to defaultness.][69194]
+- [Syntactically allow `self` in all `fn` contexts.][68764]
+- [Merge `fn` syntax + cleanup item parsing.][68728]
+- [`item` macro fragments can be interpolated into `trait`s, `impl`s, and `extern` blocks.][69366]
+  For example, you may now write:
+  ```rust
+  macro_rules! mac_trait {
+      ($i:item) => {
+          trait T { $i }
+      }
+  }
+  mac_trait! {
+      fn foo() {}
+  }
+  ```
+
+These are still rejected *semantically*, so you will likely receive an error but
+these changes can be seen and parsed by macros and
+conditional compilation.
+
+
+Compiler
+--------
+- [You can now pass multiple lint flags to rustc to override the previous
+  flags.][67885] For example; `rustc -D unused -A unused-variables` denies
+  everything in the `unused` lint group except `unused-variables` which
+  is explicitly allowed. However, passing `rustc -A unused-variables -D unused` denies
+  everything in the `unused` lint group **including** `unused-variables` since
+  the allow flag is specified before the deny flag (and therefore overridden).
+- [rustc will now prefer your system MinGW libraries over its bundled libraries
+  if they are available on `windows-gnu`.][67429]
+- [rustc now buffers errors/warnings printed in JSON.][69227]
+
+Libraries
+---------
+- [`Arc<[T; N]>`, `Box<[T; N]>`, and `Rc<[T; N]>`, now implement
+  `TryFrom<Arc<[T]>>`,`TryFrom<Box<[T]>>`, and `TryFrom<Rc<[T]>>`
+  respectively.][69538] **Note** These conversions are only available when `N`
+  is `0..=32`.
+- [You can now use associated constants on floats and integers directly, rather
+  than having to import the module.][68952] e.g. You can now write `u32::MAX` or
+  `f32::NAN` with no imports.
+- [`u8::is_ascii` is now `const`.][68984]
+- [`String` now implements `AsMut<str>`.][68742]
+- [Added the `primitive` module to `std` and `core`.][67637] This module
+  reexports Rust's primitive types. This is mainly useful in macros
+  where you want avoid these types being shadowed.
+- [Relaxed some of the trait bounds on `HashMap` and `HashSet`.][67642]
+- [`string::FromUtf8Error` now implements `Clone + Eq`.][68738]
+
+Stabilized APIs
+---------------
+- [`Once::is_completed`]
+- [`f32::LOG10_2`]
+- [`f32::LOG2_10`]
+- [`f64::LOG10_2`]
+- [`f64::LOG2_10`]
+- [`iter::once_with`]
+
+Cargo
+-----
+- [You can now set config `[profile]`s in your `.cargo/config`, or through
+  your environment.][cargo/7823]
+- [Cargo will now set `CARGO_BIN_EXE_<name>` pointing to a binary's
+  executable path when running integration tests or benchmarks.][cargo/7697]
+  `<name>` is the name of your binary as-is e.g. If you wanted the executable
+  path for a binary named `my-program`you would use `env!("CARGO_BIN_EXE_my-program")`.
+
+Misc
+----
+- [Certain checks in the `const_err` lint were deemed unrelated to const
+  evaluation][69185], and have been moved to the `unconditional_panic` and
+  `arithmetic_overflow` lints.
+
+Compatibility Notes
+-------------------
+
+- [Having trailing syntax in the `assert!` macro is now a hard error.][69548] This
+  has been a warning since 1.36.0.
+- [Fixed `Self` not having the correctly inferred type.][69340] This incorrectly
+  led to some instances being accepted, and now correctly emits a hard error.
+
+[69340]: https://github.com/rust-lang/rust/pull/69340
+
+Internal Only
+-------------
+These changes provide no direct user facing benefits, but represent significant
+improvements to the internals and overall performance of `rustc` and
+related tools.
+
+- [All components are now built with `opt-level=3` instead of `2`.][67878]
+- [Improved how rustc generates drop code.][67332]
+- [Improved performance from `#[inline]`-ing certain hot functions.][69256]
+- [traits: preallocate 2 Vecs of known initial size][69022]
+- [Avoid exponential behaviour when relating types][68772]
+- [Skip `Drop` terminators for enum variants without drop glue][68943]
+- [Improve performance of coherence checks][68966]
+- [Deduplicate types in the generator witness][68672]
+- [Invert control in struct_lint_level.][68725]
+
+[67332]: https://github.com/rust-lang/rust/pull/67332/
+[67429]: https://github.com/rust-lang/rust/pull/67429/
+[67637]: https://github.com/rust-lang/rust/pull/67637/
+[67642]: https://github.com/rust-lang/rust/pull/67642/
+[67878]: https://github.com/rust-lang/rust/pull/67878/
+[67885]: https://github.com/rust-lang/rust/pull/67885/
+[68129]: https://github.com/rust-lang/rust/pull/68129/
+[68672]: https://github.com/rust-lang/rust/pull/68672/
+[68725]: https://github.com/rust-lang/rust/pull/68725/
+[68728]: https://github.com/rust-lang/rust/pull/68728/
+[68738]: https://github.com/rust-lang/rust/pull/68738/
+[68742]: https://github.com/rust-lang/rust/pull/68742/
+[68764]: https://github.com/rust-lang/rust/pull/68764/
+[68772]: https://github.com/rust-lang/rust/pull/68772/
+[68943]: https://github.com/rust-lang/rust/pull/68943/
+[68952]: https://github.com/rust-lang/rust/pull/68952/
+[68966]: https://github.com/rust-lang/rust/pull/68966/
+[68984]: https://github.com/rust-lang/rust/pull/68984/
+[69022]: https://github.com/rust-lang/rust/pull/69022/
+[69185]: https://github.com/rust-lang/rust/pull/69185/
+[69194]: https://github.com/rust-lang/rust/pull/69194/
+[69201]: https://github.com/rust-lang/rust/pull/69201/
+[69227]: https://github.com/rust-lang/rust/pull/69227/
+[69548]: https://github.com/rust-lang/rust/pull/69548/
+[69256]: https://github.com/rust-lang/rust/pull/69256/
+[69361]: https://github.com/rust-lang/rust/pull/69361/
+[69366]: https://github.com/rust-lang/rust/pull/69366/
+[69538]: https://github.com/rust-lang/rust/pull/69538/
+[cargo/7823]: https://github.com/rust-lang/cargo/pull/7823
+[cargo/7697]: https://github.com/rust-lang/cargo/pull/7697
+[`Once::is_completed`]: https://doc.rust-lang.org/std/sync/struct.Once.html#method.is_completed
+[`f32::LOG10_2`]: https://doc.rust-lang.org/std/f32/consts/constant.LOG10_2.html
+[`f32::LOG2_10`]: https://doc.rust-lang.org/std/f32/consts/constant.LOG2_10.html
+[`f64::LOG10_2`]: https://doc.rust-lang.org/std/f64/consts/constant.LOG10_2.html
+[`f64::LOG2_10`]: https://doc.rust-lang.org/std/f64/consts/constant.LOG2_10.html
+[`iter::once_with`]: https://doc.rust-lang.org/std/iter/fn.once_with.html
+
+
+Version 1.42.0 (2020-03-12)
+==========================
+
+Language
+--------
+- [You can now use the slice pattern syntax with subslices.][67712] e.g.
+  ```rust
+  fn foo(words: &[&str]) {
+      match words {
+          ["Hello", "World", "!", ..] => println!("Hello World!"),
+          ["Foo", "Bar", ..] => println!("Baz"),
+          rest => println!("{:?}", rest),
+      }
+  }
+  ```
+- [You can now use `#[repr(transparent)]` on univariant `enum`s.][68122] Meaning
+  that you can create an enum that has the exact layout and ABI of the type
+  it contains.
+- [There are some *syntax-only* changes:][67131]
+   - `default` is syntactically allowed before items in `trait` definitions.
+   - Items in `impl`s (i.e. `const`s, `type`s, and `fn`s) may syntactically
+     leave out their bodies in favor of `;`.
+   - Bounds on associated types in `impl`s are now syntactically allowed
+     (e.g. `type Foo: Ord;`).
+   - `...` (the C-variadic type) may occur syntactically directly as the type of
+      any function parameter.
+
+  These are still rejected *semantically*, so you will likely receive an error
+  but these changes can be seen and parsed by procedural macros and
+  conditional compilation.
+
+Compiler
+--------
+- [Added tier 2\* support for `armv7a-none-eabi`.][68253]
+- [Added tier 2 support for `riscv64gc-unknown-linux-gnu`.][68339]
+- [`Option::{expect,unwrap}` and
+   `Result::{expect, expect_err, unwrap, unwrap_err}` now produce panic messages
+   pointing to the location where they were called, rather than
+   `core`'s internals. ][67887]
+
+\* Refer to Rust's [platform support page][forge-platform-support] for more
+information on Rust's tiered platform support.
+
+Libraries
+---------
+- [`iter::Empty<T>` now implements `Send` and `Sync` for any `T`.][68348]
+- [`Pin::{map_unchecked, map_unchecked_mut}` no longer require the return type
+   to implement `Sized`.][67935]
+- [`io::Cursor` now derives `PartialEq` and `Eq`.][67233]
+- [`Layout::new` is now `const`.][66254]
+- [Added Standard Library support for `riscv64gc-unknown-linux-gnu`.][66899]
+
+
+Stabilized APIs
+---------------
+- [`CondVar::wait_while`]
+- [`CondVar::wait_timeout_while`]
+- [`DebugMap::key`]
+- [`DebugMap::value`]
+- [`ManuallyDrop::take`]
+- [`matches!`]
+- [`ptr::slice_from_raw_parts_mut`]
+- [`ptr::slice_from_raw_parts`]
+
+Cargo
+-----
+- [You no longer need to include `extern crate proc_macro;` to be able to
+  `use proc_macro;` in the `2018` edition.][cargo/7700]
+
+Compatibility Notes
+-------------------
+- [`Error::description` has been deprecated, and its use will now produce a
+  warning.][66919] It's recommended to use `Display`/`to_string` instead.
+
+[68253]: https://github.com/rust-lang/rust/pull/68253/
+[68348]: https://github.com/rust-lang/rust/pull/68348/
+[67935]: https://github.com/rust-lang/rust/pull/67935/
+[68339]: https://github.com/rust-lang/rust/pull/68339/
+[68122]: https://github.com/rust-lang/rust/pull/68122/
+[67712]: https://github.com/rust-lang/rust/pull/67712/
+[67887]: https://github.com/rust-lang/rust/pull/67887/
+[67131]: https://github.com/rust-lang/rust/pull/67131/
+[67233]: https://github.com/rust-lang/rust/pull/67233/
+[66899]: https://github.com/rust-lang/rust/pull/66899/
+[66919]: https://github.com/rust-lang/rust/pull/66919/
+[66254]: https://github.com/rust-lang/rust/pull/66254/
+[cargo/7700]: https://github.com/rust-lang/cargo/pull/7700
+[`DebugMap::key`]: https://doc.rust-lang.org/stable/std/fmt/struct.DebugMap.html#method.key
+[`DebugMap::value`]: https://doc.rust-lang.org/stable/std/fmt/struct.DebugMap.html#method.value
+[`ManuallyDrop::take`]: https://doc.rust-lang.org/stable/std/mem/struct.ManuallyDrop.html#method.take
+[`matches!`]: https://doc.rust-lang.org/stable/std/macro.matches.html
+[`ptr::slice_from_raw_parts_mut`]: https://doc.rust-lang.org/stable/std/ptr/fn.slice_from_raw_parts_mut.html
+[`ptr::slice_from_raw_parts`]: https://doc.rust-lang.org/stable/std/ptr/fn.slice_from_raw_parts.html
+[`CondVar::wait_while`]: https://doc.rust-lang.org/stable/std/sync/struct.Condvar.html#method.wait_while
+[`CondVar::wait_timeout_while`]: https://doc.rust-lang.org/stable/std/sync/struct.Condvar.html#method.wait_timeout_while
+
+
+Version 1.41.1 (2020-02-27)
+===========================
+
+* [Always check types of static items][69145]
+* [Always check lifetime bounds of `Copy` impls][69145]
+* [Fix miscompilation in callers of `Layout::repeat`][69225]
+
+[69225]: https://github.com/rust-lang/rust/issues/69225
+[69145]: https://github.com/rust-lang/rust/pull/69145
+
+
+Version 1.41.0 (2020-01-30)
+===========================
+
+Language
+--------
+
+- [You can now pass type parameters to foreign items when implementing
+  traits.][65879] E.g. You can now write `impl<T> From<Foo> for Vec<T> {}`.
+- [You can now arbitrarily nest receiver types in the `self` position.][64325] E.g. you can
+  now write `fn foo(self: Box<Box<Self>>) {}`. Previously only `Self`, `&Self`,
+  `&mut Self`, `Arc<Self>`, `Rc<Self>`, and `Box<Self>` were allowed.
+- [You can now use any valid identifier in a `format_args` macro.][66847]
+  Previously identifiers starting with an underscore were not allowed.
+- [Visibility modifiers (e.g. `pub`) are now syntactically allowed on trait items and
+  enum variants.][66183] These are still rejected semantically, but
+  can be seen and parsed by procedural macros and conditional compilation.
+
+Compiler
+--------
+
+- [Rustc will now warn if you have unused loop `'label`s.][66325]
+- [Removed support for the `i686-unknown-dragonfly` target.][67255]
+- [Added tier 3 support\* for the `riscv64gc-unknown-linux-gnu` target.][66661]
+- [You can now pass an arguments file passing the `@path` syntax
+  to rustc.][66172] Note that the format differs somewhat from what is
+  found in other tooling; please see [the documentation][argfile-docs] for
+  more information.
+- [You can now provide `--extern` flag without a path, indicating that it is
+  available from the search path or specified with an `-L` flag.][64882]
+
+\* Refer to Rust's [platform support page][forge-platform-support] for more
+information on Rust's tiered platform support.
+
+[argfile-docs]: https://doc.rust-lang.org/nightly/rustc/command-line-arguments.html#path-load-command-line-flags-from-a-path
+
+Libraries
+---------
+
+- [The `core::panic` module is now stable.][66771] It was already stable
+  through `std`.
+- [`NonZero*` numerics now implement `From<NonZero*>` if it's a smaller integer
+  width.][66277] E.g. `NonZeroU16` now implements `From<NonZeroU8>`.
+- [`MaybeUninit<T>` now implements `fmt::Debug`.][65013]
+
+Stabilized APIs
+---------------
+
+- [`Result::map_or`]
+- [`Result::map_or_else`]
+- [`std::rc::Weak::weak_count`]
+- [`std::rc::Weak::strong_count`]
+- [`std::sync::Weak::weak_count`]
+- [`std::sync::Weak::strong_count`]
+
+Cargo
+-----
+
+- [Cargo will now document all the private items for binary crates
+  by default.][cargo/7593]
+- [`cargo-install` will now reinstall the package if it detects that it is out
+  of date.][cargo/7560]
+- [Cargo.lock now uses a more git friendly format that should help to reduce
+  merge conflicts.][cargo/7579]
+- [You can now override specific dependencies's build settings][cargo/7591] E.g.
+  `[profile.dev.package.image] opt-level = 2` sets the `image` crate's
+  optimisation level to `2` for debug builds. You can also use
+  `[profile.<profile>.build-override]` to override build scripts and
+  their dependencies.
+
+Misc
+----
+
+- [You can now specify `edition` in documentation code blocks to compile the block
+  for that edition.][66238] E.g. `edition2018` tells rustdoc that the code sample
+  should be compiled the 2018 edition of Rust.
+- [You can now provide custom themes to rustdoc with `--theme`, and check the
+  current theme with `--check-theme`.][54733]
+- [You can use `#[cfg(doc)]` to compile an item when building documentation.][61351]
+
+Compatibility Notes
+-------------------
+
+- [As previously announced 1.41.0 will be the last tier 1 release for 32-bit
+  Apple targets.][apple-32bit-drop] This means that the source code is still
+  available to build, but the targets are no longer being tested and release
+  binaries for those platforms will no longer be distributed by the Rust project.
+  Please refer to the linked blog post for more information.
+
+[54733]: https://github.com/rust-lang/rust/pull/54733/
+[61351]: https://github.com/rust-lang/rust/pull/61351/
+[67255]: https://github.com/rust-lang/rust/pull/67255/
+[66661]: https://github.com/rust-lang/rust/pull/66661/
+[66771]: https://github.com/rust-lang/rust/pull/66771/
+[66847]: https://github.com/rust-lang/rust/pull/66847/
+[66238]: https://github.com/rust-lang/rust/pull/66238/
+[66277]: https://github.com/rust-lang/rust/pull/66277/
+[66325]: https://github.com/rust-lang/rust/pull/66325/
+[66172]: https://github.com/rust-lang/rust/pull/66172/
+[66183]: https://github.com/rust-lang/rust/pull/66183/
+[65879]: https://github.com/rust-lang/rust/pull/65879/
+[65013]: https://github.com/rust-lang/rust/pull/65013/
+[64882]: https://github.com/rust-lang/rust/pull/64882/
+[64325]: https://github.com/rust-lang/rust/pull/64325/
+[cargo/7560]: https://github.com/rust-lang/cargo/pull/7560/
+[cargo/7579]: https://github.com/rust-lang/cargo/pull/7579/
+[cargo/7591]: https://github.com/rust-lang/cargo/pull/7591/
+[cargo/7593]: https://github.com/rust-lang/cargo/pull/7593/
+[`Result::map_or_else`]: https://doc.rust-lang.org/std/result/enum.Result.html#method.map_or_else
+[`Result::map_or`]: https://doc.rust-lang.org/std/result/enum.Result.html#method.map_or
+[`std::rc::Weak::weak_count`]: https://doc.rust-lang.org/std/rc/struct.Weak.html#method.weak_count
+[`std::rc::Weak::strong_count`]: https://doc.rust-lang.org/std/rc/struct.Weak.html#method.strong_count
+[`std::sync::Weak::weak_count`]: https://doc.rust-lang.org/std/sync/struct.Weak.html#method.weak_count
+[`std::sync::Weak::strong_count`]: https://doc.rust-lang.org/std/sync/struct.Weak.html#method.strong_count
+[apple-32bit-drop]: https://blog.rust-lang.org/2020/01/03/reducing-support-for-32-bit-apple-targets.html
+
+Version 1.40.0 (2019-12-19)
+===========================
+
+Language
+--------
+- [You can now use tuple `struct`s and tuple `enum` variant's constructors in
+  `const` contexts.][65188] e.g.
+
+  ```rust
+  pub struct Point(i32, i32);
+
+  const ORIGIN: Point = {
+      let constructor = Point;
+
+      constructor(0, 0)
+  };
+  ```
+
+- [You can now mark `struct`s, `enum`s, and `enum` variants with the `#[non_exhaustive]` attribute to
+  indicate that there may be variants or fields added in the future.][64639]
+  For example this requires adding a wild-card branch (`_ => {}`) to any match
+  statements on a non-exhaustive `enum`. [(RFC 2008)]
+- [You can now use function-like procedural macros in `extern` blocks and in
+  type positions.][63931] e.g. `type Generated = macro!();`
+- [Function-like and attribute procedural macros can now emit
+  `macro_rules!` items, so you can now have your macros generate macros.][64035]
+- [The `meta` pattern matcher in `macro_rules!` now correctly matches the modern
+  attribute syntax.][63674] For example `(#[$m:meta])` now matches `#[attr]`,
+  `#[attr{tokens}]`, `#[attr[tokens]]`, and `#[attr(tokens)]`.
+
+Compiler
+--------
+- [Added tier 3 support\* for the
+  `thumbv7neon-unknown-linux-musleabihf` target.][66103]
+- [Added tier 3 support for the
+  `aarch64-unknown-none-softfloat` target.][64589]
+- [Added tier 3 support for the `mips64-unknown-linux-muslabi64`, and
+  `mips64el-unknown-linux-muslabi64` targets.][65843]
+
+\* Refer to Rust's [platform support page][forge-platform-support] for more
+  information on Rust's tiered platform support.
+
+Libraries
+---------
+- [The `is_power_of_two` method on unsigned numeric types is now a `const` function.][65092]
+
+Stabilized APIs
+---------------
+- [`BTreeMap::get_key_value`]
+- [`HashMap::get_key_value`]
+- [`Option::as_deref_mut`]
+- [`Option::as_deref`]
+- [`Option::flatten`]
+- [`UdpSocket::peer_addr`]
+- [`f32::to_be_bytes`]
+- [`f32::to_le_bytes`]
+- [`f32::to_ne_bytes`]
+- [`f64::to_be_bytes`]
+- [`f64::to_le_bytes`]
+- [`f64::to_ne_bytes`]
+- [`f32::from_be_bytes`]
+- [`f32::from_le_bytes`]
+- [`f32::from_ne_bytes`]
+- [`f64::from_be_bytes`]
+- [`f64::from_le_bytes`]
+- [`f64::from_ne_bytes`]
+- [`mem::take`]
+- [`slice::repeat`]
+- [`todo!`]
+
+Cargo
+-----
+- [Cargo will now always display warnings, rather than only on
+  fresh builds.][cargo/7450]
+- [Feature flags (except `--all-features`) passed to a virtual workspace will
+  now produce an error.][cargo/7507] Previously these flags were ignored.
+- [You can now publish `dev-dependencies` without including
+  a `version`.][cargo/7333]
+
+Misc
+----
+- [You can now specify the `#[cfg(doctest)]` attribute to include an item only
+  when running documentation tests with `rustdoc`.][63803]
+
+Compatibility Notes
+-------------------
+- [As previously announced, any previous NLL warnings in the 2015 edition are
+  now hard errors.][64221]
+- [The `include!` macro will now warn if it failed to include the
+  entire file.][64284] The `include!` macro unintentionally only includes the
+  first _expression_ in a file, and this can be unintuitive. This will become
+  either a hard error in a future release, or the behavior may be fixed to include all expressions as expected.
+- [Using `#[inline]` on function prototypes and consts now emits a warning under
+  `unused_attribute` lint.][65294] Using `#[inline]` anywhere else inside traits
+  or `extern` blocks now correctly emits a hard error.
+
+[65294]: https://github.com/rust-lang/rust/pull/65294/
+[66103]: https://github.com/rust-lang/rust/pull/66103/
+[65843]: https://github.com/rust-lang/rust/pull/65843/
+[65188]: https://github.com/rust-lang/rust/pull/65188/
+[65092]: https://github.com/rust-lang/rust/pull/65092/
+[64589]: https://github.com/rust-lang/rust/pull/64589/
+[64639]: https://github.com/rust-lang/rust/pull/64639/
+[64221]: https://github.com/rust-lang/rust/pull/64221/
+[64284]: https://github.com/rust-lang/rust/pull/64284/
+[63931]: https://github.com/rust-lang/rust/pull/63931/
+[64035]: https://github.com/rust-lang/rust/pull/64035/
+[63674]: https://github.com/rust-lang/rust/pull/63674/
+[63803]: https://github.com/rust-lang/rust/pull/63803/
+[cargo/7450]: https://github.com/rust-lang/cargo/pull/7450/
+[cargo/7507]: https://github.com/rust-lang/cargo/pull/7507/
+[cargo/7525]: https://github.com/rust-lang/cargo/pull/7525/
+[cargo/7333]: https://github.com/rust-lang/cargo/pull/7333/
+[(rfc 2008)]: https://rust-lang.github.io/rfcs/2008-non-exhaustive.html
+[`f32::to_be_bytes`]: https://doc.rust-lang.org/std/primitive.f32.html#method.to_be_bytes
+[`f32::to_le_bytes`]: https://doc.rust-lang.org/std/primitive.f32.html#method.to_le_bytes
+[`f32::to_ne_bytes`]: https://doc.rust-lang.org/std/primitive.f32.html#method.to_ne_bytes
+[`f64::to_be_bytes`]: https://doc.rust-lang.org/std/primitive.f64.html#method.to_be_bytes
+[`f64::to_le_bytes`]: https://doc.rust-lang.org/std/primitive.f64.html#method.to_le_bytes
+[`f64::to_ne_bytes`]: https://doc.rust-lang.org/std/primitive.f64.html#method.to_ne_bytes
+[`f32::from_be_bytes`]: https://doc.rust-lang.org/std/primitive.f32.html#method.from_be_bytes
+[`f32::from_le_bytes`]: https://doc.rust-lang.org/std/primitive.f32.html#method.from_le_bytes
+[`f32::from_ne_bytes`]: https://doc.rust-lang.org/std/primitive.f32.html#method.from_ne_bytes
+[`f64::from_be_bytes`]: https://doc.rust-lang.org/std/primitive.f64.html#method.from_be_bytes
+[`f64::from_le_bytes`]: https://doc.rust-lang.org/std/primitive.f64.html#method.from_le_bytes
+[`f64::from_ne_bytes`]: https://doc.rust-lang.org/std/primitive.f64.html#method.from_ne_bytes
+[`option::flatten`]: https://doc.rust-lang.org/std/option/enum.Option.html#method.flatten
+[`option::as_deref`]: https://doc.rust-lang.org/std/option/enum.Option.html#method.as_deref
+[`option::as_deref_mut`]: https://doc.rust-lang.org/std/option/enum.Option.html#method.as_deref_mut
+[`hashmap::get_key_value`]: https://doc.rust-lang.org/std/collections/struct.HashMap.html#method.get_key_value
+[`btreemap::get_key_value`]: https://doc.rust-lang.org/std/collections/struct.BTreeMap.html#method.get_key_value
+[`slice::repeat`]: https://doc.rust-lang.org/std/primitive.slice.html#method.repeat
+[`mem::take`]: https://doc.rust-lang.org/std/mem/fn.take.html
+[`udpsocket::peer_addr`]: https://doc.rust-lang.org/std/net/struct.UdpSocket.html#method.peer_addr
+[`todo!`]: https://doc.rust-lang.org/std/macro.todo.html
+
+
 Version 1.39.0 (2019-11-07)
 ===========================
 
@@ -4478,7 +4999,6 @@ Version 1.11.0 (2016-08-18)
 Language
 --------
 
-* [`cfg_attr` works on `path` attributes](https://github.com/rust-lang/rust/pull/34546)
 * [Support nested `cfg_attr` attributes](https://github.com/rust-lang/rust/pull/34216)
 * [Allow statement-generating braced macro invocations at the end of blocks](https://github.com/rust-lang/rust/pull/34436)
 * [Macros can be expanded inside of trait definitions](https://github.com/rust-lang/rust/pull/34213)
@@ -4597,8 +5117,6 @@ Version 1.10.0 (2016-07-07)
 Language
 --------
 
-* [Allow `concat_idents!` in type positions as well as in expression
-  positions](https://github.com/rust-lang/rust/pull/33735).
 * [`Copy` types are required to have a trivial implementation of `Clone`](https://github.com/rust-lang/rust/pull/33420).
   [RFC 1521](https://github.com/rust-lang/rfcs/blob/master/text/1521-copy-clone-semantics.md).
 * [Single-variant enums support the `#[repr(..)]` attribute](https://github.com/rust-lang/rust/pull/33355).
@@ -4814,10 +5332,10 @@ Stabilized APIs
 ---------------
 
 * [`std::panic`]
-* [`std::panic::catch_unwind`][] (renamed from `recover`)
-* [`std::panic::resume_unwind`][] (renamed from `propagate`)
-* [`std::panic::AssertUnwindSafe`][] (renamed from `AssertRecoverSafe`)
-* [`std::panic::UnwindSafe`][] (renamed from `RecoverSafe`)
+* [`std::panic::catch_unwind`] (renamed from `recover`)
+* [`std::panic::resume_unwind`] (renamed from `propagate`)
+* [`std::panic::AssertUnwindSafe`] (renamed from `AssertRecoverSafe`)
+* [`std::panic::UnwindSafe`] (renamed from `RecoverSafe`)
 * [`str::is_char_boundary`]
 * [`<*const T>::as_ref`]
 * [`<*mut T>::as_ref`]
@@ -5097,18 +5615,18 @@ Libraries
 ---------
 
 * Stabilized APIs:
-  * [`str::encode_utf16`][] (renamed from `utf16_units`)
-  * [`str::EncodeUtf16`][] (renamed from `Utf16Units`)
+  * [`str::encode_utf16`] (renamed from `utf16_units`)
+  * [`str::EncodeUtf16`] (renamed from `Utf16Units`)
   * [`Ref::map`]
   * [`RefMut::map`]
   * [`ptr::drop_in_place`]
   * [`time::Instant`]
   * [`time::SystemTime`]
   * [`Instant::now`]
-  * [`Instant::duration_since`][] (renamed from `duration_from_earlier`)
+  * [`Instant::duration_since`] (renamed from `duration_from_earlier`)
   * [`Instant::elapsed`]
   * [`SystemTime::now`]
-  * [`SystemTime::duration_since`][] (renamed from `duration_from_earlier`)
+  * [`SystemTime::duration_since`] (renamed from `duration_from_earlier`)
   * [`SystemTime::elapsed`]
   * Various `Add`/`Sub` impls for `Time` and `SystemTime`
   * [`SystemTimeError`]
@@ -5295,8 +5813,8 @@ Libraries
 
 * Stabilized APIs
   * `Path`
-    * [`Path::strip_prefix`][] (renamed from relative_from)
-    * [`path::StripPrefixError`][] (new error type returned from strip_prefix)
+    * [`Path::strip_prefix`] (renamed from relative_from)
+    * [`path::StripPrefixError`] (new error type returned from strip_prefix)
   * `Ipv4Addr`
     * [`Ipv4Addr::is_loopback`]
     * [`Ipv4Addr::is_private`]
@@ -5509,7 +6027,7 @@ Libraries
 
 * Stabilized APIs:
   [`Read::read_exact`],
-  [`ErrorKind::UnexpectedEof`][] (renamed from `UnexpectedEOF`),
+  [`ErrorKind::UnexpectedEof`] (renamed from `UnexpectedEOF`),
   [`fs::DirBuilder`], [`fs::DirBuilder::new`],
   [`fs::DirBuilder::recursive`], [`fs::DirBuilder::create`],
   [`os::unix::fs::DirBuilderExt`],
@@ -5522,11 +6040,11 @@ Libraries
   [`collections::hash_set::HashSet::drain`],
   [`collections::binary_heap::Drain`],
   [`collections::binary_heap::BinaryHeap::drain`],
-  [`Vec::extend_from_slice`][] (renamed from `push_all`),
+  [`Vec::extend_from_slice`] (renamed from `push_all`),
   [`Mutex::get_mut`], [`Mutex::into_inner`], [`RwLock::get_mut`],
   [`RwLock::into_inner`],
-  [`Iterator::min_by_key`][] (renamed from `min_by`),
-  [`Iterator::max_by_key`][] (renamed from `max_by`).
+  [`Iterator::min_by_key`] (renamed from `min_by`),
+  [`Iterator::max_by_key`] (renamed from `max_by`).
 * The [core library][1.6co] is stable, as are most of its APIs.
 * [The `assert_eq!` macro supports arguments that don't implement
   `Sized`][1.6ae], such as arrays. In this way it behaves more like
@@ -7804,7 +8322,7 @@ Version 0.7 (2013-07-03)
       * extra: Implementation of fixed output size variations of SHA-2.
 
    * Tooling
-      * `unused_variable`  lint mode for unused variables (default: warn).
+      * `unused_variables` lint mode for unused variables (default: warn).
       * `unused_unsafe` lint mode for detecting unnecessary `unsafe` blocks
         (default: warn).
       * `unused_mut` lint mode for identifying unused `mut` qualifiers

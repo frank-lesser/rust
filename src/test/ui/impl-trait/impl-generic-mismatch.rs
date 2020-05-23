@@ -1,5 +1,3 @@
-// ignore-x86 FIXME: missing sysroot spans (#53081)
-
 use std::fmt::Debug;
 
 trait Foo {

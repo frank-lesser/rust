@@ -2,10 +2,9 @@ use std::error;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::str;
 
 pub fn arg_expand(arg: String) -> Result<Vec<String>, Error> {
-    if arg.starts_with("@") {
+    if arg.starts_with('@') {
         let path = &arg[1..];
         let file = match fs::read_to_string(path) {
             Ok(file) => file,
@@ -36,8 +35,4 @@ impl fmt::Display for Error {
     }
 }
 
-impl error::Error for Error {
-    fn description(&self) -> &'static str {
-        "argument error"
-    }
-}
+impl error::Error for Error {}

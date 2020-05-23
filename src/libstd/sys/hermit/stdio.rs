@@ -21,6 +21,10 @@ impl Stdin {
         Ok(0)
     }
 
+    #[inline]
+    pub fn is_read_vectored(&self) -> bool {
+        true
+    }
 }
 
 impl Stdout {
@@ -31,9 +35,7 @@ impl Stdout {
     pub fn write(&self, data: &[u8]) -> io::Result<usize> {
         let len;
 
-        unsafe {
-            len = abi::write(1, data.as_ptr() as *const u8, data.len())
-        }
+        unsafe { len = abi::write(1, data.as_ptr() as *const u8, data.len()) }
 
         if len < 0 {
             Err(io::Error::new(io::ErrorKind::Other, "Stdout is not able to print"))
@@ -45,15 +47,18 @@ impl Stdout {
     pub fn write_vectored(&self, data: &[IoSlice<'_>]) -> io::Result<usize> {
         let len;
 
-        unsafe {
-            len = abi::write(1, data.as_ptr() as *const u8, data.len())
-        }
+        unsafe { len = abi::write(1, data.as_ptr() as *const u8, data.len()) }
 
         if len < 0 {
             Err(io::Error::new(io::ErrorKind::Other, "Stdout is not able to print"))
         } else {
             Ok(len as usize)
         }
+    }
+
+    #[inline]
+    pub fn is_write_vectored(&self) -> bool {
+        true
     }
 
     pub fn flush(&self) -> io::Result<()> {
@@ -69,9 +74,7 @@ impl Stderr {
     pub fn write(&self, data: &[u8]) -> io::Result<usize> {
         let len;
 
-        unsafe {
-            len = abi::write(2, data.as_ptr() as *const u8, data.len())
-        }
+        unsafe { len = abi::write(2, data.as_ptr() as *const u8, data.len()) }
 
         if len < 0 {
             Err(io::Error::new(io::ErrorKind::Other, "Stderr is not able to print"))
@@ -83,15 +86,18 @@ impl Stderr {
     pub fn write_vectored(&self, data: &[IoSlice<'_>]) -> io::Result<usize> {
         let len;
 
-        unsafe {
-            len = abi::write(2, data.as_ptr() as *const u8, data.len())
-        }
+        unsafe { len = abi::write(2, data.as_ptr() as *const u8, data.len()) }
 
         if len < 0 {
             Err(io::Error::new(io::ErrorKind::Other, "Stderr is not able to print"))
         } else {
             Ok(len as usize)
         }
+    }
+
+    #[inline]
+    pub fn is_write_vectored(&self) -> bool {
+        true
     }
 
     pub fn flush(&self) -> io::Result<()> {

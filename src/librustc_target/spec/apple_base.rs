@@ -26,23 +26,24 @@ pub fn opts() -> TargetOptions {
         has_rpath: true,
         dll_prefix: "lib".to_string(),
         dll_suffix: ".dylib".to_string(),
-        archive_format: "bsd".to_string(),
+        archive_format: "darwin".to_string(),
         pre_link_args: LinkArgs::new(),
         has_elf_tls: version >= (10, 7),
         abi_return_struct_as_int: true,
         emit_debug_gdb_scripts: false,
-        .. Default::default()
+        ..Default::default()
     }
 }
 
 fn macos_deployment_target() -> (u32, u32) {
     let deployment_target = env::var("MACOSX_DEPLOYMENT_TARGET").ok();
-    let version = deployment_target.as_ref().and_then(|s| {
-        let mut i = s.splitn(2, '.');
-        i.next().and_then(|a| i.next().map(|b| (a, b)))
-    }).and_then(|(a, b)| {
-        a.parse::<u32>().and_then(|a| b.parse::<u32>().map(|b| (a, b))).ok()
-    });
+    let version = deployment_target
+        .as_ref()
+        .and_then(|s| {
+            let mut i = s.splitn(2, '.');
+            i.next().and_then(|a| i.next().map(|b| (a, b)))
+        })
+        .and_then(|(a, b)| a.parse::<u32>().and_then(|a| b.parse::<u32>().map(|b| (a, b))).ok());
 
     version.unwrap_or((10, 7))
 }
@@ -56,7 +57,7 @@ pub fn macos_link_env_remove() -> Vec<String> {
     let mut env_remove = Vec::with_capacity(2);
     // Remove the `SDKROOT` environment variable if it's clearly set for the wrong platform, which
     // may occur when we're linking a custom build script while targeting iOS for example.
-    if let Some(sdkroot) = env::var("SDKROOT").ok() {
+    if let Ok(sdkroot) = env::var("SDKROOT") {
         if sdkroot.contains("iPhoneOS.platform") || sdkroot.contains("iPhoneSimulator.platform") {
             env_remove.push("SDKROOT".to_string())
         }

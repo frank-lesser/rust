@@ -138,27 +138,6 @@ Book][unstable-doc-cfg] and [its tracking issue][issue-doc-cfg].
 [unstable-doc-cfg]: ../unstable-book/language-features/doc-cfg.html
 [issue-doc-cfg]: https://github.com/rust-lang/rust/issues/43781
 
-### Adding your trait to the "Important Traits" dialog
-
-Rustdoc keeps a list of a few traits that are believed to be "fundamental" to a given type when
-implemented on it. These traits are intended to be the primary interface for their types, and are
-often the only thing available to be documented on their types. For this reason, Rustdoc will track
-when a given type implements one of these traits and call special attention to it when a function
-returns one of these types. This is the "Important Traits" dialog, visible as a circle-i button next
-to the function, which, when clicked, shows the dialog.
-
-In the standard library, the traits that qualify for inclusion are `Iterator`, `io::Read`, and
-`io::Write`. However, rather than being implemented as a hard-coded list, these traits have a
-special marker attribute on them: `#[doc(spotlight)]`. This means that you could apply this
-attribute to your own trait to include it in the "Important Traits" dialog in documentation.
-
-The `#[doc(spotlight)]` attribute currently requires the `#![feature(doc_spotlight)]` feature gate.
-For more information, see [its chapter in the Unstable Book][unstable-spotlight] and [its tracking
-issue][issue-spotlight].
-
-[unstable-spotlight]: ../unstable-book/language-features/doc-spotlight.html
-[issue-spotlight]: https://github.com/rust-lang/rust/issues/45040
-
 ### Exclude certain dependencies from documentation
 
 The standard library uses several dependencies which, in turn, use several types and traits from the
@@ -269,18 +248,6 @@ Markdown file, the URL given to `--markdown-playground-url` will take precedence
 `--playground-url` and `#![doc(html_playground_url = "url")]` are present when rendering crate docs,
 the attribute will take precedence.
 
-### `--crate-version`: control the crate version
-
-Using this flag looks like this:
-
-```bash
-$ rustdoc src/lib.rs -Z unstable-options --crate-version 1.3.37
-```
-
-When `rustdoc` receives this flag, it will print an extra "Version (version)" into the sidebar of
-the crate root's docs. You can use this flag to differentiate between different versions of your
-library's documentation.
-
 ### `--sort-modules-by-appearance`: control how items on module pages are sorted
 
 Using this flag looks like this:
@@ -293,30 +260,6 @@ Ordinarily, when `rustdoc` prints items in module pages, it will sort them alpha
 some consideration for their stability, and names that end in a number). Giving this flag to
 `rustdoc` will disable this sorting and instead make it print the items in the order they appear in
 the source.
-
-### `--themes`: provide additional themes
-
-Using this flag looks like this:
-
-```bash
-$ rustdoc src/lib.rs -Z unstable-options --themes theme.css
-```
-
-Giving this flag to `rustdoc` will make it copy your theme into the generated crate docs and enable
-it in the theme selector. Note that `rustdoc` will reject your theme file if it doesn't style
-everything the "light" theme does. See `--theme-checker` below for details.
-
-### `--theme-checker`: verify theme CSS for validity
-
-Using this flag looks like this:
-
-```bash
-$ rustdoc -Z unstable-options --theme-checker theme.css
-```
-
-Before including your theme in crate docs, `rustdoc` will compare all the CSS rules it contains
-against the "light" theme included by default. Using this flag will allow you to see which rules are
-missing if `rustdoc` rejects your theme.
 
 ### `--resource-suffix`: modifying the name of CSS/JavaScript in crate docs
 
@@ -477,7 +420,7 @@ override `ignore`.
 
 ### `--runtool`, `--runtool-arg`: program to run tests with; args to pass to it
 
-Using thses options looks like this:
+Using these options looks like this:
 
 ```bash
 $ rustdoc src/lib.rs -Z unstable-options --runtool runner --runtool-arg --do-thing --runtool-arg --do-other-thing

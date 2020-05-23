@@ -1,7 +1,6 @@
 // ignore-tidy-tab
 
 #![warn(unused_mut, unused_parens)] // UI tests pass `-A unused`—see Issue #43896
-#![feature(no_debug)]
 
 #[no_mangle] const DISCOVERY: usize = 1;
 //~^ ERROR const items should never be `#[no_mangle]`
@@ -39,9 +38,6 @@ struct Equinox {
     warp_factor: f32,
 }
 
-#[no_debug] // should suggest removal of deprecated attribute
-//~^ WARN deprecated
-//~| HELP remove this attribute
 fn main() {
     while true {
     //~^ WARN denote infinite loops
@@ -60,7 +56,7 @@ fn main() {
         match d {
             Equinox { warp_factor: warp_factor } => {}
             //~^ WARN this pattern is redundant
-            //~| HELP remove this
+            //~| HELP use shorthand field pattern
         }
         println!("{} {}", registry_no, b);
     }

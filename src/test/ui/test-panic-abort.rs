@@ -7,10 +7,12 @@
 
 // ignore-wasm no panic or subprocess support
 // ignore-emscripten no panic or subprocess support
+// ignore-sgx no subprocess support
 
 #![cfg(test)]
 
 use std::io::Write;
+use std::env;
 
 #[test]
 fn it_works() {
@@ -34,4 +36,14 @@ fn it_fails() {
 #[test]
 fn it_exits() {
     std::process::exit(123);
+}
+
+#[test]
+fn no_residual_environment() {
+    for (key, _) in env::vars() {
+        // Look for keys like __RUST_TEST_INVOKE.
+        if key.contains("TEST_INVOKE") {
+            panic!("shouldn't have '{}' in environment", key);
+        }
+    }
 }

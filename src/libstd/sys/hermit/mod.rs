@@ -13,34 +13,35 @@
 //! compiling for wasm. That way it's a compile time error for something that's
 //! guaranteed to be a runtime error!
 
-use crate::os::raw::c_char;
 use crate::intrinsics;
+use crate::os::raw::c_char;
 
 pub mod alloc;
 pub mod args;
-pub mod condvar;
-pub mod stdio;
-pub mod memchr;
-pub mod io;
-pub mod mutex;
-pub mod rwlock;
-pub mod os;
 pub mod cmath;
-pub mod thread;
+pub mod condvar;
 pub mod env;
-pub mod fs;
+pub mod ext;
+pub mod fast_thread_local;
 pub mod fd;
+pub mod fs;
+pub mod io;
+pub mod memchr;
+pub mod mutex;
 pub mod net;
+pub mod os;
 pub mod path;
 pub mod pipe;
 pub mod process;
+pub mod rwlock;
 pub mod stack_overflow;
-pub mod time;
+pub mod stdio;
+pub mod thread;
 pub mod thread_local;
-pub mod fast_thread_local;
+pub mod time;
 
-pub use crate::sys_common::os_str_bytes as os_str;
 use crate::io::ErrorKind;
+pub use crate::sys_common::os_str_bytes as os_str;
 
 #[allow(unused_extern_crates)]
 pub extern crate hermit_abi as abi;
@@ -50,8 +51,7 @@ pub fn unsupported<T>() -> crate::io::Result<T> {
 }
 
 pub fn unsupported_err() -> crate::io::Error {
-    crate::io::Error::new(crate::io::ErrorKind::Other,
-           "operation not supported on HermitCore yet")
+    crate::io::Error::new(crate::io::ErrorKind::Other, "operation not supported on HermitCore yet")
 }
 
 // This enum is used as the storage for a bunch of types which can't actually
@@ -71,13 +71,13 @@ pub unsafe fn strlen(start: *const c_char) -> usize {
 
 #[no_mangle]
 pub extern "C" fn floor(x: f64) -> f64 {
-    unsafe {
-        intrinsics::floorf64(x)
-    }
+    unsafe { intrinsics::floorf64(x) }
 }
 
-pub unsafe fn abort_internal() -> ! {
-    abi::abort();
+pub fn abort_internal() -> ! {
+    unsafe {
+        abi::abort();
+    }
 }
 
 // FIXME: just a workaround to test the system
@@ -90,21 +90,23 @@ pub fn hashmap_random_keys() -> (u64, u64) {
 #[cfg(not(test))]
 #[no_mangle]
 // NB. used by both libunwind and libpanic_abort
-pub unsafe extern "C" fn __rust_abort() {
+pub extern "C" fn __rust_abort() {
     abort_internal();
 }
 
 #[cfg(not(test))]
 pub fn init() {
-    unsafe {
-        let _ = net::init();
-    }
+    let _ = net::init();
 }
 
 #[cfg(not(test))]
 #[no_mangle]
-pub unsafe extern "C" fn runtime_entry(argc: i32, argv: *const *const c_char,
-                                       env: *const *const c_char) -> ! {
+pub unsafe extern "C" fn runtime_entry(
+    argc: i32,
+    argv: *const *const c_char,
+    env: *const *const c_char,
+) -> ! {
+    use crate::sys::hermit::fast_thread_local::run_dtors;
     extern "C" {
         fn main(argc: isize, argv: *const *const c_char) -> i32;
     }
@@ -114,6 +116,7 @@ pub unsafe extern "C" fn runtime_entry(argc: i32, argv: *const *const c_char,
 
     let result = main(argc as isize, argv);
 
+    run_dtors();
     abi::exit(result);
 }
 
@@ -139,9 +142,5 @@ pub fn decode_error_kind(errno: i32) -> ErrorKind {
 }
 
 pub fn cvt(result: i32) -> crate::io::Result<usize> {
-    if result < 0 {
-        Err(crate::io::Error::from_raw_os_error(-result))
-    } else {
-        Ok(result as usize)
-    }
+    if result < 0 { Err(crate::io::Error::from_raw_os_error(-result)) } else { Ok(result as usize) }
 }

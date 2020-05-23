@@ -4,6 +4,9 @@
 //! *[See also the `f64` primitive type](../../std/primitive.f64.html).*
 //!
 //! Mathematically significant numbers are provided in the `consts` sub-module.
+//!
+//! Although using these constants won’t cause compilation warnings,
+//! new code should use the associated constants directly on the primitive type.
 
 #![stable(feature = "rust1", since = "1.0.0")]
 #![allow(missing_docs)]
@@ -14,15 +17,15 @@ use crate::intrinsics;
 use crate::sys::cmath;
 
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::f64::{RADIX, MANTISSA_DIGITS, DIGITS, EPSILON};
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use core::f64::{MIN_EXP, MAX_EXP, MIN_10_EXP};
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use core::f64::{MAX_10_EXP, NAN, INFINITY, NEG_INFINITY};
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use core::f64::{MIN, MIN_POSITIVE, MAX};
-#[stable(feature = "rust1", since = "1.0.0")]
 pub use core::f64::consts;
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use core::f64::{DIGITS, EPSILON, MANTISSA_DIGITS, RADIX};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use core::f64::{INFINITY, MAX_10_EXP, NAN, NEG_INFINITY};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use core::f64::{MAX, MIN, MIN_POSITIVE};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use core::f64::{MAX_EXP, MIN_10_EXP, MIN_EXP};
 
 #[cfg(not(test))]
 #[lang = "f64_runtime"]
@@ -109,10 +112,10 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// let x = 3.5_f64;
-    /// let y = -3.5_f64;
-    /// let abs_difference_x = (x.fract() - 0.5).abs();
-    /// let abs_difference_y = (y.fract() - (-0.5)).abs();
+    /// let x = 3.6_f64;
+    /// let y = -3.6_f64;
+    /// let abs_difference_x = (x.fract() - 0.6).abs();
+    /// let abs_difference_y = (y.fract() - (-0.6)).abs();
     ///
     /// assert!(abs_difference_x < 1e-10);
     /// assert!(abs_difference_y < 1e-10);
@@ -120,7 +123,9 @@ impl f64 {
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn fract(self) -> f64 { self - self.trunc() }
+    pub fn fract(self) -> f64 {
+        self - self.trunc()
+    }
 
     /// Computes the absolute value of `self`. Returns `NAN` if the
     /// number is `NAN`.
@@ -128,8 +133,6 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
     /// let x = 3.5_f64;
     /// let y = -3.5_f64;
     ///
@@ -157,8 +160,6 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
     /// let f = 3.5_f64;
     ///
     /// assert_eq!(f.signum(), 1.0);
@@ -170,11 +171,7 @@ impl f64 {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn signum(self) -> f64 {
-        if self.is_nan() {
-            NAN
-        } else {
-            1.0_f64.copysign(self)
-        }
+        if self.is_nan() { Self::NAN } else { 1.0_f64.copysign(self) }
     }
 
     /// Returns a number composed of the magnitude of `self` and the sign of
@@ -187,8 +184,6 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
     /// let f = 3.5_f64;
     ///
     /// assert_eq!(f.copysign(0.42), 3.5_f64);
@@ -279,18 +274,14 @@ impl f64 {
     /// assert_eq!(a.rem_euclid(-b), 3.0);
     /// assert_eq!((-a).rem_euclid(-b), 1.0);
     /// // limitation due to round-off error
-    /// assert!((-std::f64::EPSILON).rem_euclid(3.0) != 0.0);
+    /// assert!((-f64::EPSILON).rem_euclid(3.0) != 0.0);
     /// ```
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[inline]
     #[stable(feature = "euclidean_division", since = "1.38.0")]
     pub fn rem_euclid(self, rhs: f64) -> f64 {
         let r = self % rhs;
-        if r < 0.0 {
-            r + rhs.abs()
-        } else {
-            r
-        }
+        if r < 0.0 { r + rhs.abs() } else { r }
     }
 
     /// Raises a number to an integer power.
@@ -329,7 +320,7 @@ impl f64 {
         unsafe { intrinsics::powf64(self, n) }
     }
 
-    /// Takes the square root of a number.
+    /// Returns the square root of a number.
     ///
     /// Returns NaN if `self` is a negative number.
     ///
@@ -348,11 +339,7 @@ impl f64 {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn sqrt(self) -> f64 {
-        if self < 0.0 {
-            NAN
-        } else {
-            unsafe { intrinsics::sqrtf64(self) }
-        }
+        unsafe { intrinsics::sqrtf64(self) }
     }
 
     /// Returns `e^(self)`, (the exponential function).
@@ -413,7 +400,7 @@ impl f64 {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn ln(self) -> f64 {
-        self.log_wrapper(|n| { unsafe { intrinsics::logf64(n) } })
+        self.log_wrapper(|n| unsafe { intrinsics::logf64(n) })
     }
 
     /// Returns the logarithm of the number with respect to an arbitrary base.
@@ -435,7 +422,9 @@ impl f64 {
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn log(self, base: f64) -> f64 { self.ln() / base.ln() }
+    pub fn log(self, base: f64) -> f64 {
+        self.ln() / base.ln()
+    }
 
     /// Returns the base 2 logarithm of the number.
     ///
@@ -455,9 +444,9 @@ impl f64 {
     pub fn log2(self) -> f64 {
         self.log_wrapper(|n| {
             #[cfg(target_os = "android")]
-                return crate::sys::android::log2f64(n);
+            return crate::sys::android::log2f64(n);
             #[cfg(not(target_os = "android"))]
-                return unsafe { intrinsics::log2f64(n) };
+            return unsafe { intrinsics::log2f64(n) };
         })
     }
 
@@ -477,7 +466,7 @@ impl f64 {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn log10(self) -> f64 {
-        self.log_wrapper(|n| { unsafe { intrinsics::log10f64(n) } })
+        self.log_wrapper(|n| unsafe { intrinsics::log10f64(n) })
     }
 
     /// The positive difference of two numbers.
@@ -500,19 +489,21 @@ impl f64 {
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    #[rustc_deprecated(since = "1.10.0",
-    reason = "you probably meant `(self - other).abs()`: \
-                                 this operation is `(self - other).max(0.0)` \
-                                 except that `abs_sub` also propagates NaNs (also \
-                                 known as `fdim` in C). If you truly need the positive \
-                                 difference, consider using that expression or the C function \
-                                 `fdim`, depending on how you wish to handle NaN (please consider \
-                                 filing an issue describing your use-case too).")]
+    #[rustc_deprecated(
+        since = "1.10.0",
+        reason = "you probably meant `(self - other).abs()`: \
+                  this operation is `(self - other).max(0.0)` \
+                  except that `abs_sub` also propagates NaNs (also \
+                  known as `fdim` in C). If you truly need the positive \
+                  difference, consider using that expression or the C function \
+                  `fdim`, depending on how you wish to handle NaN (please consider \
+                  filing an issue describing your use-case too)."
+    )]
     pub fn abs_sub(self, other: f64) -> f64 {
         unsafe { cmath::fdim(self, other) }
     }
 
-    /// Takes the cubic root of a number.
+    /// Returns the cubic root of a number.
     ///
     /// # Examples
     ///
@@ -557,9 +548,7 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let x = f64::consts::FRAC_PI_2;
+    /// let x = std::f64::consts::FRAC_PI_2;
     ///
     /// let abs_difference = (x.sin() - 1.0).abs();
     ///
@@ -577,9 +566,7 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let x = 2.0 * f64::consts::PI;
+    /// let x = 2.0 * std::f64::consts::PI;
     ///
     /// let abs_difference = (x.cos() - 1.0).abs();
     ///
@@ -597,9 +584,7 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let x = f64::consts::FRAC_PI_4;
+    /// let x = std::f64::consts::FRAC_PI_4;
     /// let abs_difference = (x.tan() - 1.0).abs();
     ///
     /// assert!(abs_difference < 1e-14);
@@ -618,12 +603,10 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let f = f64::consts::FRAC_PI_2;
+    /// let f = std::f64::consts::FRAC_PI_2;
     ///
     /// // asin(sin(pi/2))
-    /// let abs_difference = (f.sin().asin() - f64::consts::FRAC_PI_2).abs();
+    /// let abs_difference = (f.sin().asin() - std::f64::consts::FRAC_PI_2).abs();
     ///
     /// assert!(abs_difference < 1e-10);
     /// ```
@@ -641,12 +624,10 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let f = f64::consts::FRAC_PI_4;
+    /// let f = std::f64::consts::FRAC_PI_4;
     ///
     /// // acos(cos(pi/4))
-    /// let abs_difference = (f.cos().acos() - f64::consts::FRAC_PI_4).abs();
+    /// let abs_difference = (f.cos().acos() - std::f64::consts::FRAC_PI_4).abs();
     ///
     /// assert!(abs_difference < 1e-10);
     /// ```
@@ -687,8 +668,6 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
     /// // Positive angles measured counter-clockwise
     /// // from positive x axis
     /// // -pi/4 radians (45 deg clockwise)
@@ -699,8 +678,8 @@ impl f64 {
     /// let x2 = -3.0_f64;
     /// let y2 = 3.0_f64;
     ///
-    /// let abs_difference_1 = (y1.atan2(x1) - (-f64::consts::FRAC_PI_4)).abs();
-    /// let abs_difference_2 = (y2.atan2(x2) - (3.0 * f64::consts::FRAC_PI_4)).abs();
+    /// let abs_difference_1 = (y1.atan2(x1) - (-std::f64::consts::FRAC_PI_4)).abs();
+    /// let abs_difference_2 = (y2.atan2(x2) - (3.0 * std::f64::consts::FRAC_PI_4)).abs();
     ///
     /// assert!(abs_difference_1 < 1e-10);
     /// assert!(abs_difference_2 < 1e-10);
@@ -718,9 +697,7 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let x = f64::consts::FRAC_PI_4;
+    /// let x = std::f64::consts::FRAC_PI_4;
     /// let f = x.sin_cos();
     ///
     /// let abs_difference_0 = (f.0 - x.sin()).abs();
@@ -761,9 +738,7 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let x = f64::consts::E - 1.0;
+    /// let x = std::f64::consts::E - 1.0;
     ///
     /// // ln(1 + (e - 1)) == ln(e) == 1
     /// let abs_difference = (x.ln_1p() - 1.0).abs();
@@ -782,9 +757,7 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let e = f64::consts::E;
+    /// let e = std::f64::consts::E;
     /// let x = 1.0_f64;
     ///
     /// let f = x.sinh();
@@ -806,9 +779,7 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let e = f64::consts::E;
+    /// let e = std::f64::consts::E;
     /// let x = 1.0_f64;
     /// let f = x.cosh();
     /// // Solving cosh() at 1 gives this result
@@ -830,9 +801,7 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let e = f64::consts::E;
+    /// let e = std::f64::consts::E;
     /// let x = 1.0_f64;
     ///
     /// let f = x.tanh();
@@ -865,8 +834,8 @@ impl f64 {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn asinh(self) -> f64 {
-        if self == NEG_INFINITY {
-            NEG_INFINITY
+        if self == Self::NEG_INFINITY {
+            Self::NEG_INFINITY
         } else {
             (self + ((self * self) + 1.0).sqrt()).ln().copysign(self)
         }
@@ -888,11 +857,7 @@ impl f64 {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn acosh(self) -> f64 {
-        if self < 1.0 {
-            NAN
-        } else {
-            (self + ((self * self) - 1.0).sqrt()).ln()
-        }
+        if self < 1.0 { Self::NAN } else { (self + ((self * self) - 1.0).sqrt()).ln() }
     }
 
     /// Inverse hyperbolic tangent function.
@@ -900,9 +865,7 @@ impl f64 {
     /// # Examples
     ///
     /// ```
-    /// use std::f64;
-    ///
-    /// let e = f64::consts::E;
+    /// let e = std::f64::consts::E;
     /// let f = e.tanh().atanh();
     ///
     /// let abs_difference = (f - e).abs();
@@ -935,7 +898,7 @@ impl f64 {
     /// assert!((-3.0f64).clamp(-2.0, 1.0) == -2.0);
     /// assert!((0.0f64).clamp(-2.0, 1.0) == 0.0);
     /// assert!((2.0f64).clamp(-2.0, 1.0) == 1.0);
-    /// assert!((std::f64::NAN).clamp(-2.0, 1.0).is_nan());
+    /// assert!((f64::NAN).clamp(-2.0, 1.0).is_nan());
     /// ```
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[unstable(feature = "clamp", issue = "44095")]
@@ -943,8 +906,12 @@ impl f64 {
     pub fn clamp(self, min: f64, max: f64) -> f64 {
         assert!(min <= max);
         let mut x = self;
-        if x < min { x = min; }
-        if x > max { x = max; }
+        if x < min {
+            x = min;
+        }
+        if x > max {
+            x = max;
+        }
         x
     }
 
@@ -952,23 +919,23 @@ impl f64 {
     // because of their non-standard behavior (e.g., log(-n) returns -Inf instead
     // of expected NaN).
     fn log_wrapper<F: Fn(f64) -> f64>(self, log_fn: F) -> f64 {
-        if !cfg!(target_os = "solaris") {
+        if !cfg!(any(target_os = "solaris", target_os = "illumos")) {
             log_fn(self)
         } else {
             if self.is_finite() {
                 if self > 0.0 {
                     log_fn(self)
                 } else if self == 0.0 {
-                    NEG_INFINITY // log(0) = -Inf
+                    Self::NEG_INFINITY // log(0) = -Inf
                 } else {
-                    NAN // log(-n) = NaN
+                    Self::NAN // log(-n) = NaN
                 }
             } else if self.is_nan() {
                 self // log(NaN) = NaN
             } else if self > 0.0 {
                 self // log(Inf) = Inf
             } else {
-                NAN // log(-Inf) = NaN
+                Self::NAN // log(-Inf) = NaN
             }
         }
     }
@@ -978,8 +945,8 @@ impl f64 {
 mod tests {
     use crate::f64;
     use crate::f64::*;
-    use crate::num::*;
     use crate::num::FpCategory as Fp;
+    use crate::num::*;
 
     #[test]
     fn test_num_f64() {

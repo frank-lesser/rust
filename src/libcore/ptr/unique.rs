@@ -1,9 +1,8 @@
 use crate::convert::From;
-use crate::ops::{CoerceUnsized, DispatchFromDyn};
 use crate::fmt;
 use crate::marker::{PhantomData, Unsize};
 use crate::mem;
-use crate::ptr::NonNull;
+use crate::ops::{CoerceUnsized, DispatchFromDyn};
 
 // ignore-tidy-undocumented-unsafe
 
@@ -27,9 +26,12 @@ use crate::ptr::NonNull;
 ///
 /// Unlike `*mut T`, `Unique<T>` is covariant over `T`. This should always be correct
 /// for any type which upholds Unique's aliasing requirements.
-#[unstable(feature = "ptr_internals", issue = "0",
-           reason = "use `NonNull` instead and consider `PhantomData<T>` \
-                     (if you also use `#[may_dangle]`), `Send`, and/or `Sync`")]
+#[unstable(
+    feature = "ptr_internals",
+    issue = "none",
+    reason = "use `NonNull` instead and consider `PhantomData<T>` \
+              (if you also use `#[may_dangle]`), `Send`, and/or `Sync`"
+)]
 #[doc(hidden)]
 #[repr(transparent)]
 #[rustc_layout_scalar_valid_range_start(1)]
@@ -47,17 +49,17 @@ pub struct Unique<T: ?Sized> {
 /// reference is unaliased. Note that this aliasing invariant is
 /// unenforced by the type system; the abstraction using the
 /// `Unique` must enforce it.
-#[unstable(feature = "ptr_internals", issue = "0")]
-unsafe impl<T: Send + ?Sized> Send for Unique<T> { }
+#[unstable(feature = "ptr_internals", issue = "none")]
+unsafe impl<T: Send + ?Sized> Send for Unique<T> {}
 
 /// `Unique` pointers are `Sync` if `T` is `Sync` because the data they
 /// reference is unaliased. Note that this aliasing invariant is
 /// unenforced by the type system; the abstraction using the
 /// `Unique` must enforce it.
-#[unstable(feature = "ptr_internals", issue = "0")]
-unsafe impl<T: Sync + ?Sized> Sync for Unique<T> { }
+#[unstable(feature = "ptr_internals", issue = "none")]
+unsafe impl<T: Sync + ?Sized> Sync for Unique<T> {}
 
-#[unstable(feature = "ptr_internals", issue = "0")]
+#[unstable(feature = "ptr_internals", issue = "none")]
 impl<T: Sized> Unique<T> {
     /// Creates a new `Unique` that is dangling, but well-aligned.
     ///
@@ -68,16 +70,15 @@ impl<T: Sized> Unique<T> {
     /// a `T`, which means this must not be used as a "not yet initialized"
     /// sentinel value. Types that lazily allocate must track initialization by
     /// some other means.
-    // FIXME: rename to dangling() to match NonNull?
     #[inline]
-    pub const fn empty() -> Self {
-        unsafe {
-            Unique::new_unchecked(mem::align_of::<T>() as *mut T)
-        }
+    pub const fn dangling() -> Self {
+        // SAFETY: mem::align_of() returns a valid, non-null pointer. The
+        // conditions to call new_unchecked() are thus respected.
+        unsafe { Unique::new_unchecked(mem::align_of::<T>() as *mut T) }
     }
 }
 
-#[unstable(feature = "ptr_internals", issue = "0")]
+#[unstable(feature = "ptr_internals", issue = "none")]
 impl<T: ?Sized> Unique<T> {
     /// Creates a new `Unique`.
     ///
@@ -93,6 +94,7 @@ impl<T: ?Sized> Unique<T> {
     #[inline]
     pub fn new(ptr: *mut T) -> Option<Self> {
         if !ptr.is_null() {
+            // SAFETY: The pointer has already been checked and is not null.
             Some(unsafe { Unique { pointer: ptr as _, _marker: PhantomData } })
         } else {
             None
@@ -128,13 +130,14 @@ impl<T: ?Sized> Unique<T> {
     /// Casts to a pointer of another type.
     #[inline]
     pub const fn cast<U>(self) -> Unique<U> {
-        unsafe {
-            Unique::new_unchecked(self.as_ptr() as *mut U)
-        }
+        // SAFETY: Unique::new_unchecked() creates a new unique and needs
+        // the given pointer to not be null.
+        // Since we are passing self as a pointer, it cannot be null.
+        unsafe { Unique::new_unchecked(self.as_ptr() as *mut U) }
     }
 }
 
-#[unstable(feature = "ptr_internals", issue = "0")]
+#[unstable(feature = "ptr_internals", issue = "none")]
 impl<T: ?Sized> Clone for Unique<T> {
     #[inline]
     fn clone(&self) -> Self {
@@ -142,49 +145,34 @@ impl<T: ?Sized> Clone for Unique<T> {
     }
 }
 
-#[unstable(feature = "ptr_internals", issue = "0")]
-impl<T: ?Sized> Copy for Unique<T> { }
+#[unstable(feature = "ptr_internals", issue = "none")]
+impl<T: ?Sized> Copy for Unique<T> {}
 
-#[unstable(feature = "ptr_internals", issue = "0")]
-impl<T: ?Sized, U: ?Sized> CoerceUnsized<Unique<U>> for Unique<T> where T: Unsize<U> { }
+#[unstable(feature = "ptr_internals", issue = "none")]
+impl<T: ?Sized, U: ?Sized> CoerceUnsized<Unique<U>> for Unique<T> where T: Unsize<U> {}
 
-#[unstable(feature = "ptr_internals", issue = "0")]
-impl<T: ?Sized, U: ?Sized> DispatchFromDyn<Unique<U>> for Unique<T> where T: Unsize<U> { }
+#[unstable(feature = "ptr_internals", issue = "none")]
+impl<T: ?Sized, U: ?Sized> DispatchFromDyn<Unique<U>> for Unique<T> where T: Unsize<U> {}
 
-#[unstable(feature = "ptr_internals", issue = "0")]
+#[unstable(feature = "ptr_internals", issue = "none")]
 impl<T: ?Sized> fmt::Debug for Unique<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Pointer::fmt(&self.as_ptr(), f)
     }
 }
 
-#[unstable(feature = "ptr_internals", issue = "0")]
+#[unstable(feature = "ptr_internals", issue = "none")]
 impl<T: ?Sized> fmt::Pointer for Unique<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Pointer::fmt(&self.as_ptr(), f)
     }
 }
 
-#[unstable(feature = "ptr_internals", issue = "0")]
+#[unstable(feature = "ptr_internals", issue = "none")]
 impl<T: ?Sized> From<&mut T> for Unique<T> {
     #[inline]
     fn from(reference: &mut T) -> Self {
+        // SAFETY: A mutable reference cannot be null
         unsafe { Unique { pointer: reference as *mut T, _marker: PhantomData } }
-    }
-}
-
-#[unstable(feature = "ptr_internals", issue = "0")]
-impl<T: ?Sized> From<&T> for Unique<T> {
-    #[inline]
-    fn from(reference: &T) -> Self {
-        unsafe { Unique { pointer: reference as *const T, _marker: PhantomData } }
-    }
-}
-
-#[unstable(feature = "ptr_internals", issue = "0")]
-impl<T: ?Sized> From<NonNull<T>> for Unique<T> {
-    #[inline]
-    fn from(p: NonNull<T>) -> Self {
-        unsafe { Unique::new_unchecked(p.as_ptr()) }
     }
 }

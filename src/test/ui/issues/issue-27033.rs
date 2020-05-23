@@ -1,4 +1,3 @@
-// ignore-x86 FIXME: missing sysroot spans (#53081)
 fn main() {
     match Some(1) {
         None @ _ => {} //~ ERROR match bindings cannot shadow unit variants

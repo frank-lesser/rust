@@ -1,9 +1,9 @@
-use rustc::ty::outlives::Component;
-use rustc::ty::subst::{GenericArg, GenericArgKind};
-use rustc::ty::{self, Region, RegionKind, Ty, TyCtxt};
+use rustc_middle::ty::outlives::Component;
+use rustc_middle::ty::subst::{GenericArg, GenericArgKind};
+use rustc_middle::ty::{self, Region, RegionKind, Ty, TyCtxt};
+use rustc_span::Span;
 use smallvec::smallvec;
 use std::collections::BTreeMap;
-use syntax_pos::Span;
 
 /// Tracks the `T: 'a` or `'a: 'a` predicates that we have inferred
 /// must be added to the struct header.
@@ -122,8 +122,7 @@ pub fn insert_outlives_predicate<'tcx>(
             if !is_free_region(tcx, r) {
                 return;
             }
-            required_predicates.entry(ty::OutlivesPredicate(kind, outlived_region))
-                .or_insert(span);
+            required_predicates.entry(ty::OutlivesPredicate(kind, outlived_region)).or_insert(span);
         }
 
         GenericArgKind::Const(_) => {
@@ -151,11 +150,7 @@ fn is_free_region(tcx: TyCtxt<'_>, region: Region<'_>) -> bool {
         //     struct Foo<'a, T> {
         //         field: &'static T, // this would generate a ReStatic
         //     }
-        RegionKind::ReStatic => {
-            tcx.sess
-               .features_untracked()
-               .infer_static_outlives_requirements
-        }
+        RegionKind::ReStatic => tcx.sess.features_untracked().infer_static_outlives_requirements,
 
         // Late-bound regions can appear in `fn` types:
         //
@@ -171,11 +166,10 @@ fn is_free_region(tcx: TyCtxt<'_>, region: Region<'_>) -> bool {
         //
         //     struct Bar<T>(<Self as Foo>::Type) where Self: ;
         //     struct Baz<'a>(&'a Self) where Self: ;
-        RegionKind::ReEmpty => false,
+        RegionKind::ReEmpty(_) => false,
 
         // These regions don't appear in types from type declarations:
         RegionKind::ReErased
-        | RegionKind::ReClosureBound(..)
         | RegionKind::ReScope(..)
         | RegionKind::ReVar(..)
         | RegionKind::RePlaceholder(..)

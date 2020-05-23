@@ -7,20 +7,22 @@
 //!
 //! The `CleanFakeReadsAndBorrows` "pass" is actually implemented as two
 //! traversals (aka visits) of the input MIR. The first traversal,
-//! [`DeleteAndRecordFakeReads`], deletes the fake reads and finds the
-//! temporaries read by [`ForMatchGuard`] reads, and [`DeleteFakeBorrows`]
+//! `DeleteAndRecordFakeReads`, deletes the fake reads and finds the
+//! temporaries read by [`ForMatchGuard`] reads, and `DeleteFakeBorrows`
 //! deletes the initialization of those temporaries.
 //!
-//! [`AscribeUserType`]: rustc::mir::StatementKind::AscribeUserType
-//! [`Shallow`]: rustc::mir::BorrowKind::Shallow
-//! [`FakeRead`]: rustc::mir::StatementKind::FakeRead
-//! [`Nop`]: rustc::mir::StatementKind::Nop
+//! [`AscribeUserType`]: rustc_middle::mir::StatementKind::AscribeUserType
+//! [`Shallow`]: rustc_middle::mir::BorrowKind::Shallow
+//! [`FakeRead`]: rustc_middle::mir::StatementKind::FakeRead
+//! [`Assign`]: rustc_middle::mir::StatementKind::Assign
+//! [`ForMatchGuard`]: rustc_middle::mir::FakeReadCause::ForMatchGuard
+//! [`Nop`]: rustc_middle::mir::StatementKind::Nop
 
-use rustc::mir::{BorrowKind, Rvalue, Location, Body};
-use rustc::mir::{Statement, StatementKind};
-use rustc::mir::visit::MutVisitor;
-use rustc::ty::TyCtxt;
 use crate::transform::{MirPass, MirSource};
+use rustc_middle::mir::visit::MutVisitor;
+use rustc_middle::mir::{Body, BorrowKind, Location, Rvalue};
+use rustc_middle::mir::{Statement, StatementKind};
+use rustc_middle::ty::TyCtxt;
 
 pub struct CleanupNonCodegenStatements;
 
@@ -32,6 +34,7 @@ impl<'tcx> MirPass<'tcx> for CleanupNonCodegenStatements {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, _source: MirSource<'tcx>, body: &mut Body<'tcx>) {
         let mut delete = DeleteNonCodegenStatements { tcx };
         delete.visit_body(body);
+        body.user_type_annotations.raw.clear();
     }
 }
 
@@ -40,12 +43,10 @@ impl<'tcx> MutVisitor<'tcx> for DeleteNonCodegenStatements<'tcx> {
         self.tcx
     }
 
-    fn visit_statement(&mut self,
-                       statement: &mut Statement<'tcx>,
-                       location: Location) {
+    fn visit_statement(&mut self, statement: &mut Statement<'tcx>, location: Location) {
         match statement.kind {
             StatementKind::AscribeUserType(..)
-            | StatementKind::Assign(box(_, Rvalue::Ref(_, BorrowKind::Shallow, _)))
+            | StatementKind::Assign(box (_, Rvalue::Ref(_, BorrowKind::Shallow, _)))
             | StatementKind::FakeRead(..) => statement.make_nop(),
             _ => (),
         }

@@ -1,7 +1,7 @@
 // This defines the amd64 target for the Linux Kernel. See the linux-kernel-base module for
 // generic Linux kernel options.
 
-use crate::spec::{LinkerFlavor, Target, TargetResult};
+use crate::spec::{CodeModel, LinkerFlavor, Target, TargetResult};
 
 pub fn target() -> TargetResult {
     let mut base = super::linux_kernel_base::opts();
@@ -10,7 +10,7 @@ pub fn target() -> TargetResult {
     base.features =
         "-mmx,-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-3dnow,-3dnowa,-avx,-avx2,+soft-float"
             .to_string();
-    base.code_model = Some("kernel".to_string());
+    base.code_model = Some(CodeModel::Kernel);
     base.pre_link_args.get_mut(&LinkerFlavor::Gcc).unwrap().push("-m64".to_string());
 
     Ok(Target {
@@ -19,7 +19,8 @@ pub fn target() -> TargetResult {
         target_endian: "little".to_string(),
         target_pointer_width: "64".to_string(),
         target_c_int_width: "32".to_string(),
-        data_layout: "e-m:e-i64:64-f80:128-n8:16:32:64-S128".to_string(),
+        data_layout: "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+            .to_string(),
         target_os: "none".to_string(),
         target_env: "gnu".to_string(),
         target_vendor: "unknown".to_string(),

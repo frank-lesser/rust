@@ -4,9 +4,9 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let target = env::var("TARGET").expect("TARGET was not set");
 
-    if cfg!(feature = "llvm-libunwind") &&
-        ((target.contains("linux") && !target.contains("musl")) ||
-         target.contains("fuchsia")) {
+    if cfg!(feature = "llvm-libunwind")
+        && ((target.contains("linux") && !target.contains("musl")) || target.contains("fuchsia"))
+    {
         // Build the unwinding from libunwind C/C++ source code.
         llvm_libunwind::compile();
     } else if target.contains("linux") {
@@ -30,11 +30,18 @@ fn main() {
         }
     } else if target.contains("solaris") {
         println!("cargo:rustc-link-lib=gcc_s");
+    } else if target.contains("illumos") {
+        println!("cargo:rustc-link-lib=gcc_s");
     } else if target.contains("dragonfly") {
         println!("cargo:rustc-link-lib=gcc_pic");
     } else if target.contains("pc-windows-gnu") {
-        println!("cargo:rustc-link-lib=static-nobundle=gcc_eh");
-        println!("cargo:rustc-link-lib=static-nobundle=pthread");
+        // This is handled in the target spec with late_link_args_[static|dynamic]
+
+        // cfg!(bootstrap) doesn't work in build scripts
+        if env::var("RUSTC_STAGE").ok() == Some("0".to_string()) {
+            println!("cargo:rustc-link-lib=static-nobundle=gcc_eh");
+            println!("cargo:rustc-link-lib=static-nobundle=pthread");
+        }
     } else if target.contains("uwp-windows-gnu") {
         println!("cargo:rustc-link-lib=unwind");
     } else if target.contains("fuchsia") {
@@ -82,6 +89,7 @@ mod llvm_libunwind {
             cfg.flag("-fno-rtti");
             cfg.flag("-fstrict-aliasing");
             cfg.flag("-funwind-tables");
+            cfg.flag("-fvisibility=hidden");
         }
 
         let mut unwind_sources = vec![

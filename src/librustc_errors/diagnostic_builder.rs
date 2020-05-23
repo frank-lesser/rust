@@ -1,11 +1,11 @@
+use crate::{Applicability, Handler, Level, StashKey};
 use crate::{Diagnostic, DiagnosticId, DiagnosticStyledString};
-use crate::{Applicability, Level, Handler, StashKey};
 
+use log::debug;
+use rustc_span::{MultiSpan, Span};
 use std::fmt::{self, Debug};
 use std::ops::{Deref, DerefMut};
 use std::thread::panicking;
-use syntax_pos::{MultiSpan, Span};
-use log::debug;
 
 /// Used for emitting structured error messages and other diagnostic information.
 ///
@@ -107,9 +107,9 @@ impl<'a> DiagnosticBuilder<'a> {
     /// See `emit` and `delay_as_bug` for details.
     pub fn emit_unless(&mut self, delay: bool) {
         if delay {
-            self.delay_as_bug()
+            self.delay_as_bug();
         } else {
-            self.emit()
+            self.emit();
         }
     }
 
@@ -127,8 +127,8 @@ impl<'a> DiagnosticBuilder<'a> {
     /// Converts the builder to a `Diagnostic` for later emission,
     /// unless handler has disabled such buffering.
     pub fn into_diagnostic(mut self) -> Option<(Diagnostic, &'a Handler)> {
-        if self.0.handler.flags.dont_buffer_diagnostics ||
-            self.0.handler.flags.treat_err_as_bug.is_some()
+        if self.0.handler.flags.dont_buffer_diagnostics
+            || self.0.handler.flags.treat_err_as_bug.is_some()
         {
             self.emit();
             return None;
@@ -136,12 +136,11 @@ impl<'a> DiagnosticBuilder<'a> {
 
         let handler = self.0.handler;
 
-        // We need to use `ptr::read` because `DiagnosticBuilder` implements `Drop`.
-        let diagnostic;
-        unsafe {
-            diagnostic = std::ptr::read(&self.0.diagnostic);
-            std::mem::forget(self);
-        };
+        // We must use `Level::Cancelled` for `dummy` to avoid an ICE about an
+        // unused diagnostic.
+        let dummy = Diagnostic::new(Level::Cancelled, "");
+        let diagnostic = std::mem::replace(&mut self.0.diagnostic, dummy);
+
         // Logging here is useful to help track down where in logs an error was
         // actually emitted.
         debug!("buffer: diagnostic={:?}", diagnostic);
@@ -163,7 +162,7 @@ impl<'a> DiagnosticBuilder<'a> {
         message: &str,
         span: Option<S>,
     ) -> &mut Self {
-        let span = span.map(|s| s.into()).unwrap_or_else(|| MultiSpan::new());
+        let span = span.map(|s| s.into()).unwrap_or_else(MultiSpan::new);
         self.0.diagnostic.sub(level, message, span, None);
         self
     }
@@ -190,42 +189,63 @@ impl<'a> DiagnosticBuilder<'a> {
     /// all, and you just supplied a `Span` to create the diagnostic,
     /// then the snippet will just include that `Span`, which is
     /// called the primary span.
-    pub fn span_label<T: Into<String>>(&mut self, span: Span, label: T) -> &mut Self {
+    pub fn span_label(&mut self, span: Span, label: impl Into<String>) -> &mut Self {
         self.0.diagnostic.span_label(span, label);
         self
     }
 
-    forward!(pub fn note_expected_found(&mut self,
-                                        label: &dyn fmt::Display,
-                                        expected: DiagnosticStyledString,
-                                        found: DiagnosticStyledString,
-                                        ) -> &mut Self);
+    /// Labels all the given spans with the provided label.
+    /// See `span_label` for more information.
+    pub fn span_labels(
+        &mut self,
+        spans: impl IntoIterator<Item = Span>,
+        label: impl AsRef<str>,
+    ) -> &mut Self {
+        let label = label.as_ref();
+        for span in spans {
+            self.0.diagnostic.span_label(span, label);
+        }
+        self
+    }
 
-    forward!(pub fn note_expected_found_extra(&mut self,
-                                              label: &dyn fmt::Display,
-                                              expected: DiagnosticStyledString,
-                                              found: DiagnosticStyledString,
-                                              expected_extra: &dyn fmt::Display,
-                                              found_extra: &dyn fmt::Display,
-                                              ) -> &mut Self);
+    forward!(pub fn note_expected_found(
+        &mut self,
+        expected_label: &dyn fmt::Display,
+        expected: DiagnosticStyledString,
+        found_label: &dyn fmt::Display,
+        found: DiagnosticStyledString,
+    ) -> &mut Self);
 
-    forward!(pub fn note_unsuccessfull_coercion(&mut self,
-                                                expected: DiagnosticStyledString,
-                                                found: DiagnosticStyledString,
-                                                ) -> &mut Self);
+    forward!(pub fn note_expected_found_extra(
+        &mut self,
+        expected_label: &dyn fmt::Display,
+        expected: DiagnosticStyledString,
+        found_label: &dyn fmt::Display,
+        found: DiagnosticStyledString,
+        expected_extra: &dyn fmt::Display,
+        found_extra: &dyn fmt::Display,
+    ) -> &mut Self);
+
+    forward!(pub fn note_unsuccessfull_coercion(
+        &mut self,
+        expected: DiagnosticStyledString,
+        found: DiagnosticStyledString,
+    ) -> &mut Self);
 
     forward!(pub fn note(&mut self, msg: &str) -> &mut Self);
-    forward!(pub fn span_note<S: Into<MultiSpan>>(&mut self,
-                                                  sp: S,
-                                                  msg: &str,
-                                                  ) -> &mut Self);
+    forward!(pub fn span_note<S: Into<MultiSpan>>(
+        &mut self,
+        sp: S,
+        msg: &str,
+    ) -> &mut Self);
     forward!(pub fn warn(&mut self, msg: &str) -> &mut Self);
     forward!(pub fn span_warn<S: Into<MultiSpan>>(&mut self, sp: S, msg: &str) -> &mut Self);
     forward!(pub fn help(&mut self, msg: &str) -> &mut Self);
-    forward!(pub fn span_help<S: Into<MultiSpan>>(&mut self,
-                                                  sp: S,
-                                                  msg: &str,
-                                                  ) -> &mut Self);
+    forward!(pub fn span_help<S: Into<MultiSpan>>(
+        &mut self,
+        sp: S,
+        msg: &str,
+    ) -> &mut Self);
 
     pub fn multipart_suggestion(
         &mut self,
@@ -234,13 +254,9 @@ impl<'a> DiagnosticBuilder<'a> {
         applicability: Applicability,
     ) -> &mut Self {
         if !self.0.allow_suggestions {
-            return self
+            return self;
         }
-        self.0.diagnostic.multipart_suggestion(
-            msg,
-            suggestion,
-            applicability,
-        );
+        self.0.diagnostic.multipart_suggestion(msg, suggestion, applicability);
         self
     }
 
@@ -251,13 +267,9 @@ impl<'a> DiagnosticBuilder<'a> {
         applicability: Applicability,
     ) -> &mut Self {
         if !self.0.allow_suggestions {
-            return self
+            return self;
         }
-        self.0.diagnostic.tool_only_multipart_suggestion(
-            msg,
-            suggestion,
-            applicability,
-        );
+        self.0.diagnostic.tool_only_multipart_suggestion(msg, suggestion, applicability);
         self
     }
 
@@ -269,14 +281,9 @@ impl<'a> DiagnosticBuilder<'a> {
         applicability: Applicability,
     ) -> &mut Self {
         if !self.0.allow_suggestions {
-            return self
+            return self;
         }
-        self.0.diagnostic.span_suggestion(
-            sp,
-            msg,
-            suggestion,
-            applicability,
-        );
+        self.0.diagnostic.span_suggestion(sp, msg, suggestion, applicability);
         self
     }
 
@@ -288,14 +295,9 @@ impl<'a> DiagnosticBuilder<'a> {
         applicability: Applicability,
     ) -> &mut Self {
         if !self.0.allow_suggestions {
-            return self
+            return self;
         }
-        self.0.diagnostic.span_suggestions(
-            sp,
-            msg,
-            suggestions,
-            applicability,
-        );
+        self.0.diagnostic.span_suggestions(sp, msg, suggestions, applicability);
         self
     }
 
@@ -307,14 +309,23 @@ impl<'a> DiagnosticBuilder<'a> {
         applicability: Applicability,
     ) -> &mut Self {
         if !self.0.allow_suggestions {
-            return self
+            return self;
         }
-        self.0.diagnostic.span_suggestion_short(
-            sp,
-            msg,
-            suggestion,
-            applicability,
-        );
+        self.0.diagnostic.span_suggestion_short(sp, msg, suggestion, applicability);
+        self
+    }
+
+    pub fn span_suggestion_verbose(
+        &mut self,
+        sp: Span,
+        msg: &str,
+        suggestion: String,
+        applicability: Applicability,
+    ) -> &mut Self {
+        if !self.0.allow_suggestions {
+            return self;
+        }
+        self.0.diagnostic.span_suggestion_verbose(sp, msg, suggestion, applicability);
         self
     }
 
@@ -326,14 +337,9 @@ impl<'a> DiagnosticBuilder<'a> {
         applicability: Applicability,
     ) -> &mut Self {
         if !self.0.allow_suggestions {
-            return self
+            return self;
         }
-        self.0.diagnostic.span_suggestion_hidden(
-            sp,
-            msg,
-            suggestion,
-            applicability,
-        );
+        self.0.diagnostic.span_suggestion_hidden(sp, msg, suggestion, applicability);
         self
     }
 
@@ -345,14 +351,9 @@ impl<'a> DiagnosticBuilder<'a> {
         applicability: Applicability,
     ) -> &mut Self {
         if !self.0.allow_suggestions {
-            return self
+            return self;
         }
-        self.0.diagnostic.tool_only_span_suggestion(
-            sp,
-            msg,
-            suggestion,
-            applicability,
-        );
+        self.0.diagnostic.tool_only_span_suggestion(sp, msg, suggestion, applicability);
         self
     }
 
@@ -372,19 +373,20 @@ impl<'a> DiagnosticBuilder<'a> {
 
     /// Convenience function for internal use, clients should use one of the
     /// struct_* methods on Handler.
-    crate fn new_with_code(handler: &'a Handler,
-                         level: Level,
-                         code: Option<DiagnosticId>,
-                         message: &str)
-                         -> DiagnosticBuilder<'a> {
+    crate fn new_with_code(
+        handler: &'a Handler,
+        level: Level,
+        code: Option<DiagnosticId>,
+        message: &str,
+    ) -> DiagnosticBuilder<'a> {
         let diagnostic = Diagnostic::new_with_code(level, code, message);
         DiagnosticBuilder::new_diagnostic(handler, diagnostic)
     }
 
     /// Creates a new `DiagnosticBuilder` with an already constructed
     /// diagnostic.
-    crate fn new_diagnostic(handler: &'a Handler, diagnostic: Diagnostic)
-                         -> DiagnosticBuilder<'a> {
+    crate fn new_diagnostic(handler: &'a Handler, diagnostic: Diagnostic) -> DiagnosticBuilder<'a> {
+        debug!("Created new diagnostic");
         DiagnosticBuilder(Box::new(DiagnosticBuilderInner {
             handler,
             diagnostic,
@@ -414,4 +416,20 @@ impl<'a> Drop for DiagnosticBuilder<'a> {
             panic!();
         }
     }
+}
+
+#[macro_export]
+macro_rules! struct_span_err {
+    ($session:expr, $span:expr, $code:ident, $($message:tt)*) => ({
+        $session.struct_span_err_with_code(
+            $span,
+            &format!($($message)*),
+            $crate::error_code!($code),
+        )
+    })
+}
+
+#[macro_export]
+macro_rules! error_code {
+    ($code:ident) => {{ $crate::DiagnosticId::Error(stringify!($code).to_owned()) }};
 }

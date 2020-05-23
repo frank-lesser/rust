@@ -4,18 +4,18 @@
 use crate::borrow::Cow;
 use crate::ffi::{OsStr, OsString};
 use crate::fmt;
-use crate::str;
 use crate::mem;
 use crate::rc::Rc;
+use crate::str;
 use crate::sync::Arc;
-use crate::sys_common::{FromInner, IntoInner, AsInner};
 use crate::sys_common::bytestring::debug_fmt_bytestring;
+use crate::sys_common::{AsInner, FromInner, IntoInner};
 
 use core::str::lossy::Utf8Lossy;
 
 #[derive(Clone, Hash)]
 pub(crate) struct Buf {
-    pub inner: Vec<u8>
+    pub inner: Vec<u8>,
 }
 
 // FIXME:
@@ -25,7 +25,7 @@ pub(crate) struct Buf {
 // Anyway, `Slice` representation and layout are considered implementation detail, are
 // not documented and must not be relied upon.
 pub(crate) struct Slice {
-    pub inner: [u8]
+    pub inner: [u8],
 }
 
 impl fmt::Debug for Slice {
@@ -64,7 +64,6 @@ impl AsInner<[u8]> for Buf {
     }
 }
 
-
 impl Buf {
     pub fn from_string(s: String) -> Buf {
         Buf { inner: s.into_bytes() }
@@ -72,9 +71,7 @@ impl Buf {
 
     #[inline]
     pub fn with_capacity(capacity: usize) -> Buf {
-        Buf {
-            inner: Vec::with_capacity(capacity)
-        }
+        Buf { inner: Vec::with_capacity(capacity) }
     }
 
     #[inline]
@@ -107,12 +104,24 @@ impl Buf {
         self.inner.shrink_to(min_capacity)
     }
 
+    #[inline]
     pub fn as_slice(&self) -> &Slice {
+        // Safety: Slice just wraps [u8],
+        // and &*self.inner is &[u8], therefore
+        // transmuting &[u8] to &Slice is safe.
         unsafe { mem::transmute(&*self.inner) }
     }
 
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut Slice {
+        // Safety: Slice just wraps [u8],
+        // and &mut *self.inner is &mut [u8], therefore
+        // transmuting &mut [u8] to &mut Slice is safe.
+        unsafe { mem::transmute(&mut *self.inner) }
+    }
+
     pub fn into_string(self) -> Result<String, Buf> {
-        String::from_utf8(self.inner).map_err(|p| Buf { inner: p.into_bytes() } )
+        String::from_utf8(self.inner).map_err(|p| Buf { inner: p.into_bytes() })
     }
 
     pub fn push_slice(&mut self, s: &Slice) {
@@ -142,10 +151,12 @@ impl Buf {
 }
 
 impl Slice {
+    #[inline]
     fn from_u8_slice(s: &[u8]) -> &Slice {
         unsafe { mem::transmute(s) }
     }
 
+    #[inline]
     pub fn from_str(s: &str) -> &Slice {
         Slice::from_u8_slice(s.as_bytes())
     }
@@ -160,6 +171,10 @@ impl Slice {
 
     pub fn to_owned(&self) -> Buf {
         Buf { inner: self.inner.to_vec() }
+    }
+
+    pub fn clone_into(&self, buf: &mut Buf) {
+        self.inner.clone_into(&mut buf.inner)
     }
 
     #[inline]
@@ -183,6 +198,36 @@ impl Slice {
     pub fn into_rc(&self) -> Rc<Slice> {
         let rc: Rc<[u8]> = Rc::from(&self.inner);
         unsafe { Rc::from_raw(Rc::into_raw(rc) as *const Slice) }
+    }
+
+    #[inline]
+    pub fn make_ascii_lowercase(&mut self) {
+        self.inner.make_ascii_lowercase()
+    }
+
+    #[inline]
+    pub fn make_ascii_uppercase(&mut self) {
+        self.inner.make_ascii_uppercase()
+    }
+
+    #[inline]
+    pub fn to_ascii_lowercase(&self) -> Buf {
+        Buf { inner: self.inner.to_ascii_lowercase() }
+    }
+
+    #[inline]
+    pub fn to_ascii_uppercase(&self) -> Buf {
+        Buf { inner: self.inner.to_ascii_uppercase() }
+    }
+
+    #[inline]
+    pub fn is_ascii(&self) -> bool {
+        self.inner.is_ascii()
+    }
+
+    #[inline]
+    pub fn eq_ignore_ascii_case(&self, other: &Self) -> bool {
+        self.inner.eq_ignore_ascii_case(&other.inner)
     }
 }
 

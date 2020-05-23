@@ -1,7 +1,7 @@
-use rustc::mir::*;
-use rustc::ty::TyCtxt;
 use crate::transform::{MirPass, MirSource};
 use crate::util::expand_aggregate;
+use rustc_middle::mir::*;
+use rustc_middle::ty::TyCtxt;
 
 pub struct Deaggregator;
 
@@ -12,7 +12,7 @@ impl<'tcx> MirPass<'tcx> for Deaggregator {
         for bb in basic_blocks {
             bb.expand_statements(|stmt| {
                 // FIXME(eddyb) don't match twice on `stmt.kind` (post-NLL).
-                if let StatementKind::Assign(box(_, ref rhs)) = stmt.kind {
+                if let StatementKind::Assign(box (_, ref rhs)) = stmt.kind {
                     if let Rvalue::Aggregate(ref kind, _) = *rhs {
                         // FIXME(#48193) Deaggregate arrays when it's cheaper to do so.
                         if let AggregateKind::Array(_) = **kind {
@@ -28,13 +28,11 @@ impl<'tcx> MirPass<'tcx> for Deaggregator {
                 let stmt = stmt.replace_nop();
                 let source_info = stmt.source_info;
                 let (lhs, kind, operands) = match stmt.kind {
-                    StatementKind::Assign(box(lhs, rvalue)) => {
-                        match rvalue {
-                            Rvalue::Aggregate(kind, operands) => (lhs, kind, operands),
-                            _ => bug!()
-                        }
-                    }
-                    _ => bug!()
+                    StatementKind::Assign(box (lhs, rvalue)) => match rvalue {
+                        Rvalue::Aggregate(kind, operands) => (lhs, kind, operands),
+                        _ => bug!(),
+                    },
+                    _ => bug!(),
                 };
 
                 Some(expand_aggregate(

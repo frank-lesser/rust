@@ -12,8 +12,18 @@ IFS=$'\n\t'
 source "$(cd "$(dirname "$0")" && pwd)/../shared.sh"
 
 if isWindows; then
-    choco install msys2 --params="/InstallDir:${SYSTEM_WORKFOLDER}/msys2 /NoPath" -y --no-progress
-    mkdir -p "${SYSTEM_WORKFOLDER}/msys2/home/${USERNAME}"
+    # Pre-followed the api/v2 URL to the CDN since the API can be a bit flakey
+    curl -sSL https://packages.chocolatey.org/msys2.20190524.0.0.20191030.nupkg > \
+        msys2.nupkg
+    curl -sSL https://packages.chocolatey.org/chocolatey-core.extension.1.3.5.1.nupkg > \
+        chocolatey-core.extension.nupkg
+    # FIXME(mati865): remove `/NoUpdate` once chocolatey updates MSYS2
+    choco install -s . msys2 \
+        --params="/InstallDir:$(ciCheckoutPath)/msys2 /NoPath /NoUpdate" -y --no-progress
+    rm msys2.nupkg chocolatey-core.extension.nupkg
+    mkdir -p "$(ciCheckoutPath)/msys2/home/${USERNAME}"
+    ciCommandAddPath "$(ciCheckoutPath)/msys2/usr/bin"
 
-    ciCommandAddPath "${SYSTEM_WORKFOLDER}/msys2/usr/bin"
+    echo "switching shell to use our own bash"
+    ciCommandSetEnv CI_OVERRIDE_SHELL "$(ciCheckoutPath)/msys2/usr/bin/bash.exe"
 fi

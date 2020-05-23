@@ -4,7 +4,7 @@ error: variant is never constructed: `Variant2`
 LL |     Variant2
    |     ^^^^^^^^
    |
-note: lint level defined here
+note: the lint level is defined here
   --> $DIR/lint-dead-code-5.rs:2:9
    |
 LL | #![deny(dead_code)]
@@ -23,7 +23,7 @@ LL |     Variant6(isize),
    |     ^^^^^^^^^^^^^^^
 
 error: enum is never used: `Enum3`
-  --> $DIR/lint-dead-code-5.rs:18:6
+  --> $DIR/lint-dead-code-5.rs:35:6
    |
 LL | enum Enum3 {
    |      ^^^^^

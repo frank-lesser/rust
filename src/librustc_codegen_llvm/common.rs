@@ -2,24 +2,24 @@
 
 //! Code that is useful in various codegen modules.
 
-use crate::llvm::{self, True, False, Bool, BasicBlock, OperandBundleDef, ConstantInt};
-use crate::consts;
+use crate::consts::{self, const_alloc_to_llvm};
+pub use crate::context::CodegenCx;
+use crate::llvm::{self, BasicBlock, Bool, ConstantInt, False, OperandBundleDef, True};
 use crate::type_::Type;
 use crate::type_of::LayoutLlvmExt;
 use crate::value::Value;
-use rustc_codegen_ssa::traits::*;
 
-use crate::consts::const_alloc_to_llvm;
-use rustc::ty::layout::{HasDataLayout, LayoutOf, self, TyLayout, Size};
-use rustc::mir::interpret::{Scalar, GlobalAlloc, Allocation};
+use rustc_ast::ast::Mutability;
 use rustc_codegen_ssa::mir::place::PlaceRef;
+use rustc_codegen_ssa::traits::*;
+use rustc_middle::bug;
+use rustc_middle::mir::interpret::{Allocation, GlobalAlloc, Scalar};
+use rustc_middle::ty::layout::TyAndLayout;
+use rustc_span::symbol::Symbol;
+use rustc_target::abi::{self, HasDataLayout, LayoutOf, Pointer, Size};
 
-use libc::{c_uint, c_char};
-
-use syntax::symbol::Symbol;
-use syntax::ast::Mutability;
-
-pub use crate::context::CodegenCx;
+use libc::{c_char, c_uint};
+use log::debug;
 
 /*
 * A note on nomenclature of linking: "extern", "foreign", and "upcall".
@@ -68,10 +68,7 @@ pub struct Funclet<'ll> {
 
 impl Funclet<'ll> {
     pub fn new(cleanuppad: &'ll Value) -> Self {
-        Funclet {
-            cleanuppad,
-            operand: OperandBundleDef::new("funclet", &[cleanuppad]),
-        }
+        Funclet { cleanuppad, operand: OperandBundleDef::new("funclet", &[cleanuppad]) }
     }
 
     pub fn cleanuppad(&self) -> &'ll Value {
@@ -92,42 +89,37 @@ impl BackendTypes for CodegenCx<'ll, 'tcx> {
     type Funclet = Funclet<'ll>;
 
     type DIScope = &'ll llvm::debuginfo::DIScope;
+    type DIVariable = &'ll llvm::debuginfo::DIVariable;
 }
 
 impl CodegenCx<'ll, 'tcx> {
     pub fn const_array(&self, ty: &'ll Type, elts: &[&'ll Value]) -> &'ll Value {
-        unsafe {
-            return llvm::LLVMConstArray(ty, elts.as_ptr(), elts.len() as c_uint);
-        }
+        unsafe { llvm::LLVMConstArray(ty, elts.as_ptr(), elts.len() as c_uint) }
     }
 
     pub fn const_vector(&self, elts: &[&'ll Value]) -> &'ll Value {
-        unsafe {
-            return llvm::LLVMConstVector(elts.as_ptr(), elts.len() as c_uint);
-        }
+        unsafe { llvm::LLVMConstVector(elts.as_ptr(), elts.len() as c_uint) }
     }
 
     pub fn const_bytes(&self, bytes: &[u8]) -> &'ll Value {
         bytes_in_context(self.llcx, bytes)
     }
 
-    fn const_cstr(
-        &self,
-        s: Symbol,
-        null_terminated: bool,
-    ) -> &'ll Value {
+    fn const_cstr(&self, s: Symbol, null_terminated: bool) -> &'ll Value {
         unsafe {
             if let Some(&llval) = self.const_cstr_cache.borrow().get(&s) {
                 return llval;
             }
 
             let s_str = s.as_str();
-            let sc = llvm::LLVMConstStringInContext(self.llcx,
-                                                    s_str.as_ptr() as *const c_char,
-                                                    s_str.len() as c_uint,
-                                                    !null_terminated as Bool);
+            let sc = llvm::LLVMConstStringInContext(
+                self.llcx,
+                s_str.as_ptr() as *const c_char,
+                s_str.len() as c_uint,
+                !null_terminated as Bool,
+            );
             let sym = self.generate_local_symbol_name("str");
-            let g = self.define_global(&sym[..], self.val_ty(sc)).unwrap_or_else(||{
+            let g = self.define_global(&sym[..], self.val_ty(sc)).unwrap_or_else(|| {
                 bug!("symbol `{}` is already defined", sym);
             });
             llvm::LLVMSetInitializer(g, sc);
@@ -145,8 +137,7 @@ impl CodegenCx<'ll, 'tcx> {
             let us = &[idx as c_uint];
             let r = llvm::LLVMConstExtractValue(v, us.as_ptr(), us.len() as c_uint);
 
-            debug!("const_get_elt(v={:?}, idx={}, r={:?})",
-                   v, idx, r);
+            debug!("const_get_elt(v={:?}, idx={}, r={:?})", v, idx, r);
 
             r
         }
@@ -155,27 +146,19 @@ impl CodegenCx<'ll, 'tcx> {
 
 impl ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     fn const_null(&self, t: &'ll Type) -> &'ll Value {
-        unsafe {
-            llvm::LLVMConstNull(t)
-        }
+        unsafe { llvm::LLVMConstNull(t) }
     }
 
     fn const_undef(&self, t: &'ll Type) -> &'ll Value {
-        unsafe {
-            llvm::LLVMGetUndef(t)
-        }
+        unsafe { llvm::LLVMGetUndef(t) }
     }
 
     fn const_int(&self, t: &'ll Type, i: i64) -> &'ll Value {
-        unsafe {
-            llvm::LLVMConstInt(t, i as u64, True)
-        }
+        unsafe { llvm::LLVMConstInt(t, i as u64, True) }
     }
 
     fn const_uint(&self, t: &'ll Type, i: u64) -> &'ll Value {
-        unsafe {
-            llvm::LLVMConstInt(t, i, False)
-        }
+        unsafe { llvm::LLVMConstInt(t, i, False) }
     }
 
     fn const_uint_big(&self, t: &'ll Type, u: u128) -> &'ll Value {
@@ -205,7 +188,7 @@ impl ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         let bit_size = self.data_layout().pointer_size.bits();
         if bit_size < 64 {
             // make sure it doesn't overflow
-            assert!(i < (1<<bit_size));
+            assert!(i < (1 << bit_size));
         }
 
         self.const_uint(self.isize_ty, i)
@@ -221,85 +204,72 @@ impl ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
 
     fn const_str(&self, s: Symbol) -> (&'ll Value, &'ll Value) {
         let len = s.as_str().len();
-        let cs = consts::ptrcast(self.const_cstr(s, false),
-            self.type_ptr_to(self.layout_of(self.tcx.mk_str()).llvm_type(self)));
+        let cs = consts::ptrcast(
+            self.const_cstr(s, false),
+            self.type_ptr_to(self.layout_of(self.tcx.mk_str()).llvm_type(self)),
+        );
         (cs, self.const_usize(len as u64))
     }
 
-    fn const_struct(
-        &self,
-        elts: &[&'ll Value],
-        packed: bool
-    ) -> &'ll Value {
+    fn const_struct(&self, elts: &[&'ll Value], packed: bool) -> &'ll Value {
         struct_in_context(self.llcx, elts, packed)
     }
 
     fn const_to_opt_uint(&self, v: &'ll Value) -> Option<u64> {
-        try_as_const_integral(v).map(|v| unsafe {
-            llvm::LLVMConstIntGetZExtValue(v)
-        })
+        try_as_const_integral(v).map(|v| unsafe { llvm::LLVMConstIntGetZExtValue(v) })
     }
 
     fn const_to_opt_u128(&self, v: &'ll Value, sign_ext: bool) -> Option<u128> {
         try_as_const_integral(v).and_then(|v| unsafe {
             let (mut lo, mut hi) = (0u64, 0u64);
-            let success = llvm::LLVMRustConstInt128Get(v, sign_ext,
-                                                        &mut hi, &mut lo);
-            if success {
-                Some(hi_lo_to_u128(lo, hi))
-            } else {
-                None
-            }
+            let success = llvm::LLVMRustConstInt128Get(v, sign_ext, &mut hi, &mut lo);
+            success.then_some(hi_lo_to_u128(lo, hi))
         })
     }
 
-    fn scalar_to_backend(
-        &self,
-        cv: Scalar,
-        layout: &layout::Scalar,
-        llty: &'ll Type,
-    ) -> &'ll Value {
+    fn scalar_to_backend(&self, cv: Scalar, layout: &abi::Scalar, llty: &'ll Type) -> &'ll Value {
         let bitsize = if layout.is_bool() { 1 } else { layout.value.size(self).bits() };
         match cv {
             Scalar::Raw { size: 0, .. } => {
                 assert_eq!(0, layout.value.size(self).bytes());
                 self.const_undef(self.type_ix(0))
-            },
+            }
             Scalar::Raw { data, size } => {
                 assert_eq!(size as u64, layout.value.size(self).bytes());
                 let llval = self.const_uint_big(self.type_ix(bitsize), data);
-                if layout.value == layout::Pointer {
+                if layout.value == Pointer {
                     unsafe { llvm::LLVMConstIntToPtr(llval, llty) }
                 } else {
                     self.const_bitcast(llval, llty)
                 }
-            },
+            }
             Scalar::Ptr(ptr) => {
-                let alloc_kind = self.tcx.alloc_map.lock().get(ptr.alloc_id);
-                let base_addr = match alloc_kind {
-                    Some(GlobalAlloc::Memory(alloc)) => {
+                let base_addr = match self.tcx.global_alloc(ptr.alloc_id) {
+                    GlobalAlloc::Memory(alloc) => {
                         let init = const_alloc_to_llvm(self, alloc);
-                        if alloc.mutability == Mutability::Mutable {
-                            self.static_addr_of_mut(init, alloc.align, None)
-                        } else {
-                            self.static_addr_of(init, alloc.align, None)
+                        let value = match alloc.mutability {
+                            Mutability::Mut => self.static_addr_of_mut(init, alloc.align, None),
+                            _ => self.static_addr_of(init, alloc.align, None),
+                        };
+                        if !self.sess().fewer_names() {
+                            llvm::set_value_name(value, format!("{:?}", ptr.alloc_id).as_bytes());
                         }
+                        value
                     }
-                    Some(GlobalAlloc::Function(fn_instance)) => {
-                        self.get_fn_addr(fn_instance)
-                    }
-                    Some(GlobalAlloc::Static(def_id)) => {
+                    GlobalAlloc::Function(fn_instance) => self.get_fn_addr(fn_instance),
+                    GlobalAlloc::Static(def_id) => {
                         assert!(self.tcx.is_static(def_id));
                         self.get_static(def_id)
                     }
-                    None => bug!("missing allocation {:?}", ptr.alloc_id),
                 };
-                let llval = unsafe { llvm::LLVMConstInBoundsGEP(
-                    self.const_bitcast(base_addr, self.type_i8p()),
-                    &self.const_usize(ptr.offset.bytes()),
-                    1,
-                ) };
-                if layout.value != layout::Pointer {
+                let llval = unsafe {
+                    llvm::LLVMConstInBoundsGEP(
+                        self.const_bitcast(base_addr, self.type_i8p()),
+                        &self.const_usize(ptr.offset.bytes()),
+                        1,
+                    )
+                };
+                if layout.value != Pointer {
                     unsafe { llvm::LLVMConstPtrToInt(llval, llty) }
                 } else {
                     self.const_bitcast(llval, llty)
@@ -310,7 +280,7 @@ impl ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
 
     fn from_const_alloc(
         &self,
-        layout: TyLayout<'tcx>,
+        layout: TyAndLayout<'tcx>,
         alloc: &Allocation,
         offset: Size,
     ) -> PlaceRef<'tcx, &'ll Value> {
@@ -323,11 +293,13 @@ impl ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
             let init = const_alloc_to_llvm(self, alloc);
             let base_addr = self.static_addr_of(init, alloc.align, None);
 
-            let llval = unsafe { llvm::LLVMConstInBoundsGEP(
-                self.const_bitcast(base_addr, self.type_i8p()),
-                &self.const_usize(offset.bytes()),
-                1,
-            )};
+            let llval = unsafe {
+                llvm::LLVMConstInBoundsGEP(
+                    self.const_bitcast(base_addr, self.type_i8p()),
+                    &self.const_usize(offset.bytes()),
+                    1,
+                )
+            };
             self.const_bitcast(llval, llty)
         };
         PlaceRef::new_sized(llval, layout)
@@ -338,28 +310,20 @@ impl ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     }
 }
 
-pub fn val_ty(v: &'ll Value) -> &'ll Type {
-    unsafe {
-        llvm::LLVMTypeOf(v)
-    }
+pub fn val_ty(v: &Value) -> &Type {
+    unsafe { llvm::LLVMTypeOf(v) }
 }
 
 pub fn bytes_in_context(llcx: &'ll llvm::Context, bytes: &[u8]) -> &'ll Value {
     unsafe {
         let ptr = bytes.as_ptr() as *const c_char;
-        return llvm::LLVMConstStringInContext(llcx, ptr, bytes.len() as c_uint, True);
+        llvm::LLVMConstStringInContext(llcx, ptr, bytes.len() as c_uint, True)
     }
 }
 
-pub fn struct_in_context(
-    llcx: &'a llvm::Context,
-    elts: &[&'a Value],
-    packed: bool,
-) -> &'a Value {
+pub fn struct_in_context(llcx: &'a llvm::Context, elts: &[&'a Value], packed: bool) -> &'a Value {
     unsafe {
-        llvm::LLVMConstStructInContext(llcx,
-                                       elts.as_ptr(), elts.len() as c_uint,
-                                       packed as Bool)
+        llvm::LLVMConstStructInContext(llcx, elts.as_ptr(), elts.len() as c_uint, packed as Bool)
     }
 }
 
@@ -368,8 +332,6 @@ fn hi_lo_to_u128(lo: u64, hi: u64) -> u128 {
     ((hi as u128) << 64) | (lo as u128)
 }
 
-fn try_as_const_integral(v: &'ll Value) -> Option<&'ll ConstantInt> {
-    unsafe {
-        llvm::LLVMIsAConstantInt(v)
-    }
+fn try_as_const_integral(v: &Value) -> Option<&ConstantInt> {
+    unsafe { llvm::LLVMIsAConstantInt(v) }
 }

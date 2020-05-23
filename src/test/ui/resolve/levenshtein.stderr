@@ -8,7 +8,7 @@ error[E0412]: cannot find type `Baz` in this scope
   --> $DIR/levenshtein.rs:10:10
    |
 LL | enum Bar { }
-   | ------------ similarly named enum `Bar` defined here
+   | -------- similarly named enum `Bar` defined here
 LL | 
 LL | type A = Baz; // Misspelled type name.
    |          ^^^ help: an enum with a similar name exists: `Bar`
@@ -18,6 +18,11 @@ error[E0412]: cannot find type `Opiton` in this scope
    |
 LL | type B = Opiton<u8>; // Misspelled type name from the prelude.
    |          ^^^^^^ help: an enum with a similar name exists: `Option`
+   | 
+  ::: $SRC_DIR/libcore/option.rs:LL:COL
+   |
+LL | pub enum Option<T> {
+   | ------------------ similarly named enum `Option` defined here
 
 error[E0412]: cannot find type `Baz` in this scope
   --> $DIR/levenshtein.rs:16:14
@@ -38,7 +43,7 @@ error[E0425]: cannot find function `foobar` in this scope
   --> $DIR/levenshtein.rs:26:5
    |
 LL | fn foo_bar() {}
-   | --------------- similarly named function `foo_bar` defined here
+   | ------------ similarly named function `foo_bar` defined here
 ...
 LL |     foobar(); // Misspelled function name.
    |     ^^^^^^ help: a function with a similar name exists: `foo_bar`

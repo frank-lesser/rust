@@ -3,22 +3,10 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use errors::Handler;
+use rustc_errors::Handler;
 
 #[cfg(test)]
 mod tests;
-
-macro_rules! try_something {
-    ($e:expr, $diag:expr, $out:expr) => ({
-        match $e {
-            Ok(c) => c,
-            Err(e) => {
-                $diag.struct_err(&e.to_string()).emit();
-                return $out;
-            }
-        }
-    })
-}
 
 #[derive(Debug, Clone, Eq)]
 pub struct CssPath {
@@ -56,10 +44,7 @@ impl Hash for CssPath {
 
 impl CssPath {
     fn new(name: String) -> CssPath {
-        CssPath {
-            name,
-            children: FxHashSet::default(),
-        }
+        CssPath { name, children: FxHashSet::default() }
     }
 }
 
@@ -76,30 +61,24 @@ enum Events {
 impl Events {
     fn get_pos(&self) -> usize {
         match *self {
-            Events::StartLineComment(p) |
-            Events::StartComment(p) |
-            Events::EndComment(p) |
-            Events::InBlock(p) |
-            Events::OutBlock(p) => p,
+            Events::StartLineComment(p)
+            | Events::StartComment(p)
+            | Events::EndComment(p)
+            | Events::InBlock(p)
+            | Events::OutBlock(p) => p,
         }
     }
 
     fn is_comment(&self) -> bool {
         match *self {
-            Events::StartLineComment(_) |
-            Events::StartComment(_) |
-            Events::EndComment(_) => true,
+            Events::StartLineComment(_) | Events::StartComment(_) | Events::EndComment(_) => true,
             _ => false,
         }
     }
 }
 
 fn previous_is_line_comment(events: &[Events]) -> bool {
-    if let Some(&Events::StartLineComment(_)) = events.last() {
-        true
-    } else {
-        false
-    }
+    if let Some(&Events::StartLineComment(_)) = events.last() { true } else { false }
 }
 
 fn is_line_comment(pos: usize, v: &[u8], events: &[Events]) -> bool {
@@ -133,14 +112,14 @@ fn load_css_events(v: &[u8]) -> Vec<Events> {
             b'{' if !previous_is_line_comment(&events) => {
                 if let Some(&Events::StartComment(_)) = events.last() {
                     pos += 1;
-                    continue
+                    continue;
                 }
                 events.push(Events::InBlock(pos + 1));
             }
             b'}' if !previous_is_line_comment(&events) => {
                 if let Some(&Events::StartComment(_)) = events.last() {
                     pos += 1;
-                    continue
+                    continue;
                 }
                 events.push(Events::OutBlock(pos + 1));
             }
@@ -176,7 +155,7 @@ fn get_previous_positions(events: &[Events], mut pos: usize) -> Vec<usize> {
             } else {
                 ret.push(0);
             }
-            break
+            break;
         }
         ret.push(events[pos].get_pos());
         pos -= 1;
@@ -188,19 +167,23 @@ fn get_previous_positions(events: &[Events], mut pos: usize) -> Vec<usize> {
 }
 
 fn build_rule(v: &[u8], positions: &[usize]) -> String {
-    positions.chunks(2)
-             .map(|x| ::std::str::from_utf8(&v[x[0]..x[1]]).unwrap_or(""))
-             .collect::<String>()
-             .trim()
-             .replace("\n", " ")
-             .replace("/", "")
-             .replace("\t", " ")
-             .replace("{", "")
-             .replace("}", "")
-             .split(' ')
-             .filter(|s| s.len() > 0)
-             .collect::<Vec<&str>>()
-             .join(" ")
+    minifier::css::minify(
+        &positions
+            .chunks(2)
+            .map(|x| ::std::str::from_utf8(&v[x[0]..x[1]]).unwrap_or(""))
+            .collect::<String>()
+            .trim()
+            .replace("\n", " ")
+            .replace("/", "")
+            .replace("\t", " ")
+            .replace("{", "")
+            .replace("}", "")
+            .split(' ')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<&str>>()
+            .join(" "),
+    )
+    .unwrap_or_else(|_| String::new())
 }
 
 fn inner(v: &[u8], events: &[Events], pos: &mut usize) -> FxHashSet<CssPath> {
@@ -209,7 +192,7 @@ fn inner(v: &[u8], events: &[Events], pos: &mut usize) -> FxHashSet<CssPath> {
     while *pos < events.len() {
         if let Some(Events::OutBlock(_)) = get_useful_next(events, pos) {
             *pos += 1;
-            break
+            break;
         }
         if let Some(Events::InBlock(_)) = get_useful_next(events, pos) {
             paths.push(CssPath::new(build_rule(v, &get_previous_positions(events, *pos))));
@@ -239,9 +222,7 @@ pub fn load_css_paths(v: &[u8]) -> CssPath {
 }
 
 pub fn get_differences(against: &CssPath, other: &CssPath, v: &mut Vec<String>) {
-    if against.name != other.name {
-        return
-    } else {
+    if against.name == other.name {
         for child in &against.children {
             let mut found = false;
             let mut found_working = false;
@@ -255,12 +236,12 @@ pub fn get_differences(against: &CssPath, other: &CssPath, v: &mut Vec<String>) 
                         found_working = true;
                     }
                     found = true;
-                    break
+                    break;
                 }
             }
-            if found == false {
+            if !found {
                 v.push(format!("  Missing \"{}\" rule", child.name));
-            } else if found_working == false {
+            } else if !found_working {
                 v.extend(tmp.iter().cloned());
             }
         }
@@ -272,7 +253,14 @@ pub fn test_theme_against<P: AsRef<Path>>(
     against: &CssPath,
     diag: &Handler,
 ) -> (bool, Vec<String>) {
-    let data = try_something!(fs::read(f), diag, (false, vec![]));
+    let data = match fs::read(f) {
+        Ok(c) => c,
+        Err(e) => {
+            diag.struct_err(&e.to_string()).emit();
+            return (false, vec![]);
+        }
+    };
+
     let paths = load_css_paths(&data);
     let mut ret = vec![];
     get_differences(against, &paths, &mut ret);

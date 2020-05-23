@@ -1,5 +1,4 @@
 // compile-flags: --test
-// ignore-x86 FIXME: missing sysroot spans (#53081)
 
 use std::num::ParseFloatError;
 

@@ -1,4 +1,4 @@
-// Test that structural match is only permitted with a feature gate,
+// Test that use of structural-match traits is only permitted with a feature gate,
 // and that if a feature gate is supplied, it permits the type to be
 // used in a match.
 
@@ -18,7 +18,7 @@ struct Foo {
 const FOO: Foo = Foo { x: 0 };
 
 #[rustc_error]
-fn main() { //[with_gate]~ ERROR compilation successful
+fn main() { //[with_gate]~ ERROR fatal error triggered by #[rustc_error]
     let y = Foo { x: 1 };
     match y {
         FOO => { }

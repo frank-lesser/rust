@@ -2,8 +2,6 @@
 
 //! Hints to compiler that affects how code should be emitted or optimized.
 
-// ignore-tidy-undocumented-unsafe
-
 use crate::intrinsics;
 
 /// Informs the compiler that this point in the code is not reachable, enabling
@@ -43,7 +41,7 @@ use crate::intrinsics;
 ///
 /// assert_eq!(div_1(7, 0), 7);
 /// assert_eq!(div_1(9, 1), 4);
-/// assert_eq!(div_1(11, std::u32::MAX), 0);
+/// assert_eq!(div_1(11, u32::MAX), 0);
 /// ```
 #[inline]
 #[stable(feature = "unreachable", since = "1.27.0")]
@@ -64,31 +62,32 @@ pub unsafe fn unreachable_unchecked() -> ! {
 #[inline]
 #[unstable(feature = "renamed_spin_loop", issue = "55002")]
 pub fn spin_loop() {
-    #[cfg(
-        all(
-            any(target_arch = "x86", target_arch = "x86_64"),
-            target_feature = "sse2"
-        )
-    )] {
-        #[cfg(target_arch = "x86")] {
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "sse2"))]
+    {
+        #[cfg(target_arch = "x86")]
+        {
+            // SAFETY: the `cfg` attr ensures that we only execute this on x86 targets.
             unsafe { crate::arch::x86::_mm_pause() };
         }
 
-        #[cfg(target_arch = "x86_64")] {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: the `cfg` attr ensures that we only execute this on x86_64 targets.
             unsafe { crate::arch::x86_64::_mm_pause() };
         }
     }
 
-    #[cfg(
-        any(
-            target_arch = "aarch64",
-            all(target_arch = "arm", target_feature = "v6")
-        )
-    )] {
-        #[cfg(target_arch = "aarch64")] {
+    #[cfg(any(target_arch = "aarch64", all(target_arch = "arm", target_feature = "v6")))]
+    {
+        #[cfg(target_arch = "aarch64")]
+        {
+            // SAFETY: the `cfg` attr ensures that we only execute this on aarch64 targets.
             unsafe { crate::arch::aarch64::__yield() };
         }
-        #[cfg(target_arch = "arm")] {
+        #[cfg(target_arch = "arm")]
+        {
+            // SAFETY: the `cfg` attr ensures that we only execute this on arm targets
+            // with support for the v6 feature.
             unsafe { crate::arch::arm::__yield() };
         }
     }
@@ -113,11 +112,13 @@ pub fn spin_loop() {
 pub fn black_box<T>(dummy: T) -> T {
     // We need to "use" the argument in some way LLVM can't introspect, and on
     // targets that support it we can typically leverage inline assembly to do
-    // this. LLVM's intepretation of inline assembly is that it's, well, a black
+    // this. LLVM's interpretation of inline assembly is that it's, well, a black
     // box. This isn't the greatest implementation since it probably deoptimizes
     // more than we want, but it's so far good enough.
+
+    // SAFETY: the inline assembly is a no-op.
     unsafe {
-        asm!("" : : "r"(&dummy));
-        return dummy;
+        llvm_asm!("" : : "r"(&dummy));
+        dummy
     }
 }

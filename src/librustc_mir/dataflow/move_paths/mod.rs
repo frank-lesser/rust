@@ -1,10 +1,10 @@
 use core::slice::Iter;
-use rustc::mir::*;
-use rustc::ty::{Ty, TyCtxt};
-use rustc::util::nodemap::FxHashMap;
-use rustc_index::vec::{Enumerated, Idx, IndexVec};
+use rustc_data_structures::fx::FxHashMap;
+use rustc_index::vec::{Enumerated, IndexVec};
+use rustc_middle::mir::*;
+use rustc_middle::ty::{ParamEnv, Ty, TyCtxt};
+use rustc_span::Span;
 use smallvec::SmallVec;
-use syntax_pos::Span;
 
 use std::fmt;
 use std::ops::{Index, IndexMut};
@@ -58,19 +58,67 @@ pub struct MovePath<'tcx> {
 }
 
 impl<'tcx> MovePath<'tcx> {
-    pub fn parents(
+    /// Returns an iterator over the parents of `self`.
+    pub fn parents<'a>(
+        &self,
+        move_paths: &'a IndexVec<MovePathIndex, MovePath<'tcx>>,
+    ) -> impl 'a + Iterator<Item = (MovePathIndex, &'a MovePath<'tcx>)> {
+        let first = self.parent.map(|mpi| (mpi, &move_paths[mpi]));
+        MovePathLinearIter {
+            next: first,
+            fetch_next: move |_, parent: &MovePath<'_>| {
+                parent.parent.map(|mpi| (mpi, &move_paths[mpi]))
+            },
+        }
+    }
+
+    /// Returns an iterator over the immediate children of `self`.
+    pub fn children<'a>(
+        &self,
+        move_paths: &'a IndexVec<MovePathIndex, MovePath<'tcx>>,
+    ) -> impl 'a + Iterator<Item = (MovePathIndex, &'a MovePath<'tcx>)> {
+        let first = self.first_child.map(|mpi| (mpi, &move_paths[mpi]));
+        MovePathLinearIter {
+            next: first,
+            fetch_next: move |_, child: &MovePath<'_>| {
+                child.next_sibling.map(|mpi| (mpi, &move_paths[mpi]))
+            },
+        }
+    }
+
+    /// Finds the closest descendant of `self` for which `f` returns `true` using a breadth-first
+    /// search.
+    ///
+    /// `f` will **not** be called on `self`.
+    pub fn find_descendant(
         &self,
         move_paths: &IndexVec<MovePathIndex, MovePath<'_>>,
-    ) -> Vec<MovePathIndex> {
-        let mut parents = Vec::new();
+        f: impl Fn(MovePathIndex) -> bool,
+    ) -> Option<MovePathIndex> {
+        let mut todo = if let Some(child) = self.first_child {
+            vec![child]
+        } else {
+            return None;
+        };
 
-        let mut curr_parent = self.parent;
-        while let Some(parent_mpi) = curr_parent {
-            parents.push(parent_mpi);
-            curr_parent = move_paths[parent_mpi].parent;
+        while let Some(mpi) = todo.pop() {
+            if f(mpi) {
+                return Some(mpi);
+            }
+
+            let move_path = &move_paths[mpi];
+            if let Some(child) = move_path.first_child {
+                todo.push(child);
+            }
+
+            // After we've processed the original `mpi`, we should always
+            // traverse the siblings of any of its children.
+            if let Some(sibling) = move_path.next_sibling {
+                todo.push(sibling);
+            }
         }
 
-        parents
+        None
     }
 }
 
@@ -93,6 +141,25 @@ impl<'tcx> fmt::Debug for MovePath<'tcx> {
 impl<'tcx> fmt::Display for MovePath<'tcx> {
     fn fmt(&self, w: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(w, "{:?}", self.place)
+    }
+}
+
+#[allow(unused)]
+struct MovePathLinearIter<'a, 'tcx, F> {
+    next: Option<(MovePathIndex, &'a MovePath<'tcx>)>,
+    fetch_next: F,
+}
+
+impl<'a, 'tcx, F> Iterator for MovePathLinearIter<'a, 'tcx, F>
+where
+    F: FnMut(MovePathIndex, &'a MovePath<'tcx>) -> Option<(MovePathIndex, &'a MovePath<'tcx>)>,
+{
+    type Item = (MovePathIndex, &'a MovePath<'tcx>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ret = self.next.take()?;
+        self.next = (self.fetch_next)(ret.0, ret.1);
+        Some(ret)
     }
 }
 
@@ -245,11 +312,8 @@ impl MovePathLookup {
     // alternative will *not* create a MovePath on the fly for an
     // unknown place, but will rather return the nearest available
     // parent.
-    pub fn find(&self, place: PlaceRef<'_, '_>) -> LookupResult {
-        let mut result = match place.base {
-            PlaceBase::Local(local) => self.locals[*local],
-            PlaceBase::Static(..) => return LookupResult::Parent(None),
-        };
+    pub fn find(&self, place: PlaceRef<'_>) -> LookupResult {
+        let mut result = self.locals[place.local];
 
         for elem in place.projection.iter() {
             if let Some(&subpath) = self.projections.get(&(result, elem.lift())) {
@@ -281,9 +345,6 @@ pub struct IllegalMoveOrigin<'tcx> {
 
 #[derive(Debug)]
 pub(crate) enum IllegalMoveOriginKind<'tcx> {
-    /// Illegal move due to attempt to move from `static` variable.
-    Static,
-
     /// Illegal move due to attempt to move from behind a reference.
     BorrowedContent {
         /// The place the reference refers to: if erroneous code was trying to
@@ -318,8 +379,9 @@ impl<'tcx> MoveData<'tcx> {
     pub fn gather_moves(
         body: &Body<'tcx>,
         tcx: TyCtxt<'tcx>,
+        param_env: ParamEnv<'tcx>,
     ) -> Result<Self, (Self, Vec<(Place<'tcx>, MoveError<'tcx>)>)> {
-        builder::gather_moves(body, tcx)
+        builder::gather_moves(body, tcx, param_env)
     }
 
     /// For the move path `mpi`, returns the root local variable (if any) that starts the path.
@@ -337,5 +399,17 @@ impl<'tcx> MoveData<'tcx> {
                 return None;
             }
         }
+    }
+
+    pub fn find_in_move_path_or_its_descendants(
+        &self,
+        root: MovePathIndex,
+        pred: impl Fn(MovePathIndex) -> bool,
+    ) -> Option<MovePathIndex> {
+        if pred(root) {
+            return Some(root);
+        }
+
+        self.move_paths[root].find_descendant(&self.move_paths, pred)
     }
 }

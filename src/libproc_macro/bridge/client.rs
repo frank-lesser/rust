@@ -15,7 +15,7 @@ macro_rules! define_handles {
         }
 
         impl HandleCounters {
-            // FIXME(eddyb) use a reference to the `static COUNTERS`, intead of
+            // FIXME(eddyb) use a reference to the `static COUNTERS`, instead of
             // a wrapper `fn` pointer, once `const fn` can reference `static`s.
             extern "C" fn get() -> &'static Self {
                 static COUNTERS: HandleCounters = HandleCounters {
@@ -202,10 +202,16 @@ impl Clone for Literal {
     }
 }
 
-// FIXME(eddyb) `Literal` should not expose internal `Debug` impls.
 impl fmt::Debug for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.debug())
+        f.debug_struct("Literal")
+            // format the kind without quotes, as in `kind: Float`
+            .field("kind", &format_args!("{}", &self.debug_kind()))
+            .field("symbol", &self.symbol())
+            // format `Some("...")` on one line even in {:#?} mode
+            .field("suffix", &format_args!("{:?}", &self.suffix()))
+            .field("span", &self.span())
+            .finish()
     }
 }
 
@@ -290,6 +296,13 @@ impl BridgeState<'_> {
 }
 
 impl Bridge<'_> {
+    pub(crate) fn is_available() -> bool {
+        BridgeState::with(|state| match state {
+            BridgeState::Connected(_) | BridgeState::InUse => true,
+            BridgeState::NotConnected => false,
+        })
+    }
+
     fn enter<R>(self, f: impl FnOnce() -> R) -> R {
         // Hide the default panic output within `proc_macro` expansions.
         // NB. the server can't do this because it may use a different libstd.
@@ -334,7 +347,7 @@ impl Bridge<'_> {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct Client<F> {
-    // FIXME(eddyb) use a reference to the `static COUNTERS`, intead of
+    // FIXME(eddyb) use a reference to the `static COUNTERS`, instead of
     // a wrapper `fn` pointer, once `const fn` can reference `static`s.
     pub(super) get_handle_counters: extern "C" fn() -> &'static HandleCounters,
     pub(super) run: extern "C" fn(Bridge<'_>, F) -> Buffer<u8>,
@@ -393,17 +406,13 @@ impl Client<fn(crate::TokenStream) -> crate::TokenStream> {
         ) -> Buffer<u8> {
             run_client(bridge, |input| f(crate::TokenStream(input)).0)
         }
-        Client {
-            get_handle_counters: HandleCounters::get,
-            run,
-            f,
-        }
+        Client { get_handle_counters: HandleCounters::get, run, f }
     }
 }
 
 impl Client<fn(crate::TokenStream, crate::TokenStream) -> crate::TokenStream> {
     pub const fn expand2(
-        f: fn(crate::TokenStream, crate::TokenStream) -> crate::TokenStream
+        f: fn(crate::TokenStream, crate::TokenStream) -> crate::TokenStream,
     ) -> Self {
         extern "C" fn run(
             bridge: Bridge<'_>,
@@ -413,11 +422,7 @@ impl Client<fn(crate::TokenStream, crate::TokenStream) -> crate::TokenStream> {
                 f(crate::TokenStream(input), crate::TokenStream(input2)).0
             })
         }
-        Client {
-            get_handle_counters: HandleCounters::get,
-            run,
-            f,
-        }
+        Client { get_handle_counters: HandleCounters::get, run, f }
     }
 }
 
@@ -446,7 +451,7 @@ impl ProcMacro {
         match self {
             ProcMacro::CustomDerive { trait_name, .. } => trait_name,
             ProcMacro::Attr { name, .. } => name,
-            ProcMacro::Bang { name, ..} => name
+            ProcMacro::Bang { name, .. } => name,
         }
     }
 
@@ -455,30 +460,20 @@ impl ProcMacro {
         attributes: &'static [&'static str],
         expand: fn(crate::TokenStream) -> crate::TokenStream,
     ) -> Self {
-        ProcMacro::CustomDerive {
-            trait_name,
-            attributes,
-            client: Client::expand1(expand),
-        }
+        ProcMacro::CustomDerive { trait_name, attributes, client: Client::expand1(expand) }
     }
 
     pub const fn attr(
         name: &'static str,
         expand: fn(crate::TokenStream, crate::TokenStream) -> crate::TokenStream,
     ) -> Self {
-        ProcMacro::Attr {
-            name,
-            client: Client::expand2(expand),
-        }
+        ProcMacro::Attr { name, client: Client::expand2(expand) }
     }
 
     pub const fn bang(
         name: &'static str,
-        expand: fn(crate::TokenStream) -> crate::TokenStream
+        expand: fn(crate::TokenStream) -> crate::TokenStream,
     ) -> Self {
-        ProcMacro::Bang {
-            name,
-            client: Client::expand1(expand),
-        }
+        ProcMacro::Bang { name, client: Client::expand1(expand) }
     }
 }

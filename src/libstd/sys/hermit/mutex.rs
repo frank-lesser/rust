@@ -1,9 +1,9 @@
-use crate::ptr;
 use crate::ffi::c_void;
+use crate::ptr;
 use crate::sys::hermit::abi;
 
 pub struct Mutex {
-    inner: *const c_void
+    inner: *const c_void,
 }
 
 unsafe impl Send for Mutex {}
@@ -42,17 +42,17 @@ impl Mutex {
 }
 
 pub struct ReentrantMutex {
-    inner: *const c_void
+    inner: *const c_void,
 }
 
 impl ReentrantMutex {
-    pub unsafe fn uninitialized() -> ReentrantMutex {
+    pub const unsafe fn uninitialized() -> ReentrantMutex {
         ReentrantMutex { inner: ptr::null() }
     }
 
     #[inline]
-    pub unsafe fn init(&mut self) {
-        let _ = abi::recmutex_init(&mut self.inner as *mut *const c_void);
+    pub unsafe fn init(&self) {
+        let _ = abi::recmutex_init(&self.inner as *const *const c_void as *mut _);
     }
 
     #[inline]

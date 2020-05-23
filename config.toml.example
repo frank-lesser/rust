@@ -14,6 +14,12 @@
 # =============================================================================
 [llvm]
 
+# Indicates whether LLVM rebuild should be skipped when running bootstrap. If
+# this is `false` then the compiler's LLVM will be rebuilt whenever the built
+# version doesn't have the correct hash. If it is `true` then LLVM will never
+# be rebuilt. The default value is `false`.
+#skip-rebuild = false
+
 # Indicates whether the LLVM build is a Release or Debug build
 #optimize = true
 
@@ -78,8 +84,9 @@
 #link-shared = false
 
 # When building llvm, this configures what is being appended to the version.
-# If absent, we let the version as-is.
-#version-suffix = "-rust"
+# The default is "-rust-$version-$channel", except for dev channel where rustc
+# version number is omitted. To use LLVM version as is, provide an empty string.
+#version-suffix = "-rust-dev"
 
 # On MSVC you can compile LLVM with clang-cl, but the test suite doesn't pass
 # with clang-cl, so this is special in that it only compiles LLVM with clang-cl
@@ -124,6 +131,10 @@
 # for each target triple.
 #target = ["x86_64-unknown-linux-gnu"] # defaults to just the build triple
 
+# Use this directory to store build artifacts.
+# You can use "$ROOT" to indicate the root of the git repository.
+#build-dir = "build"
+
 # Instead of downloading the src/stage0.txt version of Cargo specified, use
 # this Cargo binary instead to build all Rust code
 #cargo = "/path/to/bin/cargo"
@@ -131,6 +142,10 @@
 # Instead of downloading the src/stage0.txt version of the compiler
 # specified, use this rustc binary instead as the stage0 snapshot compiler.
 #rustc = "/path/to/bin/rustc"
+
+# Instead of download the src/stage0.txt version of rustfmt specified,
+# use this rustfmt binary instead as the stage0 snapshot rustfmt.
+#rustfmt = "/path/to/bin/rustfmt"
 
 # Flag to specify whether any documentation is built. If false, rustdoc and
 # friends will still be compiled but they will not be used to generate any
@@ -158,11 +173,9 @@
 
 # Python interpreter to use for various tasks throughout the build, notably
 # rustdoc tests, the lldb python interpreter, and some dist bits and pieces.
-# Note that Python 2 is currently required.
 #
-# Defaults to python2.7, then python2. If neither executable can be found, then
-# it defaults to the Python interpreter used to execute x.py.
-#python = "python2.7"
+# Defaults to the Python interpreter used to execute x.py.
+#python = "python"
 
 # Force Cargo to check that Cargo.lock describes the precise dependency
 # set that all the Cargo.toml files create, instead of updating it.
@@ -171,21 +184,23 @@
 # Indicate whether the vendored sources are used for Rust dependencies or not
 #vendor = false
 
-# Typically the build system will build the rust compiler twice. The second
+# Typically the build system will build the Rust compiler twice. The second
 # compiler, however, will simply use its own libraries to link against. If you
 # would rather to perform a full bootstrap, compiling the compiler three times,
 # then you can set this option to true. You shouldn't ever need to set this
 # option to true.
 #full-bootstrap = false
 
-# Enable a build of the extended rust tool set which is not only the compiler
+# Enable a build of the extended Rust tool set which is not only the compiler
 # but also tools such as Cargo. This will also produce "combined installers"
 # which are used to install Rust and Cargo together. This is disabled by
-# default.
+# default. The `tools` option (immediately below) specifies which tools should
+# be built if `extended = true`.
 #extended = false
 
-# Installs chosen set of extended tools if enabled. By default builds all.
-# If chosen tool failed to build the installation fails.
+# Installs chosen set of extended tools if `extended = true`. By default builds all.
+# If chosen tool failed to build the installation fails. If `extended = false`, this
+# option is ignored.
 #tools = ["cargo", "rls", "clippy", "rustfmt", "analysis", "src"]
 
 # Verbosity level: 0 == not verbose, 1 == verbose, 2 == very verbose
@@ -297,13 +312,17 @@
 
 # Whether or not debug assertions are enabled for the compiler and standard
 # library.
-#debug-assertions = false
+#debug-assertions = debug
+
+# Whether or not debug assertions are enabled for the standard library.
+# Overrides the `debug-assertions` option, if defined.
+#debug-assertions-std = debug-assertions
 
 # Debuginfo level for most of Rust code, corresponds to the `-C debuginfo=N` option of `rustc`.
 # `0` - no debug info
 # `1` - line tables only
 # `2` - full debug info with variable and type information
-# Can be overriden for specific subsets of Rust code (rustc, std or tools).
+# Can be overridden for specific subsets of Rust code (rustc, std or tools).
 # Debuginfo for tests run with compiletest is not controlled by this option
 # and needs to be enabled separately with `debuginfo-level-tests`.
 #debuginfo-level = if debug { 2 } else { 0 }
@@ -379,20 +398,22 @@
 # and currently the only standard option supported is `"llvm"`
 #codegen-backends = ["llvm"]
 
-# This is the name of the directory in which codegen backends will get installed
-#codegen-backends-dir = "codegen-backends"
-
 # Indicates whether LLD will be compiled and made available in the sysroot for
 # rustc to execute.
 #lld = false
 
+# Indicates whether LLD will be used to link Rust crates during bootstrap on
+# supported platforms. The LLD from the bootstrap distribution will be used
+# and not the LLD compiled during the bootstrap.
+#
+# LLD will not be used if we're cross linking or running tests.
+#
+# Explicitly setting the linker for a target will override this option.
+#use-lld = false
+
 # Indicates whether some LLVM tools, like llvm-objdump, will be made available in the
 # sysroot.
 #llvm-tools = false
-
-# Indicates whether LLDB will be made available in the sysroot.
-# This is only built if LLVM is also being built.
-#lldb = false
 
 # Whether to deny warnings in crates
 #deny-warnings = true
@@ -402,6 +423,13 @@
 
 # Whether to verify generated LLVM IR
 #verify-llvm-ir = false
+
+# Compile the compiler with a non-default ThinLTO import limit. This import
+# limit controls the maximum size of functions imported by ThinLTO. Decreasing
+# will make code compile faster at the expense of lower runtime performance.
+# If `incremental` is set to true above, the import limit will default to 10
+# instead of LLVM's default of 100.
+#thin-lto-import-instr-limit = 100
 
 # Map all debuginfo paths for libstd and crates to `/rust/$sha/$crate/...`,
 # generally only set for releases
@@ -418,6 +446,10 @@
 
 # Use LLVM libunwind as the implementation for Rust's unwinder.
 #llvm-libunwind = false
+
+# Enable Windows Control Flow Guard checks in the standard library.
+# This only applies from stage 1 onwards, and only for Windows targets.
+#control-flow-guard = false
 
 # =============================================================================
 # Options for specific targets
@@ -447,6 +479,7 @@
 # Linker to be used to link Rust code. Note that the
 # default value is platform specific, and if not specified it may also depend on
 # what platform is crossing to what platform.
+# Setting this will override the `use-lld` option for Rust code.
 #linker = "cc"
 
 # Path to the `llvm-config` binary of the installation of a custom LLVM to link

@@ -1,51 +1,45 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
-
+#![feature(bool_to_option)]
 #![feature(box_patterns)]
-#![feature(box_syntax)]
-#![feature(core_intrinsics)]
-#![feature(libc)]
-#![feature(slice_patterns)]
-#![feature(stmt_expr_attributes)]
 #![feature(try_blocks)]
 #![feature(in_band_lifetimes)]
 #![feature(nll)]
+#![feature(or_patterns)]
 #![feature(trusted_len)]
 #![feature(associated_type_bounds)]
-
-#![recursion_limit="256"]
+#![recursion_limit = "256"]
 
 //! This crate contains codegen code that is used by all codegen backends (LLVM and others).
 //! The backend-agnostic functions of this crate use functions defined in various traits that
 //! have to be implemented by each backends.
 
-#[macro_use] extern crate log;
-#[macro_use] extern crate rustc;
-#[macro_use] extern crate syntax;
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate rustc_middle;
 
-use std::path::{Path, PathBuf};
-use rustc::dep_graph::WorkProduct;
-use rustc::session::config::{OutputFilenames, OutputType, RUST_CGU_EXT};
-use rustc::middle::lang_items::LangItem;
-use rustc::hir::def_id::CrateNum;
-use rustc::ty::query::Providers;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::svh::Svh;
-use rustc::middle::cstore::{LibSource, CrateSource, NativeLibrary};
-use rustc::middle::dependency_format::Dependencies;
-use syntax_pos::symbol::Symbol;
+use rustc_data_structures::sync::Lrc;
+use rustc_hir::def_id::CrateNum;
+use rustc_hir::LangItem;
+use rustc_middle::dep_graph::WorkProduct;
+use rustc_middle::middle::cstore::{CrateSource, LibSource, NativeLib};
+use rustc_middle::middle::dependency_format::Dependencies;
+use rustc_middle::ty::query::Providers;
+use rustc_session::config::{OutputFilenames, OutputType, RUST_CGU_EXT};
+use rustc_span::symbol::Symbol;
+use std::path::{Path, PathBuf};
 
-mod error_codes;
-
-pub mod common;
-pub mod traits;
-pub mod mir;
-pub mod debuginfo;
+pub mod back;
 pub mod base;
+pub mod common;
+pub mod debuginfo;
 pub mod glue;
 pub mod meth;
+pub mod mir;
 pub mod mono_item;
-pub mod back;
+pub mod traits;
 
 pub struct ModuleCodegen<M> {
     /// The name of the module. When the crate may be saved between
@@ -61,49 +55,27 @@ pub struct ModuleCodegen<M> {
 
 // FIXME(eddyb) maybe include the crate name in this?
 pub const METADATA_FILENAME: &str = "lib.rmeta";
-pub const RLIB_BYTECODE_EXTENSION: &str = "bc.z";
-
 
 impl<M> ModuleCodegen<M> {
-    pub fn into_compiled_module(self,
-                            emit_obj: bool,
-                            emit_bc: bool,
-                            emit_bc_compressed: bool,
-                            outputs: &OutputFilenames) -> CompiledModule {
-        let object = if emit_obj {
-            Some(outputs.temp_path(OutputType::Object, Some(&self.name)))
-        } else {
-            None
-        };
-        let bytecode = if emit_bc {
-            Some(outputs.temp_path(OutputType::Bitcode, Some(&self.name)))
-        } else {
-            None
-        };
-        let bytecode_compressed = if emit_bc_compressed {
-            Some(outputs.temp_path(OutputType::Bitcode, Some(&self.name))
-                    .with_extension(RLIB_BYTECODE_EXTENSION))
-        } else {
-            None
-        };
+    pub fn into_compiled_module(
+        self,
+        emit_obj: bool,
+        emit_bc: bool,
+        outputs: &OutputFilenames,
+    ) -> CompiledModule {
+        let object = emit_obj.then(|| outputs.temp_path(OutputType::Object, Some(&self.name)));
+        let bytecode = emit_bc.then(|| outputs.temp_path(OutputType::Bitcode, Some(&self.name)));
 
-        CompiledModule {
-            name: self.name.clone(),
-            kind: self.kind,
-            object,
-            bytecode,
-            bytecode_compressed,
-        }
+        CompiledModule { name: self.name.clone(), kind: self.kind, object, bytecode }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, RustcEncodable, RustcDecodable)]
 pub struct CompiledModule {
     pub name: String,
     pub kind: ModuleKind,
     pub object: Option<PathBuf>,
     pub bytecode: Option<PathBuf>,
-    pub bytecode_compressed: Option<PathBuf>,
 }
 
 pub struct CachedModuleCodegen {
@@ -111,7 +83,7 @@ pub struct CachedModuleCodegen {
     pub source: WorkProduct,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, RustcEncodable, RustcDecodable)]
 pub enum ModuleKind {
     Regular,
     Metadata,
@@ -127,16 +99,22 @@ bitflags::bitflags! {
 }
 
 /// Misc info we load from metadata to persist beyond the tcx.
-#[derive(Debug)]
+///
+/// Note: though `CrateNum` is only meaningful within the same tcx, information within `CrateInfo`
+/// is self-contained. `CrateNum` can be viewed as a unique identifier within a `CrateInfo`, where
+/// `used_crate_source` contains all `CrateSource` of the dependents, and maintains a mapping from
+/// identifiers (`CrateNum`) to `CrateSource`. The other fields map `CrateNum` to the crate's own
+/// additional properties, so that effectively we can retrieve each dependent crate's `CrateSource`
+/// and the corresponding properties without referencing information outside of a `CrateInfo`.
+#[derive(Debug, RustcEncodable, RustcDecodable)]
 pub struct CrateInfo {
     pub panic_runtime: Option<CrateNum>,
     pub compiler_builtins: Option<CrateNum>,
     pub profiler_runtime: Option<CrateNum>,
-    pub sanitizer_runtime: Option<CrateNum>,
     pub is_no_builtins: FxHashSet<CrateNum>,
-    pub native_libraries: FxHashMap<CrateNum, Lrc<Vec<NativeLibrary>>>,
+    pub native_libraries: FxHashMap<CrateNum, Lrc<Vec<NativeLib>>>,
     pub crate_name: FxHashMap<CrateNum, String>,
-    pub used_libraries: Lrc<Vec<NativeLibrary>>,
+    pub used_libraries: Lrc<Vec<NativeLib>>,
     pub link_args: Lrc<Vec<String>>,
     pub used_crate_source: FxHashMap<CrateNum, Lrc<CrateSource>>,
     pub used_crates_static: Vec<(CrateNum, LibSource)>,
@@ -146,14 +124,14 @@ pub struct CrateInfo {
     pub dependency_formats: Lrc<Dependencies>,
 }
 
-
+#[derive(RustcEncodable, RustcDecodable)]
 pub struct CodegenResults {
     pub crate_name: Symbol,
     pub modules: Vec<CompiledModule>,
     pub allocator_module: Option<CompiledModule>,
     pub metadata_module: Option<CompiledModule>,
     pub crate_hash: Svh,
-    pub metadata: rustc::middle::cstore::EncodedMetadata,
+    pub metadata: rustc_middle::middle::cstore::EncodedMetadata,
     pub windows_subsystem: Option<String>,
     pub linker_info: back::linker::LinkerInfo,
     pub crate_info: CrateInfo,
@@ -176,13 +154,11 @@ pub fn looks_like_rust_object_file(filename: &str) -> bool {
     let ext = path.extension().and_then(|s| s.to_str());
     if ext != Some(OutputType::Object.extension()) {
         // The file name does not end with ".o", so it can't be an object file.
-        return false
+        return false;
     }
 
     // Strip the ".o" at the end
-    let ext2 = path.file_stem()
-        .and_then(|s| Path::new(s).extension())
-        .and_then(|s| s.to_str());
+    let ext2 = path.file_stem().and_then(|s| Path::new(s).extension()).and_then(|s| s.to_str());
 
     // Check if the "inner" extension
     ext2 == Some(RUST_CGU_EXT)

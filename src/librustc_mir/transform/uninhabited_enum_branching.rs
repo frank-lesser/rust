@@ -1,11 +1,12 @@
 //! A pass that eliminates branches on uninhabited enum variants.
 
 use crate::transform::{MirPass, MirSource};
-use rustc::mir::{
+use rustc_middle::mir::{
     BasicBlock, BasicBlockData, Body, Local, Operand, Rvalue, StatementKind, TerminatorKind,
 };
-use rustc::ty::layout::{Abi, TyLayout, Variants};
-use rustc::ty::{Ty, TyCtxt};
+use rustc_middle::ty::layout::TyAndLayout;
+use rustc_middle::ty::{Ty, TyCtxt};
+use rustc_target::abi::{Abi, Variants};
 
 pub struct UninhabitedEnumBranching;
 
@@ -27,8 +28,8 @@ fn get_switched_on_type<'tcx>(
 
     // Only bother checking blocks which terminate by switching on a local.
     if let Some(local) = get_discriminant_local(&terminator.kind) {
-        let stmt_before_term = (block_data.statements.len() > 0)
-            .then_with(|| &block_data.statements[block_data.statements.len() - 1].kind);
+        let stmt_before_term = (!block_data.statements.is_empty())
+            .then(|| &block_data.statements[block_data.statements.len() - 1].kind);
 
         if let Some(StatementKind::Assign(box (l, Rvalue::Discriminant(place)))) = stmt_before_term
         {
@@ -48,17 +49,17 @@ fn get_switched_on_type<'tcx>(
 }
 
 fn variant_discriminants<'tcx>(
-    layout: &TyLayout<'tcx>,
+    layout: &TyAndLayout<'tcx>,
     ty: Ty<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Vec<u128> {
-    match &layout.details.variants {
+    match &layout.variants {
         Variants::Single { index } => vec![index.as_u32() as u128],
         Variants::Multiple { variants, .. } => variants
             .iter_enumerated()
             .filter_map(|(idx, layout)| {
                 (layout.abi != Abi::Uninhabited)
-                    .then_with(|| ty.discriminant_for_variant(tcx, idx).unwrap().val)
+                    .then(|| ty.discriminant_for_variant(tcx, idx).unwrap().val)
             })
             .collect(),
     }
@@ -99,7 +100,7 @@ impl<'tcx> MirPass<'tcx> for UninhabitedEnumBranching {
                 &mut body.basic_blocks_mut()[bb].terminator_mut().kind
             {
                 let vals = &*values;
-                let zipped = vals.iter().zip(targets.into_iter());
+                let zipped = vals.iter().zip(targets.iter());
 
                 let mut matched_values = Vec::with_capacity(allowed_variants.len());
                 let mut matched_targets = Vec::with_capacity(allowed_variants.len() + 1);

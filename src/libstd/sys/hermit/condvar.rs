@@ -12,18 +12,17 @@ impl Condvar {
         Condvar { identifier: 0 }
     }
 
-    #[inline]
     pub unsafe fn init(&mut self) {
-        // nothing to do
+        let _ = abi::init_queue(self.id());
     }
 
     pub unsafe fn notify_one(&self) {
-         let _ = abi::notify(self.id(), 1);
+        let _ = abi::notify(self.id(), 1);
     }
 
     #[inline]
     pub unsafe fn notify_all(&self) {
-         let _ = abi::notify(self.id(), -1 /* =all */);
+        let _ = abi::notify(self.id(), -1 /* =all */);
     }
 
     pub unsafe fn wait(&self, mutex: &Mutex) {
@@ -50,7 +49,6 @@ impl Condvar {
         ret
     }
 
-    #[inline]
     pub unsafe fn destroy(&self) {
         let _ = abi::destroy_queue(self.id());
     }

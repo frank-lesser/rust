@@ -1,7 +1,7 @@
 # Documentation tests
 
 `rustdoc` supports executing your documentation examples as tests. This makes sure
-that your tests are up to date and working.
+that examples within your documentation are up to date and working.
 
 The basic idea is this:
 
@@ -314,7 +314,7 @@ only shows the part you care about.
 `should_panic` tells `rustdoc` that the code should compile correctly, but
 not actually pass as a test.
 
-```text
+```rust
 /// ```no_run
 /// loop {
 ///     println!("Hello, world");
@@ -352,9 +352,9 @@ are added.
 /// ```
 ```
 
-`edition2018` tells `rustdoc` that the code sample should be compiled the 2018
-edition of Rust. Similarly, you can specify `edition2015` to compile the code
-with the 2015 edition.
+`edition2018` tells `rustdoc` that the code sample should be compiled using
+the 2018 edition of Rust. Similarly, you can specify `edition2015` to compile
+the code with the 2015 edition.
 
 ## Syntax reference
 

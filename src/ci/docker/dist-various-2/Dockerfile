@@ -17,7 +17,7 @@ RUN apt-get update && apt-get build-dep -y clang llvm && apt-get install -y --no
   libmpfr-dev \
   ninja-build \
   nodejs \
-  python2.7-dev \
+  python3-dev \
   software-properties-common \
   unzip \
   # Needed for apt-key to work:
@@ -48,7 +48,7 @@ RUN /tmp/build-solaris-toolchain.sh sparcv9 sparcv9 solaris-sparc
 COPY dist-various-2/build-x86_64-fortanix-unknown-sgx-toolchain.sh /tmp/
 # We pass the commit id of the port of LLVM's libunwind to the build script.
 # Any update to the commit id here, should cause the container image to be re-built from this point on.
-RUN /tmp/build-x86_64-fortanix-unknown-sgx-toolchain.sh "53b586346f2c7870e20b170decdc30729d97c42b"
+RUN /tmp/build-x86_64-fortanix-unknown-sgx-toolchain.sh "5125c169b30837208a842f85f7ae44a83533bd0e"
 
 COPY dist-various-2/build-wasi-toolchain.sh /tmp/
 RUN /tmp/build-wasi-toolchain.sh
@@ -110,4 +110,4 @@ ENV RUST_CONFIGURE_ARGS --enable-extended --enable-lld --disable-docs \
   --set target.wasm32-wasi.wasi-root=/wasm32-wasi \
   --musl-root-armv7=/musl-armv7
 
-ENV SCRIPT python2.7 ../x.py dist --target $TARGETS
+ENV SCRIPT python3 ../x.py dist --target $TARGETS

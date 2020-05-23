@@ -1,14 +1,13 @@
-use rustc_serialize::{Encodable, Decodable, Encoder, Decoder};
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 
+use std::fmt;
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::iter::{self, FromIterator};
-use std::slice;
 use std::marker::PhantomData;
 use std::ops::{Index, IndexMut, Range, RangeBounds};
-use std::fmt;
-use std::hash::Hash;
+use std::slice;
 use std::vec;
-use std::u32;
 
 /// Represents some newtyped `usize` wrapper.
 ///
@@ -29,16 +28,25 @@ pub trait Idx: Copy + 'static + Ord + Debug + Hash {
 
 impl Idx for usize {
     #[inline]
-    fn new(idx: usize) -> Self { idx }
+    fn new(idx: usize) -> Self {
+        idx
+    }
     #[inline]
-    fn index(self) -> usize { self }
+    fn index(self) -> usize {
+        self
+    }
 }
 
 impl Idx for u32 {
     #[inline]
-    fn new(idx: usize) -> Self { assert!(idx <= u32::MAX as usize); idx as u32 }
+    fn new(idx: usize) -> Self {
+        assert!(idx <= u32::MAX as usize);
+        idx as u32
+    }
     #[inline]
-    fn index(self) -> usize { self as usize }
+    fn index(self) -> usize {
+        self as usize
+    }
 }
 
 /// Creates a struct type `S` that can be used as an index with
@@ -57,7 +65,7 @@ impl Idx for u32 {
 /// `u32::MAX`. You can also customize things like the `Debug` impl,
 /// what traits are derived, and so forth via the macro.
 #[macro_export]
-#[allow_internal_unstable(step_trait, rustc_attrs)]
+#[allow_internal_unstable(step_trait, step_trait_ext, rustc_attrs)]
 macro_rules! newtype_index {
     // ---- public rules ----
 
@@ -111,62 +119,44 @@ macro_rules! newtype_index {
         impl $type {
             $v const MAX_AS_U32: u32 = $max;
 
-            $v const MAX: $type = $type::from_u32_const($max);
+            $v const MAX: Self = Self::from_u32($max);
 
             #[inline]
-            $v fn from_usize(value: usize) -> Self {
+            $v const fn from_usize(value: usize) -> Self {
                 assert!(value <= ($max as usize));
                 unsafe {
-                    $type::from_u32_unchecked(value as u32)
+                    Self::from_u32_unchecked(value as u32)
                 }
             }
 
             #[inline]
-            $v fn from_u32(value: u32) -> Self {
+            $v const fn from_u32(value: u32) -> Self {
                 assert!(value <= $max);
                 unsafe {
-                    $type::from_u32_unchecked(value)
-                }
-            }
-
-            /// Hacky variant of `from_u32` for use in constants.
-            /// This version checks the "max" constraint by using an
-            /// invalid array dereference.
-            #[inline]
-            $v const fn from_u32_const(value: u32) -> Self {
-                // This will fail at const eval time unless `value <=
-                // max` is true (in which case we get the index 0).
-                // It will also fail at runtime, of course, but in a
-                // kind of wacky way.
-                let _ = ["out of range value used"][
-                    !(value <= $max) as usize
-                ];
-
-                unsafe {
-                    $type { private: value }
+                    Self::from_u32_unchecked(value)
                 }
             }
 
             #[inline]
             $v const unsafe fn from_u32_unchecked(value: u32) -> Self {
-                $type { private: value }
+                Self { private: value }
             }
 
             /// Extracts the value of this index as an integer.
             #[inline]
-            $v fn index(self) -> usize {
+            $v const fn index(self) -> usize {
                 self.as_usize()
             }
 
             /// Extracts the value of this index as a `u32`.
             #[inline]
-            $v fn as_u32(self) -> u32 {
+            $v const fn as_u32(self) -> u32 {
                 self.private
             }
 
             /// Extracts the value of this index as a `usize`.
             #[inline]
-            $v fn as_usize(self) -> usize {
+            $v const fn as_usize(self) -> usize {
                 self.as_u32() as usize
             }
         }
@@ -175,59 +165,39 @@ macro_rules! newtype_index {
             type Output = Self;
 
             fn add(self, other: usize) -> Self {
-                Self::new(self.index() + other)
+                Self::from_usize(self.index() + other)
             }
         }
 
-        impl Idx for $type {
+        impl $crate::vec::Idx for $type {
             #[inline]
             fn new(value: usize) -> Self {
-                Self::from(value)
+                Self::from_usize(value)
             }
 
             #[inline]
             fn index(self) -> usize {
-                usize::from(self)
+                self.as_usize()
             }
         }
 
-        impl ::std::iter::Step for $type {
+        unsafe impl ::std::iter::Step for $type {
             #[inline]
             fn steps_between(start: &Self, end: &Self) -> Option<usize> {
                 <usize as ::std::iter::Step>::steps_between(
-                    &Idx::index(*start),
-                    &Idx::index(*end),
+                    &Self::index(*start),
+                    &Self::index(*end),
                 )
             }
 
             #[inline]
-            fn replace_one(&mut self) -> Self {
-                ::std::mem::replace(self, Self::new(1))
+            fn forward_checked(start: Self, u: usize) -> Option<Self> {
+                Self::index(start).checked_add(u).map(Self::from_usize)
             }
 
             #[inline]
-            fn replace_zero(&mut self) -> Self {
-                ::std::mem::replace(self, Self::new(0))
-            }
-
-            #[inline]
-            fn add_one(&self) -> Self {
-                Self::new(Idx::index(*self) + 1)
-            }
-
-            #[inline]
-            fn sub_one(&self) -> Self {
-                Self::new(Idx::index(*self) - 1)
-            }
-
-            #[inline]
-            fn add_usize(&self, u: usize) -> Option<Self> {
-                Idx::index(*self).checked_add(u).map(Self::new)
-            }
-
-            #[inline]
-            fn sub_usize(&self, u: usize) -> Option<Self> {
-                Idx::index(*self).checked_sub(u).map(Self::new)
+            fn backward_checked(start: Self, u: usize) -> Option<Self> {
+                Self::index(start).checked_sub(u).map(Self::from_usize)
             }
         }
 
@@ -248,14 +218,14 @@ macro_rules! newtype_index {
         impl From<usize> for $type {
             #[inline]
             fn from(value: usize) -> Self {
-                $type::from_usize(value)
+                Self::from_usize(value)
             }
         }
 
         impl From<u32> for $type {
             #[inline]
             fn from(value: u32) -> Self {
-                $type::from_u32(value)
+                Self::from_u32(value)
             }
         }
 
@@ -400,7 +370,7 @@ macro_rules! newtype_index {
     (@decodable $type:ident) => (
         impl ::rustc_serialize::Decodable for $type {
             fn decode<D: ::rustc_serialize::Decoder>(d: &mut D) -> Result<Self, D::Error> {
-                d.read_u32().map(Self::from)
+                d.read_u32().map(Self::from_u32)
             }
         }
     );
@@ -491,7 +461,7 @@ macro_rules! newtype_index {
                    const $name:ident = $constant:expr,
                    $($tokens:tt)*) => (
         $(#[doc = $doc])*
-        pub const $name: $type = $type::from_u32_const($constant);
+        $v const $name: $type = $type::from_u32($constant);
         $crate::newtype_index!(
             @derives      [$($derives,)*]
             @attrs        [$(#[$attrs])*]
@@ -506,7 +476,7 @@ macro_rules! newtype_index {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct IndexVec<I: Idx, T> {
     pub raw: Vec<T>,
-    _marker: PhantomData<fn(&I)>
+    _marker: PhantomData<fn(&I)>,
 }
 
 // Whether `IndexVec` is `Send` depends only on the data,
@@ -521,9 +491,7 @@ impl<I: Idx, T: Encodable> Encodable for IndexVec<I, T> {
 
 impl<I: Idx, T: Decodable> Decodable for IndexVec<I, T> {
     fn decode<D: Decoder>(d: &mut D) -> Result<Self, D::Error> {
-        Decodable::decode(d).map(|v| {
-            IndexVec { raw: v, _marker: PhantomData }
-        })
+        Decodable::decode(d).map(|v| IndexVec { raw: v, _marker: PhantomData })
     }
 }
 
@@ -553,16 +521,26 @@ impl<I: Idx, T> IndexVec<I, T> {
 
     #[inline]
     pub fn from_elem<S>(elem: T, universe: &IndexVec<I, S>) -> Self
-        where T: Clone
+    where
+        T: Clone,
     {
         IndexVec { raw: vec![elem; universe.len()], _marker: PhantomData }
     }
 
     #[inline]
     pub fn from_elem_n(elem: T, n: usize) -> Self
-        where T: Clone
+    where
+        T: Clone,
     {
         IndexVec { raw: vec![elem; n], _marker: PhantomData }
+    }
+
+    /// Create an `IndexVec` with `n` elements, where the value of each
+    /// element is the result of `func(i)`
+    #[inline]
+    pub fn from_fn_n(func: impl FnMut(I) -> T, n: usize) -> Self {
+        let indices = (0..n).map(I::new);
+        Self::from_raw(indices.map(func).collect())
     }
 
     #[inline]
@@ -600,8 +578,7 @@ impl<I: Idx, T> IndexVec<I, T> {
     }
 
     #[inline]
-    pub fn into_iter_enumerated(self) -> Enumerated<I, vec::IntoIter<T>>
-    {
+    pub fn into_iter_enumerated(self) -> Enumerated<I, vec::IntoIter<T>> {
         self.raw.into_iter().enumerate().map(IntoIdx { _marker: PhantomData })
     }
 
@@ -611,8 +588,7 @@ impl<I: Idx, T> IndexVec<I, T> {
     }
 
     #[inline]
-    pub fn iter_enumerated(&self) -> Enumerated<I, slice::Iter<'_, T>>
-    {
+    pub fn iter_enumerated(&self) -> Enumerated<I, slice::Iter<'_, T>> {
         self.raw.iter().enumerate().map(IntoIdx { _marker: PhantomData })
     }
 
@@ -627,20 +603,23 @@ impl<I: Idx, T> IndexVec<I, T> {
     }
 
     #[inline]
-    pub fn iter_enumerated_mut(&mut self) -> Enumerated<I, slice::IterMut<'_, T>>
-    {
+    pub fn iter_enumerated_mut(&mut self) -> Enumerated<I, slice::IterMut<'_, T>> {
         self.raw.iter_mut().enumerate().map(IntoIdx { _marker: PhantomData })
     }
 
     #[inline]
     pub fn drain<'a, R: RangeBounds<usize>>(
-        &'a mut self, range: R) -> impl Iterator<Item=T> + 'a {
+        &'a mut self,
+        range: R,
+    ) -> impl Iterator<Item = T> + 'a {
         self.raw.drain(range)
     }
 
     #[inline]
     pub fn drain_enumerated<'a, R: RangeBounds<usize>>(
-        &'a mut self, range: R) -> impl Iterator<Item=(I, T)> + 'a {
+        &'a mut self,
+        range: R,
+    ) -> impl Iterator<Item = (I, T)> + 'a {
         self.raw.drain(range).enumerate().map(IntoIdx { _marker: PhantomData })
     }
 
@@ -690,10 +669,7 @@ impl<I: Idx, T> IndexVec<I, T> {
     }
 
     pub fn convert_index_type<Ix: Idx>(self) -> IndexVec<Ix, T> {
-        IndexVec {
-            raw: self.raw,
-            _marker: PhantomData,
-        }
+        IndexVec { raw: self.raw, _marker: PhantomData }
     }
 }
 
@@ -764,7 +740,10 @@ impl<I: Idx, T> Extend<T> for IndexVec<I, T> {
 
 impl<I: Idx, T> FromIterator<T> for IndexVec<I, T> {
     #[inline]
-    fn from_iter<J>(iter: J) -> Self where J: IntoIterator<Item=T> {
+    fn from_iter<J>(iter: J) -> Self
+    where
+        J: IntoIterator<Item = T>,
+    {
         IndexVec { raw: FromIterator::from_iter(iter), _marker: PhantomData }
     }
 }
@@ -777,7 +756,6 @@ impl<I: Idx, T> IntoIterator for IndexVec<I, T> {
     fn into_iter(self) -> vec::IntoIter<T> {
         self.raw.into_iter()
     }
-
 }
 
 impl<'a, I: Idx, T> IntoIterator for &'a IndexVec<I, T> {
@@ -800,7 +778,9 @@ impl<'a, I: Idx, T> IntoIterator for &'a mut IndexVec<I, T> {
     }
 }
 
-pub struct IntoIdx<I: Idx> { _marker: PhantomData<fn(&I)> }
+pub struct IntoIdx<I: Idx> {
+    _marker: PhantomData<fn(&I)>,
+}
 impl<I: Idx, T> FnOnce<((usize, T),)> for IntoIdx<I> {
     type Output = (I, T);
 
@@ -828,3 +808,6 @@ impl<I: Idx> FnMut<(usize,)> for IntoIdx<I> {
         I::new(n)
     }
 }
+
+#[cfg(test)]
+mod tests;

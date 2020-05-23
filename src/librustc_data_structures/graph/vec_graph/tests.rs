@@ -13,16 +13,7 @@ fn create_graph() -> VecGraph<usize> {
     //
     //    6
 
-    VecGraph::new(
-        7,
-        vec![
-            (0, 1),
-            (1, 2),
-            (1, 3),
-            (3, 4),
-            (5, 1),
-        ],
-    )
+    VecGraph::new(7, vec![(0, 1), (1, 2), (1, 3), (3, 4), (5, 1)])
 }
 
 #[test]
@@ -32,7 +23,7 @@ fn num_nodes() {
 }
 
 #[test]
-fn succesors() {
+fn successors() {
     let graph = create_graph();
     assert_eq!(graph.successors(0), &[1]);
     assert_eq!(graph.successors(1), &[2, 3]);

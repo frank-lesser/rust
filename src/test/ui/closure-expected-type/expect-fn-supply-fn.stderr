@@ -4,8 +4,8 @@ error[E0308]: mismatched types
 LL |     with_closure_expecting_fn_with_free_region(|x: fn(&'x u32), y| {});
    |                                                    ^^^^^^^^^^^ lifetime mismatch
    |
-   = note: expected type `fn(&u32)`
-              found type `fn(&'x u32)`
+   = note: expected fn pointer `fn(&u32)`
+              found fn pointer `fn(&'x u32)`
 note: the anonymous lifetime #2 defined on the body at 14:48...
   --> $DIR/expect-fn-supply-fn.rs:14:48
    |
@@ -23,8 +23,8 @@ error[E0308]: mismatched types
 LL |     with_closure_expecting_fn_with_free_region(|x: fn(&'x u32), y| {});
    |                                                    ^^^^^^^^^^^ lifetime mismatch
    |
-   = note: expected type `fn(&u32)`
-              found type `fn(&'x u32)`
+   = note: expected fn pointer `fn(&u32)`
+              found fn pointer `fn(&'x u32)`
 note: the lifetime `'x` as defined on the function body at 11:36...
   --> $DIR/expect-fn-supply-fn.rs:11:36
    |
@@ -40,7 +40,7 @@ error[E0631]: type mismatch in closure arguments
   --> $DIR/expect-fn-supply-fn.rs:30:5
    |
 LL | fn with_closure_expecting_fn_with_free_region<F>(_: F)
-   |    ------------------------------------------
+   |    ------------------------------------------ required by a bound in this
 LL |     where F: for<'a> FnOnce(fn(&'a u32), &i32)
    |                      ------------------------- required by this bound in `with_closure_expecting_fn_with_free_region`
 ...
@@ -53,7 +53,7 @@ error[E0631]: type mismatch in closure arguments
   --> $DIR/expect-fn-supply-fn.rs:37:5
    |
 LL | fn with_closure_expecting_fn_with_bound_region<F>(_: F)
-   |    -------------------------------------------
+   |    ------------------------------------------- required by a bound in this
 LL |     where F: FnOnce(fn(&u32), &i32)
    |              ---------------------- required by this bound in `with_closure_expecting_fn_with_bound_region`
 ...
@@ -66,7 +66,7 @@ error[E0631]: type mismatch in closure arguments
   --> $DIR/expect-fn-supply-fn.rs:46:5
    |
 LL | fn with_closure_expecting_fn_with_bound_region<F>(_: F)
-   |    -------------------------------------------
+   |    ------------------------------------------- required by a bound in this
 LL |     where F: FnOnce(fn(&u32), &i32)
    |              ---------------------- required by this bound in `with_closure_expecting_fn_with_bound_region`
 ...
@@ -77,4 +77,5 @@ LL |     with_closure_expecting_fn_with_bound_region(|x: Foo<'_>, y| {
 
 error: aborting due to 5 previous errors
 
-For more information about this error, try `rustc --explain E0308`.
+Some errors have detailed explanations: E0308, E0631.
+For more information about an error, try `rustc --explain E0308`.

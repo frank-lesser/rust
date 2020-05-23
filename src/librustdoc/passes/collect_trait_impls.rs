@@ -1,15 +1,15 @@
+use super::Pass;
 use crate::clean::*;
 use crate::core::DocContext;
 use crate::fold::DocFolder;
-use super::Pass;
 
-use rustc::util::nodemap::FxHashSet;
-use rustc::hir::def_id::{LOCAL_CRATE, DefId};
-use syntax::symbol::sym;
+use rustc_data_structures::fx::FxHashSet;
+use rustc_hir::def_id::{DefId, LOCAL_CRATE};
+use rustc_span::symbol::sym;
 
 pub const COLLECT_TRAIT_IMPLS: Pass = Pass {
     name: "collect-trait-impls",
-    pass: collect_trait_impls,
+    run: collect_trait_impls,
     description: "retrieves trait impls for items in the crate",
 };
 
@@ -17,8 +17,7 @@ pub fn collect_trait_impls(krate: Crate, cx: &DocContext<'_>) -> Crate {
     let mut synth = SyntheticImplCollector::new(cx);
     let mut krate = synth.fold_crate(krate);
 
-    let prims: FxHashSet<PrimitiveType> =
-        krate.primitives.iter().map(|p| p.1).collect();
+    let prims: FxHashSet<PrimitiveType> = krate.primitives.iter().map(|p| p.1).collect();
 
     let crate_items = {
         let mut coll = ItemCollector::new();
@@ -63,6 +62,8 @@ pub fn collect_trait_impls(krate: Crate, cx: &DocContext<'_>) -> Crate {
         lang_items.slice_u8_alloc_impl(),
         lang_items.const_ptr_impl(),
         lang_items.mut_ptr_impl(),
+        lang_items.const_slice_ptr_impl(),
+        lang_items.mut_slice_ptr_impl(),
     ];
 
     for def_id in primitive_impls.iter().filter_map(|&def_id| def_id) {
@@ -80,21 +81,19 @@ pub fn collect_trait_impls(krate: Crate, cx: &DocContext<'_>) -> Crate {
         }
     }
 
-    let mut cleaner = BadImplStripper {
-        prims,
-        items: crate_items,
-    };
+    let mut cleaner = BadImplStripper { prims, items: crate_items };
 
     // scan through included items ahead of time to splice in Deref targets to the "valid" sets
     for it in &new_items {
         if let ImplItem(Impl { ref for_, ref trait_, ref items, .. }) = it.inner {
             if cleaner.keep_item(for_) && trait_.def_id() == cx.tcx.lang_items().deref_trait() {
-                let target = items.iter().filter_map(|item| {
-                    match item.inner {
+                let target = items
+                    .iter()
+                    .find_map(|item| match item.inner {
                         TypedefItem(ref t, true) => Some(&t.type_),
                         _ => None,
-                    }
-                }).next().expect("Deref impl without Target type");
+                    })
+                    .expect("Deref impl without Target type");
 
                 if let Some(prim) = target.primitive_type() {
                     cleaner.prims.insert(prim);
@@ -107,9 +106,9 @@ pub fn collect_trait_impls(krate: Crate, cx: &DocContext<'_>) -> Crate {
 
     new_items.retain(|it| {
         if let ImplItem(Impl { ref for_, ref trait_, ref blanket_impl, .. }) = it.inner {
-            cleaner.keep_item(for_) ||
-                trait_.as_ref().map_or(false, |t| cleaner.keep_item(t)) ||
-                blanket_impl.is_some()
+            cleaner.keep_item(for_)
+                || trait_.as_ref().map_or(false, |t| cleaner.keep_item(t))
+                || blanket_impl.is_some()
         } else {
             true
         }
@@ -120,7 +119,7 @@ pub fn collect_trait_impls(krate: Crate, cx: &DocContext<'_>) -> Crate {
     for &trait_did in cx.tcx.all_traits(LOCAL_CRATE).iter() {
         for &impl_node in cx.tcx.hir().trait_impls(trait_did) {
             let impl_did = cx.tcx.hir().local_def_id(impl_node);
-            inline::build_impl(cx, impl_did, None, &mut new_items);
+            inline::build_impl(cx, impl_did.to_def_id(), None, &mut new_items);
         }
     }
 
@@ -145,10 +144,7 @@ struct SyntheticImplCollector<'a, 'tcx> {
 
 impl<'a, 'tcx> SyntheticImplCollector<'a, 'tcx> {
     fn new(cx: &'a DocContext<'tcx>) -> Self {
-        SyntheticImplCollector {
-            cx,
-            impls: Vec::new(),
-        }
+        SyntheticImplCollector { cx, impls: Vec::new() }
     }
 }
 
