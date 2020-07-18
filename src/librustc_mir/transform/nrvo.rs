@@ -44,18 +44,6 @@ impl<'tcx> MirPass<'tcx> for RenameReturnPlace {
             }
         };
 
-        // Sometimes, the return place is assigned a local of a different but coercable type, for
-        // example `&T` instead of `&mut T`. Overwriting the `LocalInfo` for the return place would
-        // result in it having an incorrect type. Although this doesn't seem to cause a problem in
-        // codegen, bail out anyways since it happens so rarely.
-        let ret_ty = body.local_decls[mir::RETURN_PLACE].ty;
-        let assigned_ty = body.local_decls[returned_local].ty;
-        if ret_ty != assigned_ty {
-            debug!("`{:?}` was eligible for NRVO but for type mismatch", src.def_id());
-            debug!("typeof(_0) != typeof({:?}); {:?} != {:?}", returned_local, ret_ty, assigned_ty);
-            return;
-        }
-
         debug!(
             "`{:?}` was eligible for NRVO, making {:?} the return place",
             src.def_id(),
@@ -72,6 +60,12 @@ impl<'tcx> MirPass<'tcx> for RenameReturnPlace {
         // Overwrite the debuginfo of `_0` with that of the renamed local.
         let (renamed_decl, ret_decl) =
             body.local_decls.pick2_mut(returned_local, mir::RETURN_PLACE);
+
+        // Sometimes, the return place is assigned a local of a different but coercable type, for
+        // example `&mut T` instead of `&T`. Overwriting the `LocalInfo` for the return place means
+        // its type may no longer match the return type of its function. This doesn't cause a
+        // problem in codegen because these two types are layout-compatible, but may be unexpected.
+        debug!("_0: {:?} = {:?}: {:?}", ret_decl.ty, returned_local, renamed_decl.ty);
         ret_decl.clone_from(renamed_decl);
 
         // The return place is always mutable.
@@ -117,7 +111,7 @@ fn local_eligible_for_nrvo(body: &mut mir::Body<'_>) -> Option<Local> {
         copied_to_return_place = Some(returned_local);
     }
 
-    return copied_to_return_place;
+    copied_to_return_place
 }
 
 fn find_local_assigned_to_return_place(
@@ -142,7 +136,7 @@ fn find_local_assigned_to_return_place(
         }
     }
 
-    return None;
+    None
 }
 
 // If this statement is an assignment of an unprojected local to the return place,

@@ -28,7 +28,6 @@ use crate::traits::query::evaluate_obligation::InferCtxtExt as _;
 use rustc_errors::ErrorReported;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
-use rustc_middle::middle::region;
 use rustc_middle::ty::fold::TypeFoldable;
 use rustc_middle::ty::subst::{InternalSubsts, SubstsRef};
 use rustc_middle::ty::{
@@ -39,9 +38,9 @@ use rustc_span::Span;
 use std::fmt::Debug;
 
 pub use self::FulfillmentErrorCode::*;
+pub use self::ImplSource::*;
 pub use self::ObligationCauseCode::*;
 pub use self::SelectionError::*;
-pub use self::Vtable::*;
 
 pub use self::coherence::{add_placeholder_note, orphan_check, overlapping_impls};
 pub use self::coherence::{OrphanCheckErr, OverlapResult};
@@ -61,7 +60,6 @@ pub use self::specialize::specialization_graph::FutureCompatOverlapError;
 pub use self::specialize::specialization_graph::FutureCompatOverlapErrorKind;
 pub use self::specialize::{specialization_graph, translate_substs, OverlapError};
 pub use self::structural_match::search_for_structural_match_violation;
-pub use self::structural_match::type_marked_structural;
 pub use self::structural_match::NonStructuralMatchTy;
 pub use self::util::{elaborate_predicates, elaborate_trait_ref, elaborate_trait_refs};
 pub use self::util::{expand_trait_aliases, TraitAliasExpander};
@@ -237,15 +235,12 @@ fn do_normalize_predicates<'tcx>(
 
         debug!("do_normalize_predictes: normalized predicates = {:?}", predicates);
 
-        let region_scope_tree = region::ScopeTree::default();
-
         // We can use the `elaborated_env` here; the region code only
         // cares about declarations like `'a: 'b`.
         let outlives_env = OutlivesEnvironment::new(elaborated_env);
 
         infcx.resolve_regions_and_report_errors(
             region_context,
-            &region_scope_tree,
             &outlives_env,
             RegionckMode::default(),
         );
@@ -302,7 +297,7 @@ pub fn normalize_param_env_or_error<'tcx>(
     );
 
     let mut predicates: Vec<_> =
-        util::elaborate_predicates(tcx, unnormalized_env.caller_bounds.into_iter().cloned())
+        util::elaborate_predicates(tcx, unnormalized_env.caller_bounds().into_iter())
             .map(|obligation| obligation.predicate)
             .collect();
 
@@ -310,7 +305,7 @@ pub fn normalize_param_env_or_error<'tcx>(
 
     let elaborated_env = ty::ParamEnv::new(
         tcx.intern_predicates(&predicates),
-        unnormalized_env.reveal,
+        unnormalized_env.reveal(),
         unnormalized_env.def_id,
     );
 
@@ -366,7 +361,7 @@ pub fn normalize_param_env_or_error<'tcx>(
     let outlives_env: Vec<_> =
         non_outlives_predicates.iter().chain(&outlives_predicates).cloned().collect();
     let outlives_env =
-        ty::ParamEnv::new(tcx.intern_predicates(&outlives_env), unnormalized_env.reveal, None);
+        ty::ParamEnv::new(tcx.intern_predicates(&outlives_env), unnormalized_env.reveal(), None);
     let outlives_predicates = match do_normalize_predicates(
         tcx,
         region_context,
@@ -388,7 +383,7 @@ pub fn normalize_param_env_or_error<'tcx>(
     debug!("normalize_param_env_or_error: final predicates={:?}", predicates);
     ty::ParamEnv::new(
         tcx.intern_predicates(&predicates),
-        unnormalized_env.reveal,
+        unnormalized_env.reveal(),
         unnormalized_env.def_id,
     )
 }
@@ -544,13 +539,6 @@ fn type_implements_trait<'tcx>(
         trait_def_id, ty, params, param_env
     );
 
-    // Do not check on infer_types to avoid panic in evaluate_obligation.
-    if ty.has_infer_types() {
-        return false;
-    }
-
-    let ty = tcx.erase_regions(&ty);
-
     let trait_ref = ty::TraitRef { def_id: trait_def_id, substs: tcx.mk_substs_trait(ty, params) };
 
     let obligation = Obligation {
@@ -562,8 +550,9 @@ fn type_implements_trait<'tcx>(
     tcx.infer_ctxt().enter(|infcx| infcx.predicate_must_hold_modulo_regions(&obligation))
 }
 
-pub fn provide(providers: &mut ty::query::Providers<'_>) {
+pub fn provide(providers: &mut ty::query::Providers) {
     object_safety::provide(providers);
+    structural_match::provide(providers);
     *providers = ty::query::Providers {
         specialization_graph_of: specialize::specialization_graph_provider,
         specializes: specialize::specializes,

@@ -54,7 +54,6 @@
 )]
 #![allow(missing_docs)]
 
-#[cfg(not(bootstrap))]
 use crate::marker::DiscriminantKind;
 use crate::mem;
 
@@ -953,6 +952,7 @@ extern "rust-intrinsic" {
     /// Any use other than with `if` statements will probably not have an effect.
     ///
     /// This intrinsic does not have a stable counterpart.
+    #[rustc_const_unstable(feature = "const_likely", issue = "none")]
     pub fn likely(b: bool) -> bool;
 
     /// Hints to the compiler that branch condition is likely to be false.
@@ -961,6 +961,7 @@ extern "rust-intrinsic" {
     /// Any use other than with `if` statements will probably not have an effect.
     ///
     /// This intrinsic does not have a stable counterpart.
+    #[rustc_const_unstable(feature = "const_likely", issue = "none")]
     pub fn unlikely(b: bool) -> bool;
 
     /// Executes a breakpoint trap, for inspection by a debugger.
@@ -1013,7 +1014,7 @@ extern "rust-intrinsic" {
     ///
     /// The stabilized version of this intrinsic is
     /// [`std::any::type_name`](../../std/any/fn.type_name.html)
-    #[rustc_const_unstable(feature = "const_type_name", issue = "none")]
+    #[rustc_const_unstable(feature = "const_type_name", issue = "63084")]
     pub fn type_name<T: ?Sized>() -> &'static str;
 
     /// Gets an identifier which is globally unique to the specified type. This
@@ -1022,7 +1023,7 @@ extern "rust-intrinsic" {
     ///
     /// The stabilized version of this intrinsic is
     /// [`std::any::TypeId::of`](../../std/any/struct.TypeId.html#method.of)
-    #[rustc_const_unstable(feature = "const_type_id", issue = "none")]
+    #[rustc_const_unstable(feature = "const_type_id", issue = "41875")]
     pub fn type_id<T: ?Sized + 'static>() -> u64;
 
     /// A guard for unsafe functions that cannot ever be executed if `T` is uninhabited:
@@ -1125,7 +1126,7 @@ extern "rust-intrinsic" {
     ///
     /// // use `u32::from_ne_bytes` instead
     /// let num = u32::from_ne_bytes(raw_bytes);
-    /// // or use `u32::from_le_bytes` or `u32::from_ge_bytes` to specify the endianness
+    /// // or use `u32::from_le_bytes` or `u32::from_be_bytes` to specify the endianness
     /// let num = u32::from_le_bytes(raw_bytes);
     /// assert_eq!(num, 0x12345678);
     /// let num = u32::from_be_bytes(raw_bytes);
@@ -1284,7 +1285,9 @@ extern "rust-intrinsic" {
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_unstable(feature = "const_transmute", issue = "53605")]
+    // NOTE: While this makes the intrinsic const stable, we have some custom code in const fn
+    // checks that prevent its use within `const fn`.
+    #[rustc_const_stable(feature = "const_transmute", since = "1.46.0")]
     pub fn transmute<T, U>(e: T) -> U;
 
     /// Returns `true` if the actual type given as `T` requires drop
@@ -1292,7 +1295,7 @@ extern "rust-intrinsic" {
     /// implements `Copy`.
     ///
     /// If the actual type neither requires drop glue nor implements
-    /// `Copy`, then may return `true` or `false`.
+    /// `Copy`, then the return value of this function is unspecified.
     ///
     /// The stabilized version of this intrinsic is
     /// [`std::mem::needs_drop`](../../std/mem/fn.needs_drop.html).
@@ -1314,6 +1317,7 @@ extern "rust-intrinsic" {
     /// The stabilized version of this intrinsic is
     /// [`std::pointer::offset`](../../std/primitive.pointer.html#method.offset).
     #[must_use = "returns a new pointer rather than modifying its argument"]
+    #[rustc_const_unstable(feature = "const_ptr_offset", issue = "71499")]
     pub fn offset<T>(dst: *const T, offset: isize) -> *const T;
 
     /// Calculates the offset from a pointer, potentially wrapping.
@@ -1331,6 +1335,7 @@ extern "rust-intrinsic" {
     /// The stabilized version of this intrinsic is
     /// [`std::pointer::wrapping_offset`](../../std/primitive.pointer.html#method.wrapping_offset).
     #[must_use = "returns a new pointer rather than modifying its argument"]
+    #[rustc_const_unstable(feature = "const_ptr_offset", issue = "71499")]
     pub fn arith_offset<T>(dst: *const T, offset: isize) -> *const T;
 
     /// Equivalent to the appropriate `llvm.memcpy.p0i8.0i8.*` intrinsic, with
@@ -1914,11 +1919,15 @@ extern "rust-intrinsic" {
     /// The stabilized version of this intrinsic is
     /// [`std::mem::discriminant`](../../std/mem/fn.discriminant.html)
     #[rustc_const_unstable(feature = "const_discriminant", issue = "69821")]
-    #[cfg(not(bootstrap))]
     pub fn discriminant_value<T>(v: &T) -> <T as DiscriminantKind>::Discriminant;
-    #[rustc_const_unstable(feature = "const_discriminant", issue = "69821")]
-    #[cfg(bootstrap)]
-    pub fn discriminant_value<T>(v: &T) -> u64;
+
+    /// Returns the number of variants of the type `T` cast to a `usize`;
+    /// if `T` has no variants, returns 0. Uninhabited variants will be counted.
+    ///
+    /// The to-be-stabilized version of this intrinsic is
+    /// [`std::mem::variant_count`](../../std/mem/fn.variant_count.html)
+    #[rustc_const_unstable(feature = "variant_count", issue = "73662")]
+    pub fn variant_count<T>() -> usize;
 
     /// Rust's "try catch" construct which invokes the function pointer `try_fn`
     /// with the data pointer `data`.
@@ -1934,7 +1943,7 @@ extern "rust-intrinsic" {
     pub fn nontemporal_store<T>(ptr: *mut T, val: T);
 
     /// See documentation of `<*const T>::offset_from` for details.
-    #[rustc_const_unstable(feature = "const_ptr_offset_from", issue = "none")]
+    #[rustc_const_unstable(feature = "const_ptr_offset_from", issue = "41079")]
     pub fn ptr_offset_from<T>(ptr: *const T, base: *const T) -> isize;
 
     /// Internal hook used by Miri to implement unwinding.
@@ -1944,6 +1953,50 @@ extern "rust-intrinsic" {
     ///
     /// Perma-unstable: do not use.
     pub fn miri_start_panic(payload: *mut u8) -> !;
+
+    /// Internal placeholder for injecting code coverage counters when the "instrument-coverage"
+    /// option is enabled. The placeholder is replaced with `llvm.instrprof.increment` during code
+    /// generation.
+    #[lang = "count_code_region"]
+    pub fn count_code_region(index: u32, start_byte_pos: u32, end_byte_pos: u32);
+
+    /// Internal marker for code coverage expressions, injected into the MIR when the
+    /// "instrument-coverage" option is enabled. This intrinsic is not converted into a
+    /// backend intrinsic call, but its arguments are extracted during the production of a
+    /// "coverage map", which is injected into the generated code, as additional data.
+    /// This marker identifies a code region and two other counters or counter expressions
+    /// whose sum is the number of times the code region was executed.
+    pub fn coverage_counter_add(
+        index: u32,
+        left_index: u32,
+        right_index: u32,
+        start_byte_pos: u32,
+        end_byte_pos: u32,
+    );
+
+    /// This marker identifies a code region and two other counters or counter expressions
+    /// whose difference is the number of times the code region was executed.
+    /// (See `coverage_counter_add` for more information.)
+    pub fn coverage_counter_subtract(
+        index: u32,
+        left_index: u32,
+        right_index: u32,
+        start_byte_pos: u32,
+        end_byte_pos: u32,
+    );
+
+    /// This marker identifies a code region to be added to the "coverage map" to indicate source
+    /// code that can never be reached.
+    /// (See `coverage_counter_add` for more information.)
+    pub fn coverage_unreachable(start_byte_pos: u32, end_byte_pos: u32);
+
+    /// See documentation of `<*const T>::guaranteed_eq` for details.
+    #[rustc_const_unstable(feature = "const_raw_ptr_comparison", issue = "53020")]
+    pub fn ptr_guaranteed_eq<T>(ptr: *const T, other: *const T) -> bool;
+
+    /// See documentation of `<*const T>::guaranteed_ne` for details.
+    #[rustc_const_unstable(feature = "const_raw_ptr_comparison", issue = "53020")]
+    pub fn ptr_guaranteed_ne<T>(ptr: *const T, other: *const T) -> bool;
 }
 
 // Some functions are defined here because they accidentally got made
@@ -2060,10 +2113,18 @@ pub unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
         fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize);
     }
 
-    debug_assert!(is_aligned_and_not_null(src), "attempt to copy from unaligned or null pointer");
-    debug_assert!(is_aligned_and_not_null(dst), "attempt to copy to unaligned or null pointer");
-    debug_assert!(is_nonoverlapping(src, dst, count), "attempt to copy to overlapping memory");
-    copy_nonoverlapping(src, dst, count)
+    if cfg!(debug_assertions)
+        && !(is_aligned_and_not_null(src)
+            && is_aligned_and_not_null(dst)
+            && is_nonoverlapping(src, dst, count))
+    {
+        // Not panicking to keep codegen impact smaller.
+        abort();
+    }
+
+    // SAFETY: the safety contract for `copy_nonoverlapping` must be
+    // upheld by the caller.
+    unsafe { copy_nonoverlapping(src, dst, count) }
 }
 
 /// Copies `count * size_of::<T>()` bytes from `src` to `dst`. The source
@@ -2125,9 +2186,13 @@ pub unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
         fn copy<T>(src: *const T, dst: *mut T, count: usize);
     }
 
-    debug_assert!(is_aligned_and_not_null(src), "attempt to copy from unaligned or null pointer");
-    debug_assert!(is_aligned_and_not_null(dst), "attempt to copy to unaligned or null pointer");
-    copy(src, dst, count)
+    if cfg!(debug_assertions) && !(is_aligned_and_not_null(src) && is_aligned_and_not_null(dst)) {
+        // Not panicking to keep codegen impact smaller.
+        abort();
+    }
+
+    // SAFETY: the safety contract for `copy` must be upheld by the caller.
+    unsafe { copy(src, dst, count) }
 }
 
 /// Sets `count * size_of::<T>()` bytes of memory starting at `dst` to
@@ -2210,5 +2275,7 @@ pub unsafe fn write_bytes<T>(dst: *mut T, val: u8, count: usize) {
     }
 
     debug_assert!(is_aligned_and_not_null(dst), "attempt to write to unaligned or null pointer");
-    write_bytes(dst, val, count)
+
+    // SAFETY: the safety contract for `write_bytes` must be upheld by the caller.
+    unsafe { write_bytes(dst, val, count) }
 }

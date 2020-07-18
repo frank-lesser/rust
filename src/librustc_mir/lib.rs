@@ -10,8 +10,6 @@ Rust MIR: a lowered representation of Rust.
 #![feature(box_patterns)]
 #![feature(box_syntax)]
 #![feature(const_fn)]
-#![feature(const_if_match)]
-#![feature(const_loop)]
 #![feature(const_panic)]
 #![feature(crate_visibility_modifier)]
 #![feature(decl_macro)]
@@ -47,7 +45,7 @@ pub mod util;
 
 use rustc_middle::ty::query::Providers;
 
-pub fn provide(providers: &mut Providers<'_>) {
+pub fn provide(providers: &mut Providers) {
     borrow_check::provide(providers);
     const_eval::provide(providers);
     shim::provide(providers);
@@ -56,10 +54,6 @@ pub fn provide(providers: &mut Providers<'_>) {
     providers.const_eval_validated = const_eval::const_eval_validated_provider;
     providers.const_eval_raw = const_eval::const_eval_raw_provider;
     providers.const_caller_location = const_eval::const_caller_location;
-    providers.const_field = |tcx, param_env_and_value| {
-        let (param_env, (value, field)) = param_env_and_value.into_parts();
-        const_eval::const_field(tcx, param_env, None, field, value)
-    };
     providers.destructure_const = |tcx, param_env_and_value| {
         let (param_env, value) = param_env_and_value.into_parts();
         const_eval::destructure_const(tcx, param_env, value)

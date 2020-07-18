@@ -59,7 +59,11 @@ declare_clippy_lint! {
     ///
     /// **Example:**
     /// ```rust
+    /// // Bad
     /// fn foo(a: i32, _a: i32) {}
+    ///
+    /// // Good
+    /// fn bar(a: i32, _b: i32) {}
     /// ```
     pub DUPLICATE_UNDERSCORE_ARGUMENT,
     style,
@@ -77,7 +81,11 @@ declare_clippy_lint! {
     ///
     /// **Example:**
     /// ```rust,ignore
-    /// (|| 42)()
+    /// // Bad
+    /// let a = (|| 42)()
+    ///
+    /// // Good
+    /// let a = 42
     /// ```
     pub REDUNDANT_CLOSURE_CALL,
     complexity,
@@ -112,7 +120,11 @@ declare_clippy_lint! {
     ///
     /// **Example:**
     /// ```rust
+    /// // Bad
     /// let y = 0x1a9BAcD;
+    ///
+    /// // Good
+    /// let y = 0x1A9BACD;
     /// ```
     pub MIXED_CASE_HEX_LITERALS,
     style,
@@ -129,7 +141,11 @@ declare_clippy_lint! {
     ///
     /// **Example:**
     /// ```rust
+    /// // Bad
     /// let y = 123832i32;
+    ///
+    /// // Good
+    /// let y = 123832_i32;
     /// ```
     pub UNSEPARATED_LITERAL_SUFFIX,
     pedantic,
@@ -207,9 +223,16 @@ declare_clippy_lint! {
     /// ```rust
     /// # let v = Some("abc");
     ///
+    /// // Bad
     /// match v {
     ///     Some(x) => (),
-    ///     y @ _ => (), // easier written as `y`,
+    ///     y @ _ => (),
+    /// }
+    ///
+    /// // Good
+    /// match v {
+    ///     Some(x) => (),
+    ///     y => (),
     /// }
     /// ```
     pub REDUNDANT_PATTERN,
@@ -235,16 +258,13 @@ declare_clippy_lint! {
     /// # struct TupleStruct(u32, u32, u32);
     /// # let t = TupleStruct(1, 2, 3);
     ///
+    /// // Bad
     /// match t {
     ///     TupleStruct(0, .., _) => (),
     ///     _ => (),
     /// }
-    /// ```
-    /// can be written as
-    /// ```rust
-    /// # struct TupleStruct(u32, u32, u32);
-    /// # let t = TupleStruct(1, 2, 3);
     ///
+    /// // Good
     /// match t {
     ///     TupleStruct(0, ..) => (),
     ///     _ => (),
@@ -379,7 +399,7 @@ impl EarlyLintPass for MiscEarlyLints {
             let left_binding = match left {
                 BindingMode::ByRef(Mutability::Mut) => "ref mut ",
                 BindingMode::ByRef(Mutability::Not) => "ref ",
-                _ => "",
+                BindingMode::ByValue(..) => "",
             };
 
             if let PatKind::Wild = right.kind {
@@ -621,28 +641,22 @@ fn check_unneeded_wildcard_pattern(cx: &EarlyContext<'_>, pat: &Pat) {
             );
         }
 
-        #[allow(clippy::trivially_copy_pass_by_ref)]
-        fn is_wild<P: std::ops::Deref<Target = Pat>>(pat: &&P) -> bool {
-            if let PatKind::Wild = pat.kind {
-                true
-            } else {
-                false
-            }
-        }
-
         if let Some(rest_index) = patterns.iter().position(|pat| pat.is_rest()) {
             if let Some((left_index, left_pat)) = patterns[..rest_index]
                 .iter()
                 .rev()
-                .take_while(is_wild)
+                .take_while(|pat| matches!(pat.kind, PatKind::Wild))
                 .enumerate()
                 .last()
             {
                 span_lint(cx, left_pat.span.until(patterns[rest_index].span), left_index == 0);
             }
 
-            if let Some((right_index, right_pat)) =
-                patterns[rest_index + 1..].iter().take_while(is_wild).enumerate().last()
+            if let Some((right_index, right_pat)) = patterns[rest_index + 1..]
+                .iter()
+                .take_while(|pat| matches!(pat.kind, PatKind::Wild))
+                .enumerate()
+                .last()
             {
                 span_lint(
                     cx,

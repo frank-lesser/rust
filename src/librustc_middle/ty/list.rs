@@ -2,9 +2,11 @@ use crate::arena::Arena;
 
 use rustc_serialize::{Encodable, Encoder};
 
-use std::cmp::{self, Ordering};
+use std::alloc::Layout;
+use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::iter;
 use std::mem;
 use std::ops::Deref;
 use std::ptr;
@@ -21,6 +23,10 @@ extern "C" {
 /// the same contents can exist in the same context.
 /// This means we can use pointer for both
 /// equality comparisons and hashing.
+///
+/// Unlike slices, The types contained in `List` are expected to be `Copy`
+/// and iterating over a `List` returns `T` instead of a reference.
+///
 /// Note: `Slice` was already taken by the `Ty`.
 #[repr(C)]
 pub struct List<T> {
@@ -38,19 +44,11 @@ impl<T: Copy> List<T> {
         assert!(mem::size_of::<T>() != 0);
         assert!(!slice.is_empty());
 
-        // Align up the size of the len (usize) field
-        let align = mem::align_of::<T>();
-        let align_mask = align - 1;
-        let offset = mem::size_of::<usize>();
-        let offset = (offset + align_mask) & !align_mask;
-
-        let size = offset + slice.len() * mem::size_of::<T>();
-
-        let mem = arena
-            .dropless
-            .alloc_raw(size, cmp::max(mem::align_of::<T>(), mem::align_of::<usize>()));
+        let (layout, _offset) =
+            Layout::new::<usize>().extend(Layout::for_value::<[T]>(slice)).unwrap();
+        let mem = arena.dropless.alloc_raw(layout);
         unsafe {
-            let result = &mut *(mem.as_mut_ptr() as *mut List<T>);
+            let result = &mut *(mem as *mut List<T>);
             // Write the length
             result.len = slice.len();
 
@@ -60,6 +58,15 @@ impl<T: Copy> List<T> {
 
             result
         }
+    }
+
+    // If this method didn't exist, we would use `slice.iter` due to
+    // deref coercion.
+    //
+    // This would be weird, as `self.into_iter` iterates over `T` directly.
+    #[inline(always)]
+    pub fn iter(&self) -> <&'_ List<T> as IntoIterator>::IntoIter {
+        self.into_iter()
     }
 }
 
@@ -128,12 +135,12 @@ impl<T> AsRef<[T]> for List<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a List<T> {
-    type Item = &'a T;
-    type IntoIter = <&'a [T] as IntoIterator>::IntoIter;
+impl<'a, T: Copy> IntoIterator for &'a List<T> {
+    type Item = T;
+    type IntoIter = iter::Copied<<&'a [T] as IntoIterator>::IntoIter>;
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
-        self[..].iter()
+        self[..].iter().copied()
     }
 }
 

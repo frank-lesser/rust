@@ -49,11 +49,13 @@ pub struct Command {
     stderr: Option<Stdio>,
 }
 
-// Create a new type for argv, so that we can make it `Send`
+// Create a new type for `Argv`, so that we can make it `Send` and `Sync`
 struct Argv(Vec<*const c_char>);
 
-// It is safe to make Argv Send, because it contains pointers to memory owned by `Command.args`
+// It is safe to make `Argv` `Send` and `Sync`, because it contains
+// pointers to memory owned by `Command.args`
 unsafe impl Send for Argv {}
+unsafe impl Sync for Argv {}
 
 // passed back to std::process with the pipes connected to the child, if any
 // were requested
@@ -374,6 +376,7 @@ impl ExitStatus {
     }
 }
 
+/// Converts a raw `c_int` to a type-safe `ExitStatus` by wrapping it without copying.
 impl From<c_int> for ExitStatus {
     fn from(a: c_int) -> ExitStatus {
         ExitStatus(a)

@@ -3,7 +3,6 @@
 use super::{check_fn, Expectation, FnCtxt, GeneratorTypes};
 
 use crate::astconv::AstConv;
-use crate::middle::region;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::{FutureTraitLangItem, GeneratorTraitLangItem};
@@ -12,12 +11,11 @@ use rustc_infer::infer::LateBoundRegionConversionTime;
 use rustc_infer::infer::{InferOk, InferResult};
 use rustc_middle::ty::fold::TypeFoldable;
 use rustc_middle::ty::subst::InternalSubsts;
-use rustc_middle::ty::{self, GenericParamDefKind, ToPredicate, Ty};
+use rustc_middle::ty::{self, GenericParamDefKind, Ty};
 use rustc_span::source_map::Span;
 use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::traits::error_reporting::ArgKind;
 use rustc_trait_selection::traits::error_reporting::InferCtxtExt as _;
-use rustc_trait_selection::traits::Obligation;
 use std::cmp;
 use std::iter;
 
@@ -92,18 +90,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             base_substs.extend_to(self.tcx, expr_def_id.to_def_id(), |param, _| match param.kind {
                 GenericParamDefKind::Lifetime => span_bug!(expr.span, "closure has lifetime param"),
                 GenericParamDefKind::Type { .. } => if param.index as usize == tupled_upvars_idx {
-                    self.tcx.mk_tup(self.tcx.upvars(expr_def_id).iter().flat_map(|upvars| {
-                        upvars.iter().map(|(&var_hir_id, _)| {
-                            // Create type variables (for now) to represent the transformed
-                            // types of upvars. These will be unified during the upvar
-                            // inference phase (`upvar.rs`).
-                            self.infcx.next_ty_var(TypeVariableOrigin {
-                                // FIXME(eddyb) distinguish upvar inference variables from the rest.
-                                kind: TypeVariableOriginKind::ClosureSynthetic,
-                                span: self.tcx.hir().span(var_hir_id),
+                    self.tcx.mk_tup(self.tcx.upvars_mentioned(expr_def_id).iter().flat_map(
+                        |upvars| {
+                            upvars.iter().map(|(&var_hir_id, _)| {
+                                // Create type variables (for now) to represent the transformed
+                                // types of upvars. These will be unified during the upvar
+                                // inference phase (`upvar.rs`).
+                                self.infcx.next_ty_var(TypeVariableOrigin {
+                                    // FIXME(eddyb) distinguish upvar inference variables from the rest.
+                                    kind: TypeVariableOriginKind::ClosureSynthetic,
+                                    span: self.tcx.hir().span(var_hir_id),
+                                })
                             })
-                        })
-                    }))
+                        },
+                    ))
                 } else {
                     // Create type variables (for now) to represent the various
                     // pieces of information kept in `{Closure,Generic}Substs`.
@@ -179,7 +179,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             ty::Dynamic(ref object_type, ..) => {
                 let sig = object_type.projection_bounds().find_map(|pb| {
                     let pb = pb.with_self_ty(self.tcx, self.tcx.types.trait_object_dummy_self);
-                    self.deduce_sig_from_projection(None, &pb)
+                    self.deduce_sig_from_projection(None, pb)
                 });
                 let kind = object_type
                     .principal_def_id()
@@ -188,7 +188,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
             ty::Infer(ty::TyVar(vid)) => self.deduce_expectations_from_obligations(vid),
             ty::FnPtr(sig) => {
-                let expected_sig = ExpectedSig { cause_span: None, sig: *sig.skip_binder() };
+                let expected_sig = ExpectedSig { cause_span: None, sig: sig.skip_binder() };
                 (Some(expected_sig), Some(ty::ClosureKind::Fn))
             }
             _ => (None, None),
@@ -206,8 +206,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     obligation.predicate
                 );
 
-                if let ty::PredicateKind::Projection(ref proj_predicate) =
-                    obligation.predicate.kind()
+                if let &ty::PredicateKind::Projection(proj_predicate) = obligation.predicate.kind()
                 {
                     // Given a Projection predicate, we can potentially infer
                     // the complete signature.
@@ -238,7 +237,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn deduce_sig_from_projection(
         &self,
         cause_span: Option<Span>,
-        projection: &ty::PolyProjectionPredicate<'tcx>,
+        projection: ty::PolyProjectionPredicate<'tcx>,
     ) -> Option<ExpectedSig<'tcx>> {
         let tcx = self.tcx;
 
@@ -417,7 +416,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // Up till this point, we have ignored the annotations that the user
         // gave. This function will check that they unify successfully.
         // Along the way, it also writes out entries for types that the user
-        // wrote into our tables, which are then later used by the privacy
+        // wrote into our typeck results, which are then later used by the privacy
         // check.
         match self.check_supplied_sig_against_expectation(expr_def_id, decl, body, &closure_sigs) {
             Ok(infer_ok) => self.register_infer_ok_obligations(infer_ok),
@@ -502,7 +501,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             for ((hir_ty, &supplied_ty), expected_ty) in decl
                 .inputs
                 .iter()
-                .zip(*supplied_sig.inputs().skip_binder()) // binder moved to (*) below
+                .zip(supplied_sig.inputs().skip_binder()) // binder moved to (*) below
                 .zip(expected_sigs.liberated_sig.inputs())
             // `liberated_sig` is E'.
             {
@@ -518,22 +517,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let InferOk { value: (), obligations } =
                     self.at(&cause, self.param_env).eq(*expected_ty, supplied_ty)?;
                 all_obligations.extend(obligations);
-
-                // Also, require that the supplied type must outlive
-                // the closure body.
-                let closure_body_region = self.tcx.mk_region(ty::ReScope(region::Scope {
-                    id: body.value.hir_id.local_id,
-                    data: region::ScopeData::Node,
-                }));
-                all_obligations.push(Obligation::new(
-                    cause,
-                    self.param_env,
-                    ty::PredicateKind::TypeOutlives(ty::Binder::dummy(ty::OutlivesPredicate(
-                        supplied_ty,
-                        closure_body_region,
-                    )))
-                    .to_predicate(self.tcx),
-                ));
             }
 
             let (supplied_output_ty, _) = self.infcx.replace_bound_vars_with_fresh_vars(
@@ -605,7 +588,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         debug!("supplied_sig_of_closure: result={:?}", result);
 
         let c_result = self.inh.infcx.canonicalize_response(&result);
-        self.tables.borrow_mut().user_provided_sigs.insert(expr_def_id, c_result);
+        self.typeck_results.borrow_mut().user_provided_sigs.insert(expr_def_id, c_result);
 
         result
     }
@@ -644,7 +627,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // where R is the return type we are expecting. This type `T`
         // will be our output.
         let output_ty = self.obligations_for_self_ty(ret_vid).find_map(|(_, obligation)| {
-            if let ty::PredicateKind::Projection(ref proj_predicate) = obligation.predicate.kind() {
+            if let &ty::PredicateKind::Projection(proj_predicate) = obligation.predicate.kind() {
                 self.deduce_future_output_from_projection(obligation.cause.span, proj_predicate)
             } else {
                 None
@@ -665,7 +648,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn deduce_future_output_from_projection(
         &self,
         cause_span: Span,
-        predicate: &ty::PolyProjectionPredicate<'tcx>,
+        predicate: ty::PolyProjectionPredicate<'tcx>,
     ) -> Option<Ty<'tcx>> {
         debug!("deduce_future_output_from_projection(predicate={:?})", predicate);
 
@@ -717,7 +700,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let supplied_arguments = decl.inputs.iter().map(|a| {
             // Convert the types that the user supplied (if any), but ignore them.
             astconv.ast_ty_to_ty(a);
-            self.tcx.types.err
+            self.tcx.ty_error()
         });
 
         if let hir::FnRetTy::Return(ref output) = decl.output {
@@ -726,7 +709,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let result = ty::Binder::bind(self.tcx.mk_fn_sig(
             supplied_arguments,
-            self.tcx.types.err,
+            self.tcx.ty_error(),
             decl.c_variadic,
             hir::Unsafety::Normal,
             Abi::RustCall,

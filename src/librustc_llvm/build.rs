@@ -78,6 +78,7 @@ fn main() {
         "arm",
         "aarch64",
         "amdgpu",
+        "avr",
         "mips",
         "powerpc",
         "systemz",
@@ -274,6 +275,11 @@ fn main() {
         "stdc++"
     };
 
+    // RISC-V requires libatomic for sub-word atomic operations
+    if target.starts_with("riscv") {
+        println!("cargo:rustc-link-lib=atomic");
+    }
+
     // C++ runtime library
     if !target.contains("msvc") {
         if let Some(s) = llvm_static_stdcpp {
@@ -292,11 +298,9 @@ fn main() {
         }
     }
 
-    // LLVM requires symbols from this library, but apparently they're not printed
-    // during llvm-config?
+    // Libstdc++ depends on pthread which Rust doesn't link on MinGW
+    // since nothing else requires it.
     if target.contains("windows-gnu") {
-        println!("cargo:rustc-link-lib=static-nobundle=gcc_s");
         println!("cargo:rustc-link-lib=static-nobundle=pthread");
-        println!("cargo:rustc-link-lib=dylib=uuid");
     }
 }

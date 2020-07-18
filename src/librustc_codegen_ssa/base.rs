@@ -842,10 +842,9 @@ impl CrateInfo {
                 }
             }
 
-            // No need to look for lang items that are whitelisted and don't
-            // actually need to exist.
+            // No need to look for lang items that don't actually need to exist.
             let missing =
-                missing.iter().cloned().filter(|&l| !lang_items::whitelisted(tcx, l)).collect();
+                missing.iter().cloned().filter(|&l| lang_items::required(tcx, l)).collect();
             info.missing_lang_items.insert(cnum, missing);
         }
 
@@ -853,7 +852,7 @@ impl CrateInfo {
     }
 }
 
-pub fn provide_both(providers: &mut Providers<'_>) {
+pub fn provide_both(providers: &mut Providers) {
     providers.backend_optimization_level = |tcx, cratenum| {
         let for_speed = match tcx.sess.opts.optimize {
             // If globally no optimisation is done, #[optimize] has no effect.
@@ -948,7 +947,7 @@ fn determine_cgu_reuse<'tcx>(tcx: TyCtxt<'tcx>, cgu: &CodegenUnit<'tcx>) -> CguR
         match compute_per_cgu_lto_type(
             &tcx.sess.lto(),
             &tcx.sess.opts,
-            &tcx.sess.crate_types.borrow(),
+            &tcx.sess.crate_types(),
             ModuleKind::Regular,
         ) {
             ComputedLtoType::No => CguReuse::PostLto,

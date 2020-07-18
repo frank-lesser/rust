@@ -95,6 +95,7 @@ impl RecoverQPath for Expr {
             kind: ExprKind::Path(qself, path),
             attrs: AttrVec::new(),
             id: ast::DUMMY_NODE_ID,
+            tokens: None,
         }
     }
 }
@@ -345,13 +346,16 @@ impl<'a> Parser<'a> {
             if allow_unstable {
                 // Give extra information about type ascription only if it's a nightly compiler.
                 err.note(
-                    "`#![feature(type_ascription)]` lets you annotate an expression with a \
-                          type: `<expr>: <type>`",
+                    "`#![feature(type_ascription)]` lets you annotate an expression with a type: \
+                     `<expr>: <type>`",
                 );
-                err.note(
-                    "see issue #23416 <https://github.com/rust-lang/rust/issues/23416> \
-                     for more information",
-                );
+                if !likely_path {
+                    // Avoid giving too much info when it was likely an unrelated typo.
+                    err.note(
+                        "see issue #23416 <https://github.com/rust-lang/rust/issues/23416> \
+                        for more information",
+                    );
+                }
             }
         }
     }
@@ -375,7 +379,14 @@ impl<'a> Parser<'a> {
     /// let _ = vec![1, 2, 3].into_iter().collect::<Vec<usize>>>>();
     ///                                                        ^^ help: remove extra angle brackets
     /// ```
-    pub(super) fn check_trailing_angle_brackets(&mut self, segment: &PathSegment, end: TokenKind) {
+    ///
+    /// If `true` is returned, then trailing brackets were recovered, tokens were consumed
+    /// up until one of the tokens in 'end' was encountered, and an error was emitted.
+    pub(super) fn check_trailing_angle_brackets(
+        &mut self,
+        segment: &PathSegment,
+        end: &[&TokenKind],
+    ) -> bool {
         // This function is intended to be invoked after parsing a path segment where there are two
         // cases:
         //
@@ -408,7 +419,7 @@ impl<'a> Parser<'a> {
             parsed_angle_bracket_args,
         );
         if !parsed_angle_bracket_args {
-            return;
+            return false;
         }
 
         // Keep the span at the start so we can highlight the sequence of `>` characters to be
@@ -446,18 +457,18 @@ impl<'a> Parser<'a> {
             number_of_gt, number_of_shr,
         );
         if number_of_gt < 1 && number_of_shr < 1 {
-            return;
+            return false;
         }
 
         // Finally, double check that we have our end token as otherwise this is the
         // second case.
         if self.look_ahead(position, |t| {
             trace!("check_trailing_angle_brackets: t={:?}", t);
-            *t == end
+            end.contains(&&t.kind)
         }) {
             // Eat from where we started until the end token so that parsing can continue
             // as if we didn't have those extra angle brackets.
-            self.eat_to_tokens(&[&end]);
+            self.eat_to_tokens(end);
             let span = lo.until(self.token.span);
 
             let total_num_of_gt = number_of_gt + number_of_shr * 2;
@@ -472,7 +483,9 @@ impl<'a> Parser<'a> {
                 Applicability::MachineApplicable,
             )
             .emit();
+            return true;
         }
+        false
     }
 
     /// Check to see if a pair of chained operators looks like an attempt at chained comparison,
@@ -934,6 +947,19 @@ impl<'a> Parser<'a> {
             return self.expect(&token::Semi).map(drop);
         } else if !sm.is_multiline(self.prev_token.span.until(self.token.span)) {
             // The current token is in the same line as the prior token, not recoverable.
+        } else if [token::Comma, token::Colon].contains(&self.token.kind)
+            && self.prev_token.kind == token::CloseDelim(token::Paren)
+        {
+            // Likely typo: The current token is on a new line and is expected to be
+            // `.`, `;`, `?`, or an operator after a close delimiter token.
+            //
+            // let a = std::process::Command::new("echo")
+            //         .arg("1")
+            //         ,arg("2")
+            //         ^
+            // https://github.com/rust-lang/rust/issues/72253
+            self.expect(&token::Semi)?;
+            return Ok(());
         } else if self.look_ahead(1, |t| {
             t == &token::CloseDelim(token::Brace) || t.can_begin_expr() && t.kind != token::Colon
         }) && [token::Comma, token::Colon].contains(&self.token.kind)
@@ -947,7 +973,7 @@ impl<'a> Parser<'a> {
             self.bump();
             let sp = self.prev_token.span;
             self.struct_span_err(sp, &msg)
-                .span_suggestion(sp, "change this to `;`", ";".to_string(), appl)
+                .span_suggestion_short(sp, "change this to `;`", ";".to_string(), appl)
                 .emit();
             return Ok(());
         } else if self.look_ahead(0, |t| {
@@ -1138,8 +1164,10 @@ impl<'a> Parser<'a> {
             } &&
             !self.token.is_reserved_ident() &&           // v `foo:bar(baz)`
             self.look_ahead(1, |t| t == &token::OpenDelim(token::Paren))
-            || self.look_ahead(1, |t| t == &token::Lt) &&     // `foo:bar<baz`
-            self.look_ahead(2, |t| t.is_ident())
+            || self.look_ahead(1, |t| t == &token::OpenDelim(token::Brace)) // `foo:bar {`
+            || self.look_ahead(1, |t| t == &token::Colon) &&     // `foo:bar::<baz`
+            self.look_ahead(2, |t| t == &token::Lt) &&
+            self.look_ahead(3, |t| t.is_ident())
             || self.look_ahead(1, |t| t == &token::Colon) &&  // `foo:bar:baz`
             self.look_ahead(2, |t| t.is_ident())
             || self.look_ahead(1, |t| t == &token::ModSep)
@@ -1205,10 +1233,13 @@ impl<'a> Parser<'a> {
                 if let Some(sp) = unmatched.unclosed_span {
                     err.span_label(sp, "unclosed delimiter");
                 }
+                // Backticks should be removed to apply suggestions.
+                let mut delim = delim.to_string();
+                delim.retain(|c| c != '`');
                 err.span_suggestion_short(
                     self.prev_token.span.shrink_to_hi(),
-                    &format!("{} may belong here", delim.to_string()),
-                    delim.to_string(),
+                    &format!("`{}` may belong here", delim),
+                    delim,
                     Applicability::MaybeIncorrect,
                 );
                 if unmatched.found_delim.is_none() {
@@ -1401,7 +1432,7 @@ impl<'a> Parser<'a> {
                 if self.token != token::Lt {
                     err.span_suggestion(
                         pat.span,
-                        "if this was a parameter name, give it a type",
+                        "if this is a parameter name, give it a type",
                         format!("{}: TypeName", ident),
                         Applicability::HasPlaceholders,
                     );

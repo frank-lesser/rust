@@ -1,5 +1,5 @@
 use crate::vec::{Idx, IndexVec};
-use smallvec::SmallVec;
+use arrayvec::ArrayVec;
 use std::fmt;
 use std::iter;
 use std::marker::PhantomData;
@@ -355,20 +355,19 @@ where
 const SPARSE_MAX: usize = 8;
 
 /// A fixed-size bitset type with a sparse representation and a maximum of
-/// `SPARSE_MAX` elements. The elements are stored as a sorted `SmallVec` with
-/// no duplicates; although `SmallVec` can spill its elements to the heap, that
-/// never happens within this type because of the `SPARSE_MAX` limit.
+/// `SPARSE_MAX` elements. The elements are stored as a sorted `ArrayVec` with
+/// no duplicates.
 ///
 /// This type is used by `HybridBitSet`; do not use directly.
 #[derive(Clone, Debug)]
 pub struct SparseBitSet<T: Idx> {
     domain_size: usize,
-    elems: SmallVec<[T; SPARSE_MAX]>,
+    elems: ArrayVec<[T; SPARSE_MAX]>,
 }
 
 impl<T: Idx> SparseBitSet<T> {
     fn new_empty(domain_size: usize) -> Self {
-        SparseBitSet { domain_size, elems: SmallVec::new() }
+        SparseBitSet { domain_size, elems: ArrayVec::new() }
     }
 
     fn len(&self) -> usize {
@@ -700,7 +699,7 @@ impl<T: Idx> GrowableBitSet<T> {
 ///
 /// All operations that involve a row and/or column index will panic if the
 /// index exceeds the relevant bound.
-#[derive(Clone, Debug, Eq, PartialEq, RustcDecodable, RustcEncodable)]
+#[derive(Clone, Eq, PartialEq, RustcDecodable, RustcEncodable)]
 pub struct BitMatrix<R: Idx, C: Idx> {
     num_rows: usize,
     num_columns: usize,
@@ -873,6 +872,22 @@ impl<R: Idx, C: Idx> BitMatrix<R, C> {
     pub fn count(&self, row: R) -> usize {
         let (start, end) = self.range(row);
         self.words[start..end].iter().map(|e| e.count_ones() as usize).sum()
+    }
+}
+
+impl<R: Idx, C: Idx> fmt::Debug for BitMatrix<R, C> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        /// Forces its contents to print in regular mode instead of alternate mode.
+        struct OneLinePrinter<T>(T);
+        impl<T: fmt::Debug> fmt::Debug for OneLinePrinter<T> {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(fmt, "{:?}", self.0)
+            }
+        }
+
+        write!(fmt, "BitMatrix({}x{}) ", self.num_rows, self.num_columns)?;
+        let items = self.rows().flat_map(|r| self.iter(r).map(move |c| (r, c)));
+        fmt.debug_set().entries(items.map(OneLinePrinter)).finish()
     }
 }
 
