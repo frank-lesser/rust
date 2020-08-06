@@ -442,7 +442,7 @@ impl<'a> Resolver<'a> {
                 );
                 err
             }
-            ResolutionError::ParamInTyOfConstArg(name) => {
+            ResolutionError::ParamInTyOfConstParam(name) => {
                 let mut err = struct_span_err!(
                     self.session,
                     span,
@@ -452,6 +452,17 @@ impl<'a> Resolver<'a> {
                 err.span_label(
                     span,
                     format!("the type must not depend on the parameter `{}`", name),
+                );
+                err
+            }
+            ResolutionError::ParamInAnonConstInTyDefault(name) => {
+                let mut err = self.session.struct_span_err(
+                    span,
+                    "constant values inside of type parameter defaults must not depend on generic parameters",
+                );
+                err.span_label(
+                    span,
+                    format!("the anonymous constant must not depend on the parameter `{}`", name),
                 );
                 err
             }
@@ -859,9 +870,7 @@ impl<'a> Resolver<'a> {
                     // otherwise cause duplicate suggestions.
                     continue;
                 }
-                if let Some(crate_id) =
-                    self.crate_loader.maybe_process_path_extern(ident.name, ident.span)
-                {
+                if let Some(crate_id) = self.crate_loader.maybe_process_path_extern(ident.name) {
                     let crate_root =
                         self.get_module(DefId { krate: crate_id, index: CRATE_DEF_INDEX });
                     suggestions.extend(self.lookup_import_candidates_from_module(

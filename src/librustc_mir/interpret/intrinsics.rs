@@ -16,7 +16,9 @@ use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_span::symbol::{sym, Symbol};
 use rustc_target::abi::{Abi, LayoutOf as _, Primitive, Size};
 
-use super::{CheckInAllocMsg, ImmTy, InterpCx, Machine, OpTy, PlaceTy};
+use super::{
+    util::ensure_monomorphic_enough, CheckInAllocMsg, ImmTy, InterpCx, Machine, OpTy, PlaceTy,
+};
 
 mod caller_location;
 mod type_name;
@@ -54,6 +56,7 @@ crate fn eval_nullary_intrinsic<'tcx>(
     let name = tcx.item_name(def_id);
     Ok(match name {
         sym::type_name => {
+            ensure_monomorphic_enough(tcx, tp_ty)?;
             let alloc = type_name::alloc_type_name(tcx, tp_ty);
             ConstValue::Slice { data: alloc, start: 0, end: alloc.len() }
         }
@@ -68,7 +71,10 @@ crate fn eval_nullary_intrinsic<'tcx>(
             };
             ConstValue::from_machine_usize(n, &tcx)
         }
-        sym::type_id => ConstValue::from_u64(tcx.type_id_hash(tp_ty)),
+        sym::type_id => {
+            ensure_monomorphic_enough(tcx, tp_ty)?;
+            ConstValue::from_u64(tcx.type_id_hash(tp_ty))
+        }
         sym::variant_count => {
             if let ty::Adt(ref adt, _) = tp_ty.kind {
                 ConstValue::from_machine_usize(adt.variants.len() as u64, &tcx)
@@ -95,6 +101,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         let (dest, ret) = match ret {
             None => match intrinsic_name {
                 sym::transmute => throw_ub_format!("transmuting to uninhabited type"),
+                sym::unreachable => throw_ub!(Unreachable),
                 sym::abort => M::abort(self)?,
                 // Unsupported diverging intrinsic.
                 _ => return Ok(false),
@@ -109,6 +116,21 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 let span = self.find_closest_untracked_caller_location();
                 let location = self.alloc_caller_location_for_span(span);
                 self.write_scalar(location.ptr, dest)?;
+            }
+
+            sym::min_align_of_val | sym::size_of_val => {
+                let place = self.deref_operand(args[0])?;
+                let (size, align) = self
+                    .size_and_align_of(place.meta, place.layout)?
+                    .ok_or_else(|| err_unsup_format!("`extern type` does not have known layout"))?;
+
+                let result = match intrinsic_name {
+                    sym::min_align_of_val => align.bytes(),
+                    sym::size_of_val => size.bytes(),
+                    _ => bug!(),
+                };
+
+                self.write_scalar(Scalar::from_machine_usize(result, self), dest)?;
             }
 
             sym::min_align_of
@@ -141,7 +163,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             | sym::bitreverse => {
                 let ty = substs.type_at(0);
                 let layout_of = self.layout_of(ty)?;
-                let val = self.read_scalar(args[0])?.not_undef()?;
+                let val = self.read_scalar(args[0])?.check_init()?;
                 let bits = self.force_bits(val, layout_of.size)?;
                 let kind = match layout_of.abi {
                     Abi::Scalar(ref scalar) => scalar.value,
@@ -272,9 +294,9 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 // rotate_left: (X << (S % BW)) | (X >> ((BW - S) % BW))
                 // rotate_right: (X << ((BW - S) % BW)) | (X >> (S % BW))
                 let layout = self.layout_of(substs.type_at(0))?;
-                let val = self.read_scalar(args[0])?.not_undef()?;
+                let val = self.read_scalar(args[0])?.check_init()?;
                 let val_bits = self.force_bits(val, layout.size)?;
-                let raw_shift = self.read_scalar(args[1])?.not_undef()?;
+                let raw_shift = self.read_scalar(args[1])?.check_init()?;
                 let raw_shift_bits = self.force_bits(raw_shift, layout.size)?;
                 let width_bits = u128::from(layout.size.bits());
                 let shift_bits = raw_shift_bits % width_bits;
@@ -289,7 +311,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 self.write_scalar(result, dest)?;
             }
             sym::offset => {
-                let ptr = self.read_scalar(args[0])?.not_undef()?;
+                let ptr = self.read_scalar(args[0])?.check_init()?;
                 let offset_count = self.read_scalar(args[1])?.to_machine_isize(self)?;
                 let pointee_ty = substs.type_at(0);
 
@@ -297,7 +319,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 self.write_scalar(offset_ptr, dest)?;
             }
             sym::arith_offset => {
-                let ptr = self.read_scalar(args[0])?.not_undef()?;
+                let ptr = self.read_scalar(args[0])?.check_init()?;
                 let offset_count = self.read_scalar(args[1])?.to_machine_isize(self)?;
                 let pointee_ty = substs.type_at(0);
 
@@ -421,7 +443,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             _ => return Ok(false),
         }
 
-        self.dump_place(*dest);
+        trace!("{:?}", self.dump_place(*dest));
         self.go_to_block(ret);
         Ok(true)
     }

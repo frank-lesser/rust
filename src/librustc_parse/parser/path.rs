@@ -125,7 +125,7 @@ impl<'a> Parser<'a> {
     /// `a::b::C::<D>` (with disambiguator)
     /// `Fn(Args)` (without disambiguator)
     /// `Fn::(Args)` (with disambiguator)
-    pub fn parse_path(&mut self, style: PathStyle) -> PResult<'a, Path> {
+    pub(super) fn parse_path(&mut self, style: PathStyle) -> PResult<'a, Path> {
         maybe_whole!(self, NtPath, |path| {
             if style == PathStyle::Mod && path.segments.iter().any(|segment| segment.args.is_some())
             {
@@ -387,7 +387,7 @@ impl<'a> Parser<'a> {
 
     /// Parses (possibly empty) list of generic arguments / associated item constraints,
     /// possibly including trailing comma.
-    fn parse_angle_args(&mut self) -> PResult<'a, Vec<AngleBracketedArg>> {
+    pub(super) fn parse_angle_args(&mut self) -> PResult<'a, Vec<AngleBracketedArg>> {
         let mut args = Vec::new();
         while let Some(arg) = self.parse_angle_arg()? {
             args.push(arg);

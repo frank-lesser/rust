@@ -82,7 +82,7 @@ fn open(builder: &Builder<'_>, path: impl AsRef<Path>) {
     }
 }
 
-// "src/libstd" -> ["src", "libstd"]
+// "library/std" -> ["library", "std"]
 //
 // Used for deciding whether a particular step is one requested by the user on
 // the `x.py doc` command line, which determines whether `--open` will open that
@@ -375,7 +375,7 @@ impl Step for Standalone {
         }
 
         // We open doc/index.html as the default if invoked as `x.py doc --open`
-        // with no particular explicit doc requested (e.g. src/libcore).
+        // with no particular explicit doc requested (e.g. library/core).
         if builder.paths.is_empty() || is_explicit_request(builder, "src/doc") {
             let index = out.join("index.html");
             open(builder, &index);
@@ -456,13 +456,11 @@ impl Step for Std {
         }
         builder.cp_r(&out_dir, &out);
 
-        // Look for src/libstd, src/libcore etc in the `x.py doc` arguments and
+        // Look for library/std, library/core etc in the `x.py doc` arguments and
         // open the corresponding rendered docs.
         for path in builder.paths.iter().map(components_simplified) {
-            if path.get(0) == Some(&"src")
-                && path.get(1).map_or(false, |dir| dir.starts_with("lib"))
-            {
-                let requested_crate = &path[1][3..];
+            if path.get(0) == Some(&"library") {
+                let requested_crate = &path[1];
                 if krates.contains(&requested_crate) {
                     let index = out.join(requested_crate).join("index.html");
                     open(builder, &index);
@@ -527,11 +525,9 @@ impl Step for Rustc {
 
         // Build cargo command.
         let mut cargo = builder.cargo(compiler, Mode::Rustc, SourceType::InTree, target, "doc");
-        cargo.env(
-            "RUSTDOCFLAGS",
-            "--document-private-items \
-            --enable-index-page -Zunstable-options",
-        );
+        cargo.rustdocflag("--document-private-items");
+        cargo.rustdocflag("--enable-index-page");
+        cargo.rustdocflag("-Zunstable-options");
         compile::rustc_cargo(builder, &mut cargo, target);
 
         // Only include compiler crates, no dependencies of those, such as `libc`.
@@ -624,7 +620,7 @@ impl Step for Rustdoc {
         cargo.arg("--no-deps");
         cargo.arg("-p").arg("rustdoc");
 
-        cargo.env("RUSTDOCFLAGS", "--document-private-items");
+        cargo.rustdocflag("--document-private-items");
         builder.run(&mut cargo.into());
     }
 }
@@ -697,6 +693,7 @@ impl Step for UnstableBookGen {
         builder.create_dir(&out);
         builder.remove_dir(&out);
         let mut cmd = builder.tool_cmd(Tool::UnstableBookGen);
+        cmd.arg(builder.src.join("library"));
         cmd.arg(builder.src.join("src"));
         cmd.arg(out);
 

@@ -202,6 +202,16 @@ pub enum TyKind<'tcx> {
     Error(DelaySpanBugEmitted),
 }
 
+impl TyKind<'tcx> {
+    #[inline]
+    pub fn is_primitive(&self) -> bool {
+        match self {
+            Bool | Char | Int(_) | Uint(_) | Float(_) => true,
+            _ => false,
+        }
+    }
+}
+
 /// A type that is not publicly constructable. This prevents people from making `TyKind::Error`
 /// except through `tcx.err*()`.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
@@ -318,6 +328,7 @@ pub struct ClosureSubsts<'tcx> {
 /// Struct returned by `split()`. Note that these are subslices of the
 /// parent slice and not canonical substs themselves.
 struct SplitClosureSubsts<'tcx> {
+    parent: &'tcx [GenericArg<'tcx>],
     closure_kind_ty: GenericArg<'tcx>,
     closure_sig_as_fn_ptr_ty: GenericArg<'tcx>,
     tupled_upvars_ty: GenericArg<'tcx>,
@@ -329,8 +340,13 @@ impl<'tcx> ClosureSubsts<'tcx> {
     /// ordering.
     fn split(self) -> SplitClosureSubsts<'tcx> {
         match self.substs[..] {
-            [.., closure_kind_ty, closure_sig_as_fn_ptr_ty, tupled_upvars_ty] => {
-                SplitClosureSubsts { closure_kind_ty, closure_sig_as_fn_ptr_ty, tupled_upvars_ty }
+            [ref parent @ .., closure_kind_ty, closure_sig_as_fn_ptr_ty, tupled_upvars_ty] => {
+                SplitClosureSubsts {
+                    parent,
+                    closure_kind_ty,
+                    closure_sig_as_fn_ptr_ty,
+                    tupled_upvars_ty,
+                }
             }
             _ => bug!("closure substs missing synthetics"),
         }
@@ -345,9 +361,20 @@ impl<'tcx> ClosureSubsts<'tcx> {
         self.substs.len() >= 3 && matches!(self.split().tupled_upvars_ty.expect_ty().kind, Tuple(_))
     }
 
+    /// Returns the substitutions of the closure's parent.
+    pub fn parent_substs(self) -> &'tcx [GenericArg<'tcx>] {
+        self.split().parent
+    }
+
     #[inline]
     pub fn upvar_tys(self) -> impl Iterator<Item = Ty<'tcx>> + 'tcx {
-        self.split().tupled_upvars_ty.expect_ty().tuple_fields()
+        self.tupled_upvars_ty().tuple_fields()
+    }
+
+    /// Returns the tuple type representing the upvars for this closure.
+    #[inline]
+    pub fn tupled_upvars_ty(self) -> Ty<'tcx> {
+        self.split().tupled_upvars_ty.expect_ty()
     }
 
     /// Returns the closure kind for this closure; may return a type
@@ -392,6 +419,7 @@ pub struct GeneratorSubsts<'tcx> {
 }
 
 struct SplitGeneratorSubsts<'tcx> {
+    parent: &'tcx [GenericArg<'tcx>],
     resume_ty: GenericArg<'tcx>,
     yield_ty: GenericArg<'tcx>,
     return_ty: GenericArg<'tcx>,
@@ -402,8 +430,15 @@ struct SplitGeneratorSubsts<'tcx> {
 impl<'tcx> GeneratorSubsts<'tcx> {
     fn split(self) -> SplitGeneratorSubsts<'tcx> {
         match self.substs[..] {
-            [.., resume_ty, yield_ty, return_ty, witness, tupled_upvars_ty] => {
-                SplitGeneratorSubsts { resume_ty, yield_ty, return_ty, witness, tupled_upvars_ty }
+            [ref parent @ .., resume_ty, yield_ty, return_ty, witness, tupled_upvars_ty] => {
+                SplitGeneratorSubsts {
+                    parent,
+                    resume_ty,
+                    yield_ty,
+                    return_ty,
+                    witness,
+                    tupled_upvars_ty,
+                }
             }
             _ => bug!("generator substs missing synthetics"),
         }
@@ -418,6 +453,11 @@ impl<'tcx> GeneratorSubsts<'tcx> {
         self.substs.len() >= 5 && matches!(self.split().tupled_upvars_ty.expect_ty().kind, Tuple(_))
     }
 
+    /// Returns the substitutions of the generator's parent.
+    pub fn parent_substs(self) -> &'tcx [GenericArg<'tcx>] {
+        self.split().parent
+    }
+
     /// This describes the types that can be contained in a generator.
     /// It will be a type variable initially and unified in the last stages of typeck of a body.
     /// It contains a tuple of all the types that could end up on a generator frame.
@@ -429,7 +469,13 @@ impl<'tcx> GeneratorSubsts<'tcx> {
 
     #[inline]
     pub fn upvar_tys(self) -> impl Iterator<Item = Ty<'tcx>> + 'tcx {
-        self.split().tupled_upvars_ty.expect_ty().tuple_fields()
+        self.tupled_upvars_ty().tuple_fields()
+    }
+
+    /// Returns the tuple type representing the upvars for this generator.
+    #[inline]
+    pub fn tupled_upvars_ty(self) -> Ty<'tcx> {
+        self.split().tupled_upvars_ty.expect_ty()
     }
 
     /// Returns the type representing the resume type of the generator.
@@ -616,8 +662,7 @@ impl<'tcx> Binder<ExistentialPredicate<'tcx>> {
                 Binder(tr).with_self_ty(tcx, self_ty).without_const().to_predicate(tcx)
             }
             ExistentialPredicate::Projection(p) => {
-                ty::PredicateKind::Projection(Binder(p.with_self_ty(tcx, self_ty)))
-                    .to_predicate(tcx)
+                Binder(p.with_self_ty(tcx, self_ty)).to_predicate(tcx)
             }
             ExistentialPredicate::AutoTrait(did) => {
                 let trait_ref =
@@ -860,6 +905,22 @@ impl<T> Binder<T> {
         Binder(value)
     }
 
+    /// Wraps `value` in a binder without actually binding any currently
+    /// unbound variables.
+    ///
+    /// Note that this will shift all debrujin indices of escaping bound variables
+    /// by 1 to avoid accidential captures.
+    pub fn wrap_nonbinding(tcx: TyCtxt<'tcx>, value: T) -> Binder<T>
+    where
+        T: TypeFoldable<'tcx>,
+    {
+        if value.has_escaping_bound_vars() {
+            Binder::bind(super::fold::shift_vars(tcx, &value, 1))
+        } else {
+            Binder::dummy(value)
+        }
+    }
+
     /// Skips the binder and returns the "bound" value. This is a
     /// risky thing to do because it's easy to get confused about
     /// De Bruijn indices and the like. It is usually better to
@@ -941,6 +1002,15 @@ impl<T> Binder<T> {
     {
         let (u, v) = f(self.0);
         (Binder(u), Binder(v))
+    }
+}
+
+impl<T> Binder<Option<T>> {
+    pub fn transpose(self) -> Option<Binder<T>> {
+        match self.0 {
+            Some(v) => Some(Binder(v)),
+            None => None,
+        }
     }
 }
 
@@ -1706,10 +1776,7 @@ impl<'tcx> TyS<'tcx> {
 
     #[inline]
     pub fn is_primitive(&self) -> bool {
-        match self.kind {
-            Bool | Char | Int(_) | Uint(_) | Float(_) => true,
-            _ => false,
-        }
+        self.kind.is_primitive()
     }
 
     #[inline]

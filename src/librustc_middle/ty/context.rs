@@ -102,7 +102,6 @@ impl<'tcx> CtxtInterners<'tcx> {
             projs: Default::default(),
             place_elems: Default::default(),
             const_: Default::default(),
-
             chalk_environment_clause_list: Default::default(),
         }
     }
@@ -353,7 +352,7 @@ pub struct TypeckResults<'tcx> {
     pat_binding_modes: ItemLocalMap<BindingMode>,
 
     /// Stores the types which were implicitly dereferenced in pattern binding modes
-    /// for later usage in HAIR lowering. For example,
+    /// for later usage in THIR lowering. For example,
     ///
     /// ```
     /// match &&Some(5i32) {
@@ -1633,7 +1632,6 @@ pub mod tls {
     use crate::ty::query;
     use rustc_data_structures::sync::{self, Lock};
     use rustc_data_structures::thin_vec::ThinVec;
-    use rustc_data_structures::OnDrop;
     use rustc_errors::Diagnostic;
     use std::mem;
 
@@ -1650,8 +1648,7 @@ pub mod tls {
     /// in this module.
     #[derive(Clone)]
     pub struct ImplicitCtxt<'a, 'tcx> {
-        /// The current `TyCtxt`. Initially created by `enter_global` and updated
-        /// by `enter_local` with a new local interner.
+        /// The current `TyCtxt`.
         pub tcx: TyCtxt<'tcx>,
 
         /// The current query job, if any. This is updated by `JobOwner::start` in
@@ -1670,6 +1667,13 @@ pub mod tls {
         pub task_deps: Option<&'a Lock<TaskDeps>>,
     }
 
+    impl<'a, 'tcx> ImplicitCtxt<'a, 'tcx> {
+        pub fn new(gcx: &'tcx GlobalCtxt<'tcx>) -> Self {
+            let tcx = TyCtxt { gcx };
+            ImplicitCtxt { tcx, query: None, diagnostics: None, layout_depth: 0, task_deps: None }
+        }
+    }
+
     /// Sets Rayon's thread-local variable, which is preserved for Rayon jobs
     /// to `value` during the call to `f`. It is restored to its previous value after.
     /// This is used to set the pointer to the new `ImplicitCtxt`.
@@ -1683,7 +1687,7 @@ pub mod tls {
     /// This is used to get the pointer to the current `ImplicitCtxt`.
     #[cfg(parallel_compiler)]
     #[inline]
-    fn get_tlv() -> usize {
+    pub fn get_tlv() -> usize {
         rayon_core::tlv::get()
     }
 
@@ -1700,7 +1704,7 @@ pub mod tls {
     #[inline]
     fn set_tlv<F: FnOnce() -> R, R>(value: usize, f: F) -> R {
         let old = get_tlv();
-        let _reset = OnDrop(move || TLV.with(|tlv| tlv.set(old)));
+        let _reset = rustc_data_structures::OnDrop(move || TLV.with(|tlv| tlv.set(old)));
         TLV.with(|tlv| tlv.set(value));
         f()
     }
@@ -1719,50 +1723,6 @@ pub mod tls {
         F: FnOnce(&ImplicitCtxt<'a, 'tcx>) -> R,
     {
         set_tlv(context as *const _ as usize, || f(&context))
-    }
-
-    /// Enters `GlobalCtxt` by setting up librustc_ast callbacks and
-    /// creating a initial `TyCtxt` and `ImplicitCtxt`.
-    /// This happens once per rustc session and `TyCtxt`s only exists
-    /// inside the `f` function.
-    pub fn enter_global<'tcx, F, R>(gcx: &'tcx GlobalCtxt<'tcx>, f: F) -> R
-    where
-        F: FnOnce(TyCtxt<'tcx>) -> R,
-    {
-        // Update `GCX_PTR` to indicate there's a `GlobalCtxt` available.
-        GCX_PTR.with(|lock| {
-            *lock.lock() = gcx as *const _ as usize;
-        });
-        // Set `GCX_PTR` back to 0 when we exit.
-        let _on_drop = OnDrop(move || {
-            GCX_PTR.with(|lock| *lock.lock() = 0);
-        });
-
-        let tcx = TyCtxt { gcx };
-        let icx =
-            ImplicitCtxt { tcx, query: None, diagnostics: None, layout_depth: 0, task_deps: None };
-        enter_context(&icx, |_| f(tcx))
-    }
-
-    scoped_thread_local! {
-        /// Stores a pointer to the `GlobalCtxt` if one is available.
-        /// This is used to access the `GlobalCtxt` in the deadlock handler given to Rayon.
-        pub static GCX_PTR: Lock<usize>
-    }
-
-    /// Creates a `TyCtxt` and `ImplicitCtxt` based on the `GCX_PTR` thread local.
-    /// This is used in the deadlock handler.
-    pub unsafe fn with_global<F, R>(f: F) -> R
-    where
-        F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> R,
-    {
-        let gcx = GCX_PTR.with(|lock| *lock.lock());
-        assert!(gcx != 0);
-        let gcx = &*(gcx as *const GlobalCtxt<'_>);
-        let tcx = TyCtxt { gcx };
-        let icx =
-            ImplicitCtxt { query: None, diagnostics: None, tcx, layout_depth: 0, task_deps: None };
-        enter_context(&icx, |_| f(tcx))
     }
 
     /// Allows access to the current `ImplicitCtxt` in a closure if one is available.
@@ -1832,7 +1792,7 @@ pub mod tls {
 }
 
 macro_rules! sty_debug_print {
-    ($ctxt: expr, $($variant: ident),*) => {{
+    ($fmt: expr, $ctxt: expr, $($variant: ident),*) => {{
         // Curious inner module to allow variant names to be used as
         // variable names.
         #[allow(non_snake_case)]
@@ -1849,7 +1809,7 @@ macro_rules! sty_debug_print {
                 all_infer: usize,
             }
 
-            pub fn go(tcx: TyCtxt<'_>) {
+            pub fn go(fmt: &mut std::fmt::Formatter<'_>, tcx: TyCtxt<'_>) -> std::fmt::Result {
                 let mut total = DebugStat {
                     total: 0,
                     lt_infer: 0,
@@ -1879,8 +1839,8 @@ macro_rules! sty_debug_print {
                     if ct { total.ct_infer += 1; variant.ct_infer += 1 }
                     if lt && ty && ct { total.all_infer += 1; variant.all_infer += 1 }
                 }
-                println!("Ty interner             total           ty lt ct all");
-                $(println!("    {:18}: {uses:6} {usespc:4.1}%, \
+                writeln!(fmt, "Ty interner             total           ty lt ct all")?;
+                $(writeln!(fmt, "    {:18}: {uses:6} {usespc:4.1}%, \
                             {ty:4.1}% {lt:5.1}% {ct:4.1}% {all:4.1}%",
                     stringify!($variant),
                     uses = $variant.total,
@@ -1888,9 +1848,9 @@ macro_rules! sty_debug_print {
                     ty = $variant.ty_infer as f64 * 100.0  / total.total as f64,
                     lt = $variant.lt_infer as f64 * 100.0  / total.total as f64,
                     ct = $variant.ct_infer as f64 * 100.0  / total.total as f64,
-                    all = $variant.all_infer as f64 * 100.0  / total.total as f64);
+                    all = $variant.all_infer as f64 * 100.0  / total.total as f64)?;
                 )*
-                println!("                  total {uses:6}        \
+                writeln!(fmt, "                  total {uses:6}        \
                           {ty:4.1}% {lt:5.1}% {ct:4.1}% {all:4.1}%",
                     uses = total.total,
                     ty = total.ty_infer as f64 * 100.0  / total.total as f64,
@@ -1900,41 +1860,56 @@ macro_rules! sty_debug_print {
             }
         }
 
-        inner::go($ctxt)
+        inner::go($fmt, $ctxt)
     }}
 }
 
 impl<'tcx> TyCtxt<'tcx> {
-    pub fn print_debug_stats(self) {
-        sty_debug_print!(
-            self,
-            Adt,
-            Array,
-            Slice,
-            RawPtr,
-            Ref,
-            FnDef,
-            FnPtr,
-            Placeholder,
-            Generator,
-            GeneratorWitness,
-            Dynamic,
-            Closure,
-            Tuple,
-            Bound,
-            Param,
-            Infer,
-            Projection,
-            Opaque,
-            Foreign
-        );
+    pub fn debug_stats(self) -> impl std::fmt::Debug + 'tcx {
+        struct DebugStats<'tcx>(TyCtxt<'tcx>);
 
-        println!("InternalSubsts interner: #{}", self.interners.substs.len());
-        println!("Region interner: #{}", self.interners.region.len());
-        println!("Stability interner: #{}", self.stability_interner.len());
-        println!("Const Stability interner: #{}", self.const_stability_interner.len());
-        println!("Allocation interner: #{}", self.allocation_interner.len());
-        println!("Layout interner: #{}", self.layout_interner.len());
+        impl std::fmt::Debug for DebugStats<'tcx> {
+            fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                sty_debug_print!(
+                    fmt,
+                    self.0,
+                    Adt,
+                    Array,
+                    Slice,
+                    RawPtr,
+                    Ref,
+                    FnDef,
+                    FnPtr,
+                    Placeholder,
+                    Generator,
+                    GeneratorWitness,
+                    Dynamic,
+                    Closure,
+                    Tuple,
+                    Bound,
+                    Param,
+                    Infer,
+                    Projection,
+                    Opaque,
+                    Foreign
+                )?;
+
+                writeln!(fmt, "InternalSubsts interner: #{}", self.0.interners.substs.len())?;
+                writeln!(fmt, "Region interner: #{}", self.0.interners.region.len())?;
+                writeln!(fmt, "Stability interner: #{}", self.0.stability_interner.len())?;
+                writeln!(
+                    fmt,
+                    "Const Stability interner: #{}",
+                    self.0.const_stability_interner.len()
+                )?;
+                writeln!(fmt, "Allocation interner: #{}", self.0.allocation_interner.len())?;
+                writeln!(fmt, "Layout interner: #{}", self.0.layout_interner.len())?;
+
+                Ok(())
+            }
+        }
+
+        DebugStats(self)
     }
 }
 
@@ -2128,14 +2103,23 @@ impl<'tcx> TyCtxt<'tcx> {
 
     #[allow(rustc::usage_of_ty_tykind)]
     #[inline]
-    pub fn mk_ty(&self, st: TyKind<'tcx>) -> Ty<'tcx> {
+    pub fn mk_ty(self, st: TyKind<'tcx>) -> Ty<'tcx> {
         self.interners.intern_ty(st)
     }
 
     #[inline]
-    pub fn mk_predicate(&self, kind: PredicateKind<'tcx>) -> Predicate<'tcx> {
+    pub fn mk_predicate(self, kind: PredicateKind<'tcx>) -> Predicate<'tcx> {
         let inner = self.interners.intern_predicate(kind);
         Predicate { inner }
+    }
+
+    #[inline]
+    pub fn reuse_or_mk_predicate(
+        self,
+        pred: Predicate<'tcx>,
+        kind: PredicateKind<'tcx>,
+    ) -> Predicate<'tcx> {
+        if *pred.kind() != kind { self.mk_predicate(kind) } else { pred }
     }
 
     pub fn mk_mach_int(self, tm: ast::IntTy) -> Ty<'tcx> {

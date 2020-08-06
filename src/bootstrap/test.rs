@@ -393,7 +393,7 @@ impl Step for Miri {
             cargo.arg("--").arg("miri").arg("setup");
 
             // Tell `cargo miri setup` where to find the sources.
-            cargo.env("XARGO_RUST_SRC", builder.src.join("src"));
+            cargo.env("XARGO_RUST_SRC", builder.src.join("library"));
             // Tell it where to find Miri.
             cargo.env("MIRI", &miri);
             // Debug things.
@@ -1022,6 +1022,10 @@ impl Step for Compiletest {
             cmd.arg("--rustdoc-path").arg(builder.rustdoc(compiler));
         }
 
+        if mode == "run-make" && suite.ends_with("fulldeps") {
+            cmd.arg("--rust-demangler-path").arg(builder.tool_exe(Tool::RustDemangler));
+        }
+
         cmd.arg("--src-base").arg(builder.src.join("src/test").join(suite));
         cmd.arg("--build-base").arg(testdir(builder, compiler.host).join(suite));
         cmd.arg("--stage-id").arg(format!("stage{}-{}", compiler.stage, target));
@@ -1154,13 +1158,19 @@ impl Step for Compiletest {
             cmd.arg("--quiet");
         }
 
+        let mut llvm_components_passed = false;
+        let mut copts_passed = false;
         if builder.config.llvm_enabled() {
             let llvm_config = builder.ensure(native::Llvm { target: builder.config.build });
             if !builder.config.dry_run {
                 let llvm_version = output(Command::new(&llvm_config).arg("--version"));
+                let llvm_components = output(Command::new(&llvm_config).arg("--components"));
                 // Remove trailing newline from llvm-config output.
-                let llvm_version = llvm_version.trim_end();
-                cmd.arg("--llvm-version").arg(llvm_version);
+                cmd.arg("--llvm-version")
+                    .arg(llvm_version.trim())
+                    .arg("--llvm-components")
+                    .arg(llvm_components.trim());
+                llvm_components_passed = true;
             }
             if !builder.is_rust_llvm(target) {
                 cmd.arg("--system-llvm");
@@ -1178,15 +1188,13 @@ impl Step for Compiletest {
             // Only pass correct values for these flags for the `run-make` suite as it
             // requires that a C++ compiler was configured which isn't always the case.
             if !builder.config.dry_run && suite == "run-make-fulldeps" {
-                let llvm_components = output(Command::new(&llvm_config).arg("--components"));
                 cmd.arg("--cc")
                     .arg(builder.cc(target))
                     .arg("--cxx")
                     .arg(builder.cxx(target).unwrap())
                     .arg("--cflags")
-                    .arg(builder.cflags(target, GitRepo::Rustc).join(" "))
-                    .arg("--llvm-components")
-                    .arg(llvm_components.trim());
+                    .arg(builder.cflags(target, GitRepo::Rustc).join(" "));
+                copts_passed = true;
                 if let Some(ar) = builder.ar(target) {
                     cmd.arg("--ar").arg(ar);
                 }
@@ -1216,15 +1224,11 @@ impl Step for Compiletest {
             }
         }
 
-        if suite != "run-make-fulldeps" {
-            cmd.arg("--cc")
-                .arg("")
-                .arg("--cxx")
-                .arg("")
-                .arg("--cflags")
-                .arg("")
-                .arg("--llvm-components")
-                .arg("");
+        if !llvm_components_passed {
+            cmd.arg("--llvm-components").arg("");
+        }
+        if !copts_passed {
+            cmd.arg("--cc").arg("").arg("--cxx").arg("").arg("--cflags").arg("");
         }
 
         if builder.remote_tested(target) {
@@ -1987,7 +1991,7 @@ impl Step for Distcheck {
             .current_dir(&dir);
         builder.run(&mut cmd);
 
-        let toml = dir.join("rust-src/lib/rustlib/src/rust/src/libstd/Cargo.toml");
+        let toml = dir.join("rust-src/lib/rustlib/src/rust/library/std/Cargo.toml");
         builder.run(
             Command::new(&builder.initial_cargo)
                 .arg("generate-lockfile")

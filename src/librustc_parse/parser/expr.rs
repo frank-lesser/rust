@@ -909,8 +909,9 @@ impl<'a> Parser<'a> {
         }
 
         let fn_span_lo = self.token.span;
-        let segment = self.parse_path_segment(PathStyle::Expr)?;
+        let mut segment = self.parse_path_segment(PathStyle::Expr)?;
         self.check_trailing_angle_brackets(&segment, &[&token::OpenDelim(token::Paren)]);
+        self.check_turbofish_missing_angle_brackets(&mut segment);
 
         if self.check(&token::OpenDelim(token::Paren)) {
             // Method call `expr.f()`
@@ -1449,7 +1450,7 @@ impl<'a> Parser<'a> {
 
     /// Matches `'-' lit | lit` (cf. `ast_validation::AstValidator::check_expr_within_pat`).
     /// Keep this in sync with `Token::can_begin_literal_maybe_minus`.
-    pub fn parse_literal_maybe_minus(&mut self) -> PResult<'a, P<Expr>> {
+    pub(super) fn parse_literal_maybe_minus(&mut self) -> PResult<'a, P<Expr>> {
         maybe_whole_expr!(self);
 
         let lo = self.token.span;

@@ -113,7 +113,7 @@ impl Clean<ExternalCrate> for CrateNum {
                 let mut prim = None;
                 for attr in attrs.lists(sym::doc) {
                     if let Some(v) = attr.value_str() {
-                        if attr.check_name(sym::primitive) {
+                        if attr.has_name(sym::primitive) {
                             prim = PrimitiveType::from_symbol(v);
                             if prim.is_some() {
                                 break;
@@ -168,7 +168,7 @@ impl Clean<ExternalCrate> for CrateNum {
                 let mut keyword = None;
                 for attr in attrs.lists(sym::doc) {
                     if let Some(v) = attr.value_str() {
-                        if attr.check_name(sym::keyword) {
+                        if attr.has_name(sym::keyword) {
                             if v.is_doc_keyword() {
                                 keyword = Some(v.to_string());
                                 break;
@@ -480,18 +480,18 @@ impl Clean<WherePredicate> for hir::WherePredicate<'_> {
 
 impl<'a> Clean<Option<WherePredicate>> for ty::Predicate<'a> {
     fn clean(&self, cx: &DocContext<'_>) -> Option<WherePredicate> {
-        match self.kind() {
-            ty::PredicateKind::Trait(ref pred, _) => Some(pred.clean(cx)),
-            ty::PredicateKind::Subtype(ref pred) => Some(pred.clean(cx)),
-            ty::PredicateKind::RegionOutlives(ref pred) => pred.clean(cx),
-            ty::PredicateKind::TypeOutlives(ref pred) => pred.clean(cx),
-            ty::PredicateKind::Projection(ref pred) => Some(pred.clean(cx)),
+        match self.skip_binders() {
+            ty::PredicateAtom::Trait(pred, _) => Some(ty::Binder::bind(pred).clean(cx)),
+            ty::PredicateAtom::RegionOutlives(pred) => pred.clean(cx),
+            ty::PredicateAtom::TypeOutlives(pred) => pred.clean(cx),
+            ty::PredicateAtom::Projection(pred) => Some(pred.clean(cx)),
 
-            ty::PredicateKind::WellFormed(..)
-            | ty::PredicateKind::ObjectSafe(..)
-            | ty::PredicateKind::ClosureKind(..)
-            | ty::PredicateKind::ConstEvaluatable(..)
-            | ty::PredicateKind::ConstEquate(..) => panic!("not user writable"),
+            ty::PredicateAtom::Subtype(..)
+            | ty::PredicateAtom::WellFormed(..)
+            | ty::PredicateAtom::ObjectSafe(..)
+            | ty::PredicateAtom::ClosureKind(..)
+            | ty::PredicateAtom::ConstEvaluatable(..)
+            | ty::PredicateAtom::ConstEquate(..) => panic!("not user writable"),
         }
     }
 }
@@ -506,20 +506,11 @@ impl<'a> Clean<WherePredicate> for ty::PolyTraitPredicate<'a> {
     }
 }
 
-impl<'tcx> Clean<WherePredicate> for ty::PolySubtypePredicate<'tcx> {
-    fn clean(&self, _cx: &DocContext<'_>) -> WherePredicate {
-        panic!(
-            "subtype predicates are an internal rustc artifact \
-                and should not be seen by rustdoc"
-        )
-    }
-}
-
 impl<'tcx> Clean<Option<WherePredicate>>
-    for ty::PolyOutlivesPredicate<ty::Region<'tcx>, ty::Region<'tcx>>
+    for ty::OutlivesPredicate<ty::Region<'tcx>, ty::Region<'tcx>>
 {
     fn clean(&self, cx: &DocContext<'_>) -> Option<WherePredicate> {
-        let ty::OutlivesPredicate(a, b) = self.skip_binder();
+        let ty::OutlivesPredicate(a, b) = self;
 
         if let (ty::ReEmpty(_), ty::ReEmpty(_)) = (a, b) {
             return None;
@@ -532,9 +523,9 @@ impl<'tcx> Clean<Option<WherePredicate>>
     }
 }
 
-impl<'tcx> Clean<Option<WherePredicate>> for ty::PolyOutlivesPredicate<Ty<'tcx>, ty::Region<'tcx>> {
+impl<'tcx> Clean<Option<WherePredicate>> for ty::OutlivesPredicate<Ty<'tcx>, ty::Region<'tcx>> {
     fn clean(&self, cx: &DocContext<'_>) -> Option<WherePredicate> {
-        let ty::OutlivesPredicate(ty, lt) = self.skip_binder();
+        let ty::OutlivesPredicate(ty, lt) = self;
 
         if let ty::ReEmpty(_) = lt {
             return None;
@@ -547,9 +538,9 @@ impl<'tcx> Clean<Option<WherePredicate>> for ty::PolyOutlivesPredicate<Ty<'tcx>,
     }
 }
 
-impl<'tcx> Clean<WherePredicate> for ty::PolyProjectionPredicate<'tcx> {
+impl<'tcx> Clean<WherePredicate> for ty::ProjectionPredicate<'tcx> {
     fn clean(&self, cx: &DocContext<'_>) -> WherePredicate {
-        let ty::ProjectionPredicate { projection_ty, ty } = self.skip_binder();
+        let ty::ProjectionPredicate { projection_ty, ty } = self;
         WherePredicate::EqPredicate { lhs: projection_ty.clean(cx), rhs: ty.clean(cx) }
     }
 }
@@ -725,11 +716,11 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
         // Bounds in the type_params and lifetimes fields are repeated in the
         // predicates field (see rustc_typeck::collect::ty_generics), so remove
         // them.
-        let stripped_typarams = gens
+        let stripped_params = gens
             .params
             .iter()
             .filter_map(|param| match param.kind {
-                ty::GenericParamDefKind::Lifetime => None,
+                ty::GenericParamDefKind::Lifetime => Some(param.clean(cx)),
                 ty::GenericParamDefKind::Type { synthetic, .. } => {
                     if param.name == kw::SelfUpper {
                         assert_eq!(param.index, 0);
@@ -741,7 +732,7 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
                     }
                     Some(param.clean(cx))
                 }
-                ty::GenericParamDefKind::Const { .. } => None,
+                ty::GenericParamDefKind::Const { .. } => Some(param.clean(cx)),
             })
             .collect::<Vec<GenericParamDef>>();
 
@@ -754,19 +745,24 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
             .flat_map(|(p, _)| {
                 let mut projection = None;
                 let param_idx = (|| {
-                    if let Some(trait_ref) = p.to_opt_poly_trait_ref() {
-                        if let ty::Param(param) = trait_ref.skip_binder().self_ty().kind {
-                            return Some(param.index);
+                    match p.skip_binders() {
+                        ty::PredicateAtom::Trait(pred, _constness) => {
+                            if let ty::Param(param) = pred.self_ty().kind {
+                                return Some(param.index);
+                            }
                         }
-                    } else if let Some(outlives) = p.to_opt_type_outlives() {
-                        if let ty::Param(param) = outlives.skip_binder().0.kind {
-                            return Some(param.index);
+                        ty::PredicateAtom::TypeOutlives(ty::OutlivesPredicate(ty, _reg)) => {
+                            if let ty::Param(param) = ty.kind {
+                                return Some(param.index);
+                            }
                         }
-                    } else if let ty::PredicateKind::Projection(p) = p.kind() {
-                        if let ty::Param(param) = p.skip_binder().projection_ty.self_ty().kind {
-                            projection = Some(p);
-                            return Some(param.index);
+                        ty::PredicateAtom::Projection(p) => {
+                            if let ty::Param(param) = p.projection_ty.self_ty().kind {
+                                projection = Some(ty::Binder::bind(p));
+                                return Some(param.index);
+                            }
                         }
+                        _ => (),
                     }
 
                     None
@@ -848,8 +844,10 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
 
         // Run through the type parameters again and insert a ?Sized
         // unbound for any we didn't find to be Sized.
-        for tp in &stripped_typarams {
-            if !sized_params.contains(&tp.name) {
+        for tp in &stripped_params {
+            if matches!(tp.kind, types::GenericParamDefKind::Type { .. })
+                && !sized_params.contains(&tp.name)
+            {
                 where_predicates.push(WP::BoundPredicate {
                     ty: Type::Generic(tp.name.clone()),
                     bounds: vec![GenericBound::maybe_sized(cx)],
@@ -862,16 +860,7 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics, ty::GenericPredicates<'tcx
         // and instead see `where T: Foo + Bar + Sized + 'a`
 
         Generics {
-            params: gens
-                .params
-                .iter()
-                .flat_map(|param| match param.kind {
-                    ty::GenericParamDefKind::Lifetime => Some(param.clean(cx)),
-                    ty::GenericParamDefKind::Type { .. } => None,
-                    ty::GenericParamDefKind::Const { .. } => Some(param.clean(cx)),
-                })
-                .chain(simplify::ty_params(stripped_typarams).into_iter())
-                .collect(),
+            params: stripped_params,
             where_predicates: simplify::where_clauses(cx, where_predicates),
         }
     }
@@ -1655,16 +1644,19 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
                     .predicates
                     .iter()
                     .filter_map(|predicate| {
-                        let trait_ref = if let Some(tr) = predicate.to_opt_poly_trait_ref() {
-                            tr
-                        } else if let ty::PredicateKind::TypeOutlives(pred) = predicate.kind() {
-                            // these should turn up at the end
-                            if let Some(r) = pred.skip_binder().1.clean(cx) {
-                                regions.push(GenericBound::Outlives(r));
+                        // Note: The substs of opaque types can contain unbound variables,
+                        // meaning that we have to use `ignore_quantifiers_with_unbound_vars` here.
+                        let trait_ref = match predicate.bound_atom(cx.tcx).skip_binder() {
+                            ty::PredicateAtom::Trait(tr, _constness) => {
+                                ty::Binder::bind(tr.trait_ref)
                             }
-                            return None;
-                        } else {
-                            return None;
+                            ty::PredicateAtom::TypeOutlives(ty::OutlivesPredicate(_ty, reg)) => {
+                                if let Some(r) = reg.clean(cx) {
+                                    regions.push(GenericBound::Outlives(r));
+                                }
+                                return None;
+                            }
+                            _ => return None,
                         };
 
                         if let Some(sized) = cx.tcx.lang_items().sized_trait() {
@@ -1678,8 +1670,9 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
                             .predicates
                             .iter()
                             .filter_map(|pred| {
-                                if let ty::PredicateKind::Projection(proj) = pred.kind() {
-                                    let proj = proj.skip_binder();
+                                if let ty::PredicateAtom::Projection(proj) =
+                                    pred.bound_atom(cx.tcx).skip_binder()
+                                {
                                     if proj.projection_ty.trait_ref(cx.tcx)
                                         == trait_ref.skip_binder()
                                     {
@@ -2164,7 +2157,7 @@ impl Clean<Vec<Item>> for doctree::ExternCrate<'_> {
     fn clean(&self, cx: &DocContext<'_>) -> Vec<Item> {
         let please_inline = self.vis.node.is_pub()
             && self.attrs.iter().any(|a| {
-                a.check_name(sym::doc)
+                a.has_name(sym::doc)
                     && match a.meta_item_list() {
                         Some(l) => attr::list_contains_name(&l, sym::inline),
                         None => false,
@@ -2204,7 +2197,7 @@ impl Clean<Vec<Item>> for doctree::Import<'_> {
         // Don't inline doc(hidden) imports so they can be stripped at a later stage.
         let mut denied = !self.vis.node.is_pub()
             || self.attrs.iter().any(|a| {
-                a.check_name(sym::doc)
+                a.has_name(sym::doc)
                     && match a.meta_item_list() {
                         Some(l) => {
                             attr::list_contains_name(&l, sym::no_inline)
@@ -2353,10 +2346,6 @@ impl Clean<Stability> for attr::Stability {
                 attr::Stable { ref since } => since.to_string(),
                 _ => String::new(),
             },
-            deprecation: self.rustc_depr.as_ref().map(|d| Deprecation {
-                note: Some(d.reason.to_string()).filter(|r| !r.is_empty()),
-                since: Some(d.since.to_string()).filter(|d| !d.is_empty()),
-            }),
             unstable_reason: match self.level {
                 attr::Unstable { reason: Some(ref reason), .. } => Some(reason.to_string()),
                 _ => None,
@@ -2374,6 +2363,7 @@ impl Clean<Deprecation> for attr::Deprecation {
         Deprecation {
             since: self.since.map(|s| s.to_string()).filter(|s| !s.is_empty()),
             note: self.note.map(|n| n.to_string()).filter(|n| !n.is_empty()),
+            is_since_rustc_version: self.is_since_rustc_version,
         }
     }
 }

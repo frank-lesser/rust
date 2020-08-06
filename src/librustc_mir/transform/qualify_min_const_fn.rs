@@ -24,27 +24,27 @@ pub fn is_min_const_fn(tcx: TyCtxt<'tcx>, def_id: DefId, body: &'a Body<'tcx>) -
     loop {
         let predicates = tcx.predicates_of(current);
         for (predicate, _) in predicates.predicates {
-            match predicate.kind() {
-                ty::PredicateKind::RegionOutlives(_)
-                | ty::PredicateKind::TypeOutlives(_)
-                | ty::PredicateKind::WellFormed(_)
-                | ty::PredicateKind::Projection(_)
-                | ty::PredicateKind::ConstEvaluatable(..)
-                | ty::PredicateKind::ConstEquate(..) => continue,
-                ty::PredicateKind::ObjectSafe(_) => {
+            match predicate.skip_binders() {
+                ty::PredicateAtom::RegionOutlives(_)
+                | ty::PredicateAtom::TypeOutlives(_)
+                | ty::PredicateAtom::WellFormed(_)
+                | ty::PredicateAtom::Projection(_)
+                | ty::PredicateAtom::ConstEvaluatable(..)
+                | ty::PredicateAtom::ConstEquate(..) => continue,
+                ty::PredicateAtom::ObjectSafe(_) => {
                     bug!("object safe predicate on function: {:#?}", predicate)
                 }
-                ty::PredicateKind::ClosureKind(..) => {
+                ty::PredicateAtom::ClosureKind(..) => {
                     bug!("closure kind predicate on function: {:#?}", predicate)
                 }
-                ty::PredicateKind::Subtype(_) => {
+                ty::PredicateAtom::Subtype(_) => {
                     bug!("subtype predicate on function: {:#?}", predicate)
                 }
-                &ty::PredicateKind::Trait(pred, constness) => {
+                ty::PredicateAtom::Trait(pred, constness) => {
                     if Some(pred.def_id()) == tcx.lang_items().sized_trait() {
                         continue;
                     }
-                    match pred.skip_binder().self_ty().kind {
+                    match pred.self_ty().kind {
                         ty::Param(ref p) => {
                             // Allow `T: ?const Trait`
                             if constness == hir::Constness::NotConst
@@ -193,7 +193,15 @@ fn check_rvalue(
             _,
         ) => Err((span, "function pointer casts are not allowed in const fn".into())),
         Rvalue::Cast(CastKind::Pointer(PointerCast::Unsize), op, cast_ty) => {
-            let pointee_ty = cast_ty.builtin_deref(true).unwrap().ty;
+            let pointee_ty = if let Some(deref_ty) = cast_ty.builtin_deref(true) {
+                deref_ty.ty
+            } else {
+                // We cannot allow this for now.
+                return Err((
+                    span,
+                    "unsizing casts are only allowed for references right now".into(),
+                ));
+            };
             let unsized_ty = tcx.struct_tail_erasing_lifetimes(pointee_ty, tcx.param_env(def_id));
             if let ty::Slice(_) | ty::Str = unsized_ty.kind {
                 check_operand(tcx, op, span, def_id, body)?;

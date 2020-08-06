@@ -27,7 +27,7 @@ pub enum ErrorHandled {
     TooGeneric,
 }
 
-CloneTypeFoldableImpls! {
+CloneTypeFoldableAndLiftImpls! {
     ErrorHandled,
 }
 
@@ -242,9 +242,9 @@ impl From<ErrorHandled> for InterpErrorInfo<'_> {
 
 impl<'tcx> From<InterpError<'tcx>> for InterpErrorInfo<'tcx> {
     fn from(kind: InterpError<'tcx>) -> Self {
-        let capture_backtrace = tls::with_context_opt(|ctxt| {
-            if let Some(ctxt) = ctxt {
-                *Lock::borrow(&ctxt.tcx.sess.ctfe_backtrace)
+        let capture_backtrace = tls::with_opt(|tcx| {
+            if let Some(tcx) = tcx {
+                *Lock::borrow(&tcx.sess.ctfe_backtrace)
             } else {
                 CtfeBacktrace::Disabled
             }
@@ -502,8 +502,6 @@ impl fmt::Display for UndefinedBehaviorInfo<'_> {
 pub enum UnsupportedOpInfo {
     /// Free-form case. Only for errors that are never caught!
     Unsupported(String),
-    /// Accessing an unsupported foreign static.
-    ReadForeignStatic(DefId),
     /// Could not find MIR for a function.
     NoMirFor(DefId),
     /// Encountered a pointer where we needed raw bytes.
@@ -515,6 +513,8 @@ pub enum UnsupportedOpInfo {
     ReadBytesAsPointer,
     /// Accessing thread local statics
     ThreadLocalStatic(DefId),
+    /// Accessing an unsupported extern static.
+    ReadExternStatic(DefId),
 }
 
 impl fmt::Display for UnsupportedOpInfo {
@@ -522,9 +522,7 @@ impl fmt::Display for UnsupportedOpInfo {
         use UnsupportedOpInfo::*;
         match self {
             Unsupported(ref msg) => write!(f, "{}", msg),
-            ReadForeignStatic(did) => {
-                write!(f, "cannot read from foreign (extern) static ({:?})", did)
-            }
+            ReadExternStatic(did) => write!(f, "cannot read from extern static ({:?})", did),
             NoMirFor(did) => write!(f, "no MIR body is available for {:?}", did),
             ReadPointerAsBytes => write!(f, "unable to turn pointer into raw bytes",),
             ReadBytesAsPointer => write!(f, "unable to turn bytes into a pointer"),

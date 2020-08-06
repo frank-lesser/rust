@@ -107,7 +107,7 @@ fn install_sh(
 
     t!(fs::create_dir_all(&empty_dir));
     let package_name = if let Some(host) = host {
-        format!("{}-{}", pkgname(builder, name), host)
+        format!("{}-{}", pkgname(builder, name), host.triple)
     } else {
         pkgname(builder, name)
     };
@@ -192,7 +192,7 @@ install!((self, builder, _config),
         builder.ensure(dist::Docs { host: self.target });
         install_docs(builder, self.compiler.stage, self.target);
     };
-    Std, "src/libstd", true, only_hosts: true, {
+    Std, "library/std", true, only_hosts: true, {
         for target in &builder.targets {
             builder.ensure(dist::Std {
                 compiler: self.compiler,

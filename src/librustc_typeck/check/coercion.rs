@@ -456,7 +456,7 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
         //
         // Both of these trigger a special `CoerceUnsized`-related error (E0376)
         //
-        // We can take advantage of this fact to avoid performing unecessary work.
+        // We can take advantage of this fact to avoid performing unnecessary work.
         // If either `source` or `target` is a type variable, then any applicable impl
         // would need to be generic over the self-type (`impl<T> CoerceUnsized<SomeType> for T`)
         // or generic over the `CoerceUnsized` type parameter (`impl<T> CoerceUnsized<T> for
@@ -582,18 +582,18 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
         while !queue.is_empty() {
             let obligation = queue.remove(0);
             debug!("coerce_unsized resolve step: {:?}", obligation);
-            let trait_pred = match obligation.predicate.kind() {
-                &ty::PredicateKind::Trait(trait_pred, _)
+            let trait_pred = match obligation.predicate.skip_binders() {
+                ty::PredicateAtom::Trait(trait_pred, _)
                     if traits.contains(&trait_pred.def_id()) =>
                 {
                     if unsize_did == trait_pred.def_id() {
-                        let unsize_ty = trait_pred.skip_binder().trait_ref.substs[1].expect_ty();
+                        let unsize_ty = trait_pred.trait_ref.substs[1].expect_ty();
                         if let ty::Tuple(..) = unsize_ty.kind {
                             debug!("coerce_unsized: found unsized tuple coercion");
                             has_unsized_tuple_coercion = true;
                         }
                     }
-                    trait_pred
+                    ty::Binder::bind(trait_pred)
                 }
                 _ => {
                     coercion.obligations.push(obligation);

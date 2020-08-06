@@ -570,7 +570,15 @@ impl<'a, 'ast> Visitor<'ast> for LateResolutionVisitor<'a, '_, 'ast> {
 
                     if let Some(ref ty) = default {
                         self.ribs[TypeNS].push(default_ban_rib);
-                        self.visit_ty(ty);
+                        self.with_rib(ValueNS, ForwardTyParamBanRibKind, |this| {
+                            // HACK: We use an empty `ForwardTyParamBanRibKind` here which
+                            // is only used to forbid the use of const parameters inside of
+                            // type defaults.
+                            //
+                            // While the rib name doesn't really fit here, it does allow us to use the same
+                            // code for both const and type parameters.
+                            this.visit_ty(ty);
+                        });
                         default_ban_rib = self.ribs[TypeNS].pop().unwrap();
                     }
 
@@ -1081,7 +1089,9 @@ impl<'a, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
     fn with_constant_rib(&mut self, f: impl FnOnce(&mut Self)) {
         debug!("with_constant_rib");
         self.with_rib(ValueNS, ConstantItemRibKind, |this| {
-            this.with_label_rib(ConstantItemRibKind, f);
+            this.with_rib(TypeNS, ConstantItemRibKind, |this| {
+                this.with_label_rib(ConstantItemRibKind, f);
+            })
         });
     }
 
@@ -2219,8 +2229,15 @@ impl<'a, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
                     self.resolve_expr(argument, None);
                 }
             }
-            ExprKind::Type(ref type_expr, _) => {
-                self.diagnostic_metadata.current_type_ascription.push(type_expr.span);
+            ExprKind::Type(ref type_expr, ref ty) => {
+                // `ParseSess::type_ascription_path_suggestions` keeps spans of colon tokens in
+                // type ascription. Here we are trying to retrieve the span of the colon token as
+                // well, but only if it's written without spaces `expr:Ty` and therefore confusable
+                // with `expr::Ty`, only in this case it will match the span from
+                // `type_ascription_path_suggestions`.
+                self.diagnostic_metadata
+                    .current_type_ascription
+                    .push(type_expr.span.between(ty.span));
                 visit::walk_expr(self, expr);
                 self.diagnostic_metadata.current_type_ascription.pop();
             }

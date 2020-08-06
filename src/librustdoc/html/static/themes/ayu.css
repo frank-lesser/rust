@@ -62,6 +62,10 @@ pre {
 	background-color: #14191f;
 }
 
+.logo-container > img {
+	filter: drop-shadow(0 0 5px #fff);
+}
+
 /* Improve the scrollbar display on firefox */
 * {
 	scrollbar-color: #5c6773 transparent;
@@ -193,10 +197,8 @@ pre {
 	color: #a37acc;
 }
 
-pre.rust .comment, pre.rust .doccomment {
-	color: #788797;
-	font-style: italic;
-}
+pre.rust .comment { color: #788797; }
+pre.rust .doccomment { color: #a1ac88; }
 
 nav:not(.sidebar) {
 	border-bottom-color: #424c57;
@@ -237,16 +239,6 @@ a {
 
 #crate-search+.search-input:focus {
 	box-shadow: 0 0 0 1px #148099,0 0 0 2px transparent;
-	color: #ffffff;
-	background-color: #141920;
-	box-shadow: none;
-	transition: box-shadow 150ms ease-in-out;
-	border-radius: 4px;
-	margin-left: 8px;
-}
-
-#crate-search+.search-input:focus {
-	box-shadow: 0px 6px 20px 0px black;
 }
 
 .search-focus:disabled {
@@ -318,12 +310,12 @@ a.test-arrow {
 	font-size: 100%;
 	color: #788797;
 	border-radius: 4px;
-	background-color: rgba(255, 255, 255, 0);
+	background-color: rgba(57, 175, 215, 0.09);
 }
 
 a.test-arrow:hover {
-	background-color: rgba(242, 151, 24, 0.05);
-	color: #ffb44c;
+	background-color: rgba(57, 175, 215, 0.368);
+	color: #c5c5c5;
 }
 
 .toggle-label {
@@ -332,7 +324,7 @@ a.test-arrow:hover {
 
 :target > code, :target > .in-band {
 	background: rgba(255, 236, 164, 0.06);
-	border-right: 3px solid #ffb44c;
+	border-right: 3px solid rgba(255, 180, 76, 0.85);
 }
 
 pre.compile_fail {

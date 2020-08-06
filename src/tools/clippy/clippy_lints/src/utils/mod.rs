@@ -883,7 +883,7 @@ pub fn is_ctor_or_promotable_const_function(cx: &LateContext<'_>, expr: &Expr<'_
 }
 
 /// Returns `true` if a pattern is refutable.
-// TODO: should be implemented using rustc/mir_build/hair machinery
+// TODO: should be implemented using rustc/mir_build/thir machinery
 pub fn is_refutable(cx: &LateContext<'_>, pat: &Pat<'_>) -> bool {
     fn is_enum_variant(cx: &LateContext<'_>, qpath: &QPath<'_>, id: HirId) -> bool {
         matches!(
@@ -1263,8 +1263,8 @@ pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
         ty::Tuple(ref substs) => substs.types().any(|ty| is_must_use_ty(cx, ty)),
         ty::Opaque(ref def_id, _) => {
             for (predicate, _) in cx.tcx.predicates_of(*def_id).predicates {
-                if let ty::PredicateKind::Trait(ref poly_trait_predicate, _) = predicate.kind() {
-                    if must_use_attr(&cx.tcx.get_attrs(poly_trait_predicate.skip_binder().trait_ref.def_id)).is_some() {
+                if let ty::PredicateAtom::Trait(trait_predicate, _) = predicate.skip_binders() {
+                    if must_use_attr(&cx.tcx.get_attrs(trait_predicate.trait_ref.def_id)).is_some() {
                         return true;
                     }
                 }
@@ -1346,7 +1346,7 @@ pub fn fn_has_unsatisfiable_preds(cx: &LateContext<'_>, did: DefId) -> bool {
             .predicates
             .iter()
             .filter_map(|(p, _)| if p.is_global() { Some(*p) } else { None });
-    !traits::normalize_and_test_predicates(
+    traits::impossible_predicates(
         cx.tcx,
         traits::elaborate_predicates(cx.tcx, predicates)
             .map(|o| o.predicate)

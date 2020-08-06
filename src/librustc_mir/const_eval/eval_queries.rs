@@ -154,7 +154,7 @@ pub(super) fn op_to_const<'tcx>(
                 ScalarMaybeUninit::Uninit => to_const_value(op.assert_mem_place(ecx)),
             },
             Immediate::ScalarPair(a, b) => {
-                let (data, start) = match a.not_undef().unwrap() {
+                let (data, start) = match a.check_init().unwrap() {
                     Scalar::Ptr(ptr) => {
                         (ecx.tcx.global_alloc(ptr.alloc_id).unwrap_memory(), ptr.offset.bytes())
                     }
@@ -240,7 +240,7 @@ pub fn const_eval_validated_provider<'tcx>(
     // We call `const_eval` for zero arg intrinsics, too, in order to cache their value.
     // Catch such calls and evaluate them instead of trying to load a constant's MIR.
     if let ty::InstanceDef::Intrinsic(def_id) = key.value.instance.def {
-        let ty = key.value.instance.ty_env(tcx, key.param_env);
+        let ty = key.value.instance.ty(tcx, key.param_env);
         let substs = match ty.kind {
             ty::FnDef(_, substs) => substs,
             _ => bug!("intrinsic with type {:?}", ty),

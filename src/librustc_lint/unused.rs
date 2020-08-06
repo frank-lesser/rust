@@ -146,11 +146,11 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                 ty::Opaque(def, _) => {
                     let mut has_emitted = false;
                     for (predicate, _) in cx.tcx.predicates_of(def).predicates {
-                        if let ty::PredicateKind::Trait(ref poly_trait_predicate, _) =
-                            predicate.kind()
+                        // We only look at the `DefId`, so it is safe to skip the binder here.
+                        if let ty::PredicateAtom::Trait(ref poly_trait_predicate, _) =
+                            predicate.skip_binders()
                         {
-                            let trait_ref = poly_trait_predicate.skip_binder().trait_ref;
-                            let def_id = trait_ref.def_id;
+                            let def_id = poly_trait_predicate.trait_ref.def_id;
                             let descr_pre =
                                 &format!("{}implementer{} of ", descr_pre, plural_suffix,);
                             if check_must_use_def(cx, def_id, span, descr_pre, descr_post) {
@@ -203,6 +203,28 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                     // Otherwise, we don't lint, to avoid false positives.
                     _ => false,
                 },
+                ty::Closure(..) => {
+                    cx.struct_span_lint(UNUSED_MUST_USE, span, |lint| {
+                        let mut err = lint.build(&format!(
+                            "unused {}closure{}{} that must be used",
+                            descr_pre, plural_suffix, descr_post,
+                        ));
+                        err.note("closures are lazy and do nothing unless called");
+                        err.emit();
+                    });
+                    true
+                }
+                ty::Generator(..) => {
+                    cx.struct_span_lint(UNUSED_MUST_USE, span, |lint| {
+                        let mut err = lint.build(&format!(
+                            "unused {}generator{}{} that must be used",
+                            descr_pre, plural_suffix, descr_post,
+                        ));
+                        err.note("generators are lazy and do nothing unless resumed");
+                        err.emit();
+                    });
+                    true
+                }
                 _ => false,
             }
         }
@@ -253,10 +275,26 @@ declare_lint_pass!(PathStatements => [PATH_STATEMENTS]);
 
 impl<'tcx> LateLintPass<'tcx> for PathStatements {
     fn check_stmt(&mut self, cx: &LateContext<'_>, s: &hir::Stmt<'_>) {
-        if let hir::StmtKind::Semi(ref expr) = s.kind {
+        if let hir::StmtKind::Semi(expr) = s.kind {
             if let hir::ExprKind::Path(_) = expr.kind {
                 cx.struct_span_lint(PATH_STATEMENTS, s.span, |lint| {
-                    lint.build("path statement with no effect").emit()
+                    let ty = cx.typeck_results().expr_ty(expr);
+                    if ty.needs_drop(cx.tcx, cx.param_env) {
+                        let mut lint = lint.build("path statement drops value");
+                        if let Ok(snippet) = cx.sess().source_map().span_to_snippet(expr.span) {
+                            lint.span_suggestion(
+                                s.span,
+                                "use `drop` to clarify the intent",
+                                format!("drop({});", snippet),
+                                Applicability::MachineApplicable,
+                            );
+                        } else {
+                            lint.span_help(s.span, "use `drop` to clarify the intent");
+                        }
+                        lint.emit()
+                    } else {
+                        lint.build("path statement with no effect").emit()
+                    }
                 });
             }
         }
@@ -400,7 +438,7 @@ trait UnusedDelimLint {
         lhs_needs_parens
             || (followed_by_block
                 && match inner.kind {
-                    ExprKind::Ret(_) | ExprKind::Break(..) => true,
+                    ExprKind::Ret(_) | ExprKind::Break(..) | ExprKind::Yield(..) => true,
                     _ => parser::contains_exterior_struct_lit(&inner),
                 })
     }
@@ -498,7 +536,10 @@ trait UnusedDelimLint {
                 (cond, UnusedDelimsCtx::IfCond, true, Some(left), Some(right))
             }
 
-            While(ref cond, ref block, ..) => {
+            // Do not lint `unused_braces` in `while let` expressions.
+            While(ref cond, ref block, ..)
+                if !matches!(cond.kind, Let(_, _)) || Self::LINT_EXPR_IN_PATTERN_MATCHING_CTX =>
+            {
                 let left = e.span.lo() + rustc_span::BytePos(5);
                 let right = block.span.lo();
                 (cond, UnusedDelimsCtx::WhileCond, true, Some(left), Some(right))
